@@ -60,7 +60,7 @@ RAW_DAILY_SCHEMA = TableSchema(
             dtype="str",
             required=True,
             nullable=False,
-            fmt="YYYYMMDD",
+            fmt="%Y%m%d",
             description="As-of date.",
         ),
         ColumnSchema(
@@ -122,7 +122,7 @@ RAW_5MIN_SCHEMA = TableSchema(
             dtype="str",
             required=True,
             nullable=False,
-            fmt="YYYYMMDD",
+            fmt="%Y%m%d",
             description="As-of date.",
         ),
         ColumnSchema(
@@ -130,7 +130,7 @@ RAW_5MIN_SCHEMA = TableSchema(
             dtype="str",
             required=True,
             nullable=False,
-            fmt="HH:mm:ss",
+            fmt="%H:%M:%S",
             description="The specific time of trade.",
         ),
         ColumnSchema(
@@ -186,7 +186,7 @@ RAW_MONEYFLOW_SCHEMA = TableSchema(
             dtype="str",
             required=True,
             nullable=False,
-            fmt="YYYYMMDD",
+            fmt="%Y%m%d",
             description="As-of date.",
         ),
         ColumnSchema(name="buy_sm_vol", dtype="float", description="Volume of small buying orders.", unit="volume"),
@@ -230,7 +230,7 @@ RAW_LIMIT_SCHEMA = TableSchema(
             dtype="str",
             required=True,
             nullable=False,
-            fmt="YYYYMMDD",
+            fmt="%Y%m%d",
             description="As-of date.",
         ),
         ColumnSchema(name="up_limit", dtype="float", description="The upper limit of price that day.", unit="price"),
@@ -258,7 +258,7 @@ RAW_ST_SCHEMA = TableSchema(
             dtype="str",
             required=True,
             nullable=False,
-            fmt="YYYYMMDD",
+            fmt="%Y%m%d",
             description="As-of date.",
         ),
         ColumnSchema(
@@ -291,7 +291,7 @@ RAW_SUSPEND_SCHEMA = TableSchema(
             dtype="str",
             required=True,
             nullable=False,
-            fmt="YYYYMMDD",
+            fmt="%Y%m%d",
             description="As-of date.",
         ),
         ColumnSchema(
