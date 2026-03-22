@@ -1,5 +1,8 @@
 from pathlib import Path
 
+strict = True
+debug = True
+
 base_dir = Path(__file__).resolve().parent.parent
 
 data_dir = base_dir / 'data'

@@ -1,45 +1,61 @@
-import polars as pl
-from src.data.schemas.raw import *
 import warnings
+import polars as pl
+
+import config.conf as conf
+from src.data.schemas.raw import TableSchema
 
 
-def validate_required_columns(df: pl.DataFrame, schema: TableSchema):
+def _validate_required_columns(df: pl.DataFrame, schema: TableSchema):
     missing = [c for c in schema.required_columns if c not in df.columns]
     if missing:
         raise ValueError(f'Missing columns: {", ".join(missing)}')
 
 
-def validate_extra_columns(df: pl.DataFrame, schema: TableSchema):
-    extra = set(df.columns) - set(schema.required_columns)
+def _validate_extra_columns(df: pl.DataFrame, schema: TableSchema):
+    extra = set(df.columns) - set(schema.column_names)
     if extra:
-        warnings.warn(f'Extra columns: {", ".join(extra)}')
+        if conf.debug:
+            raise ValueError(f'Extra columns: {", ".join(extra)}')
+        else:
+            warnings.warn(f'Extra columns: {", ".join(extra)}')
 
 
-def validate_date_format(df: pl.DataFrame, date_schema: ColumnSchema):
-    check_df = df.with_columns(
-        is_real_date=pl.col("trade_date").str.to_date(date_schema.fmt, strict=False).is_not_null()
+def _validate_data_types(df: pl.DataFrame, schema: TableSchema):
+    if not df.schema.items() <= schema.column_names_and_types.items():
+        diff = df.schema.items() - schema.column_names_and_types.items()
+        raise ValueError(f'Schema mismatch: {", ".join(diff)}')
+
+
+def _validate_primary_key(df: pl.DataFrame, schema: TableSchema):
+    if df.is_empty():
+        return
+
+    key_cols = list(schema.primary_key)
+    if not key_cols:
+        return
+
+    missing = [col for col in key_cols if col not in df.columns]
+    if missing:
+        raise ValueError(
+            f"{schema.name}: missing primary key columns for validation: {missing}"
+        )
+
+    duplicated = (
+        df.group_by(key_cols)
+        .len()
+        .filter(pl.col("len") > 1)
     )
 
-    if not check_df['is_real_date'].any():
-        bad_data = df.filter(
-            pl.col("trade_date").str.to_date(date_schema.fmt, strict=False).is_null()
+    if duplicated.height > 0:
+        sample = duplicated.head(10).to_dicts()
+        raise ValueError(
+            f"{schema.name}: duplicated primary key rows found for key columns "
+            f"{key_cols}. Sample duplicates: {sample}"
         )
-        raise ValueError(f'Invalid date format: {bad_data}')
-
-
-def validate_time_format(df: pl.DataFrame, time_schema: ColumnSchema):
-    check_df = df.with_columns(
-        is_real_time=pl.col("time").str.to_time(time_schema.fmt, strict=False)
-    )
-
-    if not check_df['is_real_time'].any():
-        bad_data = df.filter(
-            pl.col("time").str.to_time(time_schema.fmt, strict=False).is_null()
-        )
-        raise ValueError(f'Invalid time format: {bad_data}')
 
 
 def validate_table(df: pl.DataFrame, schema: TableSchema):
-    validate_required_columns(df, schema)
-    validate_extra_columns(df, schema)
-    validate_date_format(df, schema.get_column("trade_date"))
+    _validate_required_columns(df, schema)
+    _validate_extra_columns(df, schema)
+    _validate_primary_key(df, schema)
+    _validate_data_types(df, schema)

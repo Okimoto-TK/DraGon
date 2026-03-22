@@ -13,13 +13,13 @@ def parse_calendar(df: pl.DataFrame, start_date: str | None = None, end_date: st
         )
 
     calendar = (
-        df.filter(pl.col("is_open") == True)
+        df.filter(pl.col("is_open") is True)
         .select("trade_date")
         .sort("trade_date")
     )["trade_date"].to_list()
     return calendar
 
 
-def partition_by(df: pl.DataFrame, by: str = "date") -> Dict[Tuple, pl.DataFrame]:
+def partition_by(df: pl.DataFrame, by: str = "trade_date") -> Dict[Tuple, pl.DataFrame]:
     groups = df.partition_by(by=by, as_dict=True)
     return groups

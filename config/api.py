@@ -9,6 +9,7 @@ class MairuiConfig:
     licence: str = ""
     timeout: int = 2
     max_retries: int = 5
+    time_format: str = "%y-%m-%d %H:%M:%S"
 
 
 @dataclass(frozen=True)
