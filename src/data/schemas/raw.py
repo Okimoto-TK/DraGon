@@ -41,6 +41,31 @@ class TableSchema:
         raise KeyError(f"{name!r} not found in schema {self.name}")
 
 
+CALENDAR_SCHEMA = TableSchema(
+    name="calendar",
+    layer="raw",
+    description="Trade Calendar",
+    primary_key=("trade_date",),
+    partition_by=("trade_date",),
+    columns=(
+        ColumnSchema(
+            name="trade_date",
+            dtype="str",
+            required=True,
+            nullable=False,
+            description="As-of date.",
+        ),
+        ColumnSchema(
+            name="is_open",
+            dtype="bool",
+            required=True,
+            nullable=False,
+            description="Whether the market is open or not.",
+        ),
+    )
+)
+
+
 RAW_DAILY_SCHEMA = TableSchema(
     name="raw_daily",
     layer="raw",

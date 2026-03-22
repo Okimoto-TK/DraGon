@@ -7,20 +7,14 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3 import Retry
 from tqdm import tqdm
+from typing import Dict, Tuple
 
 from config.api import MairuiConfig
 from src.data.providers.base import RawProvider
 from src.data.schemas.raw import RAW_5MIN_SCHEMA
-from src.data.validators.raw import _validate, _validate_time_format
-
-FIELD_MAP_5MIN = {
-    "t": "trade_time",
-    "o": "open",
-    "h": "high",
-    "l": "low",
-    "c": "close",
-    "v": "volume",
-}
+from src.data.validators.raw import validate_table, validate_time_format
+from src.data.providers.api.mapping import FIELD_MAP_5MIN
+from src.data.utils.raw import partition_by
 
 
 class MairuiApi(RawProvider):
@@ -60,7 +54,7 @@ class MairuiApi(RawProvider):
         start_date: str | None = None,
         end_date: str | None = None,
         codes: Sequence[str] | None = None,
-    ) -> pl.DataFrame:
+    ) -> Dict[Tuple, pl.DataFrame]:
         self._validate_query_args(trade_date=trade_date, start_date=start_date, end_date=end_date, codes=codes)
         session = self._get_session()
         results = []
@@ -85,6 +79,6 @@ class MairuiApi(RawProvider):
             )
             results.append(result)
         df = pl.concat(results)
-        _validate(df, RAW_5MIN_SCHEMA)
-        _validate_time_format(df, RAW_5MIN_SCHEMA.get_column("time"))
-        return df
+        validate_table(df, RAW_5MIN_SCHEMA)
+        validate_time_format(df, RAW_5MIN_SCHEMA.get_column("time"))
+        return partition_by(df, by="date")
