@@ -15,6 +15,6 @@ raw = SimpleNamespace(**{
     "r5min_dir": raw_dir / '5min',
     "moneyflow_dir": raw_dir / 'moneyflow',
     "limit_dir": raw_dir / 'limit',
-    "st_dir": base_dir / 'st',
-    "suspend_dir": base_dir / 'suspend',
+    "st_dir": raw_dir / 'st',
+    "suspend_dir": raw_dir / 'suspend',
 })

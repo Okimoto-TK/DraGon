@@ -7,7 +7,7 @@ from config.conf import log_dir
 
 
 def vlog(src: str, msg: str, level: str = "INFO"):
-    if not conf.debug:
+    if not conf.debug and level is "INFO":
         return
 
     logger = logging.getLogger("vlog")

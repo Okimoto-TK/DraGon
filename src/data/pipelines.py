@@ -32,7 +32,6 @@ class RawPipeline:
 
     @staticmethod
     def _validate_date(
-            self,
             reader: Callable,
             path: Path,
             schema: TableSchema,
