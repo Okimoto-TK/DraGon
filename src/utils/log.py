@@ -3,6 +3,7 @@ import os
 from datetime import datetime
 
 import config.conf as conf
+from config.conf import log_dir
 
 
 def vlog(src: str, msg: str, level: str = "INFO"):
@@ -13,7 +14,7 @@ def vlog(src: str, msg: str, level: str = "INFO"):
 
     if not logger.handlers:
         logger.setLevel(logging.INFO)
-        os.makedirs("log", exist_ok=True)
+        os.makedirs(log_dir, exist_ok=True)
 
         fmt = logging.Formatter('%(asctime)s | %(levelname)-5s | %(message)s', '%Y-%m-%d %H:%M:%S')
 
@@ -21,7 +22,7 @@ def vlog(src: str, msg: str, level: str = "INFO"):
         sh.setFormatter(fmt)
         logger.addHandler(sh)
 
-        log_file = os.path.join("log", f"{datetime.now().strftime('%Y-%m-%d')}.log")
+        log_file = os.path.join(log_dir, f"{datetime.now().strftime('%Y-%m-%d')}.log")
         fh = logging.FileHandler(log_file, encoding='utf-8')
         fh.setFormatter(fmt)
         logger.addHandler(fh)

@@ -15,18 +15,48 @@ from src.utils.log import vlog
 src = "Storage"
 
 
-def read_parquet(parquet_path: Path, table_schema: TableSchema) -> pl.DataFrame:
-    vlog(src, f"Reading {parquet_path}...")
+def read_parquet_schema(parquet_path: Path, desc: str = "") -> pl.DataFrame:
+    vlog(src, f"Reading {desc} schema from {parquet_path}...")
 
-    df = pl.read_parquet(parquet_path)
-    validate_table(df, table_schema)
+    _schema = pl.read_parquet_schema(parquet_path)
+    df = pl.DataFrame(schema=_schema)
 
-    vlog(src, f"Read {parquet_path} done.")
+    vlog(src, f"Reading {desc} schema done.")
     return df
 
 
-def read_parquets(dir_path: Path, table_schema: TableSchema, desc: str = "") -> pl.DataFrame:
-    vlog(src, f"Reading {desc} .parquet under {dir_path}...")
+def read_parquets(dir_path: Path, desc: str = "") -> pl.DataFrame:
+    vlog(src, f"Reading {desc} schema from {dir_path}...")
+
+    files = glob("*.parquet", root_dir=dir_path, recursive=False)
+    results = []
+
+    for file in tqdm(files, desc=f"Reading {desc}:", disable=conf.debug):
+        vlog(src, f"Reading {file}...")
+
+        file_path = dir_path / file
+        _schema = pl.read_parquet_schema(file_path)
+        _df = pl.DataFrame(schema=_schema)
+        results.append(_df)
+
+    df = pl.concat(results)
+
+    vlog(src, f"Reading {desc} schema done.")
+    return df
+
+
+def read_parquet(parquet_path: Path, schema: TableSchema, desc: str = "") -> pl.DataFrame:
+    vlog(src, f"Reading {desc} from {parquet_path}...")
+
+    df = pl.read_parquet(parquet_path)
+    validate_table(df, schema)
+
+    vlog(src, f"Reading {desc} done.")
+    return df
+
+
+def read_parquets(dir_path: Path, schema: TableSchema, desc: str = "") -> pl.DataFrame:
+    vlog(src, f"Reading {desc} from {dir_path}...")
 
     files = glob("*.parquet", root_dir=dir_path, recursive=False)
     results = []
@@ -39,25 +69,25 @@ def read_parquets(dir_path: Path, table_schema: TableSchema, desc: str = "") -> 
         results.append(_df)
 
     df = pl.concat(results)
-    validate_table(df, table_schema)
+    validate_table(df, schema)
 
-    vlog(src, f"Read {desc} done.")
+    vlog(src, f"Reading {desc} done.")
     return df
 
 
-def write_parquet(df: pl.DataFrame, parquet_path: Path, table_schema: TableSchema):
-    vlog(src, f"Writing {parquet_path}...")
+def write_parquet(df: pl.DataFrame, parquet_path: Path, schema: TableSchema, desc: str = ""):
+    vlog(src, f"Writing {desc} to {parquet_path}...")
 
-    validate_table(df, table_schema)
+    validate_table(df, schema)
     df.write_parquet(parquet_path)
 
-    vlog(src, f"Writing {parquet_path} done.")
+    vlog(src, f"Writing {desc} done.")
 
 
-def write_by_date(df: pl.DataFrame, dir_path: Path, table_schema: TableSchema, desc: str = ""):
-    vlog(src, f"Writing {desc} .parquet under {dir_path}...")
+def write_by_date(df: pl.DataFrame, dir_path: Path, schema: TableSchema, desc: str = ""):
+    vlog(src, f"Writing {desc} to {dir_path}...")
 
-    validate_table(df, table_schema)
+    validate_table(df, schema)
     results = partition_by(df, "trade_date")
     for (date_val, ), _df in tqdm(results.items(), desc=f"Writing {desc}:", disable=conf.debug):
         vlog(src, f"Writing {date_val}...")

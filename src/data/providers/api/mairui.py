@@ -11,10 +11,11 @@ from tqdm import tqdm
 
 import config.conf as conf
 from config.api import MairuiConfig
-from src.data.providers.base import RawProvider, validate_query_args
+from src.data.providers.base import RawProvider
 from src.data.schemas.raw import RAW_5MIN_SCHEMA
 from src.data.validators.raw import validate_table
-from src.data.providers.api.mapping import FIELD_MAP_5MIN
+from src.data.providers.api.registry import FIELD_MAP_5MIN
+from src.data.types import Query
 
 
 class MairuiApi(RawProvider):
@@ -61,52 +62,41 @@ class MairuiApi(RawProvider):
 
     def get_calendar(
             self,
-            trade_date: str | None = None,
-            start_date: str | None = None,
-            end_date: str | None = None,
-            codes: Sequence[str] | None = None,
+            query: Query,
     ) -> None:
         self._raise_not_implemented(inspect.currentframe().f_code.co_name)
 
     def get_daily(
-        self,
-        trade_date: str | None = None,
-        start_date: str | None = None,
-        end_date: str | None = None,
-        codes: Sequence[str] | None = None,
+            self,
+            query: Query,
     ) -> None:
         self._raise_not_implemented(inspect.currentframe().f_code.co_name)
 
     def get_5min(
-        self,
-        trade_date: str | None = None,
-        start_date: str | None = None,
-        end_date: str | None = None,
-        codes: Sequence[str] | None = None,
+            self,
+            query: Query,
     ) -> pl.DataFrame:
-        validate_query_args(trade_date=trade_date, start_date=start_date, end_date=end_date, codes=codes)
-
-        self.vlog(f"Fetching 5min data...")
+        self.vlog(f"Fetching {query.desc} data...")
 
         results = []
-        for code in tqdm(codes, desc="Fetching 5min:", disable=conf.debug):
+        for code in tqdm(query.codes, desc=f"Fetching {query.desc}:", disable=conf.debug):
 
-            if trade_date is not None:
+            if query.trade_date is not None:
                 self.vlog(f"trade_date exists, asof-date=trade_date.")
 
                 _df = pl.DataFrame(self._request_json(
                     session=self.session,
                     code=code,
-                    start_date=trade_date,
-                    end_date=trade_date
+                    start_date=query.trade_date,
+                    end_date=query.trade_date
                 ))
             else:
                 self.vlog(f"No trade_date provided, using start/end_date as default.")
                 _df = pl.DataFrame(self._request_json(
                     session=self.session,
                     code=code,
-                    start_date=start_date,
-                    end_date=end_date
+                    start_date=query.start_date,
+                    end_date=query.end_date
                 ))
             _df = _df.rename(FIELD_MAP_5MIN).with_columns(
                 code=pl.lit(code)
@@ -114,7 +104,7 @@ class MairuiApi(RawProvider):
             results.append(_df)
 
         if len(results) == 0:
-            self.vlog(f"No data received, building empty dataframe...", level="Warning")
+            self.vlog(f"No data received, building empty dataframe...", level="WARNING")
 
             df = pl.DataFrame(schema=RAW_5MIN_SCHEMA.column_names_and_types)
         else:
@@ -125,32 +115,28 @@ class MairuiApi(RawProvider):
 
         validate_table(df, RAW_5MIN_SCHEMA)
 
+        if query.codes is not None:
+            df = df.with_columns(
+                pl.col("code").is_in(query.codes)
+            )
+
         self.vlog(f"Done, exiting.")
         return df
 
     def get_moneyflow(
-        self,
-        trade_date: str | None = None,
-        start_date: str | None = None,
-        end_date: str | None = None,
-        codes: Sequence[str] | None = None,
+            self,
+            query: Query
     ) -> None:
         self._raise_not_implemented(inspect.currentframe().f_code.co_name)
 
     def get_st(
-        self,
-        trade_date: str | None = None,
-        start_date: str | None = None,
-        end_date: str | None = None,
-        codes: Sequence[str] | None = None,
+            self,
+            query: Query,
     ) -> None:
         self._raise_not_implemented(inspect.currentframe().f_code.co_name)
 
     def get_suspend(
-        self,
-        trade_date: str | None = None,
-        start_date: str | None = None,
-        end_date: str | None = None,
-        codes: Sequence[str] | None = None,
+            self,
+            query: Query,
     ) -> None:
         self._raise_not_implemented(inspect.currentframe().f_code.co_name)
