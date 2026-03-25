@@ -1,13 +1,16 @@
+from __future__ import annotations
+
 import logging
 import os
+import sys
 from datetime import datetime
 
-import config.conf as conf
-from config.conf import log_dir
+import config.config as conf
+from config.config import log_dir
 
 
 def vlog(src: str, msg: str, level: str = "INFO"):
-    if not conf.debug and level is "INFO":
+    if not conf.debug and level == "INFO":
         return
 
     logger = logging.getLogger("vlog")
@@ -18,7 +21,7 @@ def vlog(src: str, msg: str, level: str = "INFO"):
 
         fmt = logging.Formatter('%(asctime)s | %(levelname)-5s | %(message)s', '%Y-%m-%d %H:%M:%S')
 
-        sh = logging.StreamHandler()
+        sh = logging.StreamHandler(stream=sys.stdout)
         sh.setFormatter(fmt)
         logger.addHandler(sh)
 

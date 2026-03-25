@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Sequence
-
 import polars as pl
 import requests
 import inspect
@@ -9,13 +7,15 @@ from requests.adapters import HTTPAdapter
 from urllib3 import Retry
 from tqdm import tqdm
 
-import config.conf as conf
+import config.config as conf
 from config.api import MairuiConfig
+from src.data.providers.api.registry import FETCH_FIELD_5MIN
 from src.data.providers.base import RawProvider
 from src.data.schemas.raw import RAW_5MIN_SCHEMA
 from src.data.validators.raw import validate_table
 from src.data.providers.api.registry import FIELD_MAP_5MIN
-from src.data.types import Query
+from src.data.models import Query
+from src.data.utils.raw import align_df
 
 
 class MairuiApi(RawProvider):
@@ -60,46 +60,48 @@ class MairuiApi(RawProvider):
             self.vlog(f"Failed to request JSON for {code}: {e}", level="ERROR")
             raise e
 
+    def get_universe(
+            self,
+            **_kwargs
+    ) -> None:
+        self._raise_not_implemented(inspect.currentframe().f_code.co_name)
+
     def get_calendar(
             self,
-            query: Query,
+            **_kwargs
     ) -> None:
         self._raise_not_implemented(inspect.currentframe().f_code.co_name)
 
     def get_daily(
             self,
-            query: Query,
+            **_kwargs
+    ) -> None:
+        self._raise_not_implemented(inspect.currentframe().f_code.co_name)
+
+    def get_adj_factor(
+            self,
+            **_kwargs
     ) -> None:
         self._raise_not_implemented(inspect.currentframe().f_code.co_name)
 
     def get_5min(
             self,
             query: Query,
+            codes: pl.DataFrame | None = None,
+            calendar: pl.DataFrame | None = None,
     ) -> pl.DataFrame:
         self.vlog(f"Fetching {query.desc} data...")
 
         results = []
-        for code in tqdm(query.codes, desc=f"Fetching {query.desc}:", disable=conf.debug):
-
-            if query.trade_date is not None:
-                self.vlog(f"trade_date exists, asof-date=trade_date.")
-
-                _df = pl.DataFrame(self._request_json(
-                    session=self.session,
-                    code=code,
-                    start_date=query.trade_date,
-                    end_date=query.trade_date
-                ))
-            else:
-                self.vlog(f"No trade_date provided, using start/end_date as default.")
-                _df = pl.DataFrame(self._request_json(
-                    session=self.session,
-                    code=code,
-                    start_date=query.start_date,
-                    end_date=query.end_date
-                ))
+        for code in tqdm(codes.get_column("code").to_list(), desc=f"Fetching {query.desc}:", disable=conf.debug):
+            _df = pl.DataFrame(self._request_json(
+                session=self.session,
+                code=code,
+                start_date=query.start_date,
+                end_date=query.end_date
+            )).select(FETCH_FIELD_5MIN)
             _df = _df.rename(FIELD_MAP_5MIN).with_columns(
-                code=pl.lit(code)
+                code=pl.lit(code, pl.String)
             )
             results.append(_df)
 
@@ -111,32 +113,37 @@ class MairuiApi(RawProvider):
             df = pl.concat(results).with_columns(
                 pl.col("trade_time").str.to_datetime(self.time_format, strict=conf.debug).dt.date().alias("trade_date"),
                 pl.col("trade_time").str.to_datetime(self.time_format, strict=conf.debug).dt.time().alias("time")
-            ).drop("trade_time")
+            ).drop("trade_time").cast(RAW_5MIN_SCHEMA.column_names_and_types)
 
-        validate_table(df, RAW_5MIN_SCHEMA)
-
-        if query.codes is not None:
-            df = df.with_columns(
-                pl.col("code").is_in(query.codes)
+        if codes is not None:
+            df = df.filter(
+                pl.col("code").is_in(codes.get_column("code").to_list())
             )
+        df = align_df(df,
+                      codes=codes,
+                      calendar=calendar,
+                      start_date=query.start_date,
+                      end_date=query.end_date)
+        df = df.sort(["code", "trade_date", "time"])
+        validate_table(df, RAW_5MIN_SCHEMA)
 
         self.vlog(f"Done, exiting.")
         return df
 
     def get_moneyflow(
             self,
-            query: Query
+            **_kwargs
     ) -> None:
         self._raise_not_implemented(inspect.currentframe().f_code.co_name)
 
     def get_st(
             self,
-            query: Query,
+            **_kwargs
     ) -> None:
         self._raise_not_implemented(inspect.currentframe().f_code.co_name)
 
     def get_suspend(
             self,
-            query: Query,
+            **_kwargs
     ) -> None:
         self._raise_not_implemented(inspect.currentframe().f_code.co_name)

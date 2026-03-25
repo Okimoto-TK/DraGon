@@ -1,7 +1,7 @@
 import warnings
 import polars as pl
 
-import config.conf as conf
+import config.config as conf
 from src.data.schemas.raw import TableSchema
 
 
@@ -23,7 +23,18 @@ def _validate_extra_columns(df: pl.DataFrame, schema: TableSchema):
 def _validate_data_types(df: pl.DataFrame, schema: TableSchema):
     if not df.schema.items() <= schema.column_names_and_types.items():
         diff = df.schema.items() - schema.column_names_and_types.items()
-        raise ValueError(f'Schema mismatch: {", ".join(diff)}')
+        for name, dtype in diff:
+            if name in schema.column_names:
+                raise ValueError(f"Wrong dtype: {name} but with type {dtype} which should be {schema.get_column(name).dtype}")
+
+    if "code" in schema.column_names:
+        _df = df.with_columns(
+            code_ok=pl.col("code").str.contains(schema.get_column("code").fmt)
+        )
+        bad_data = _df.filter(~pl.col("code_ok"))
+
+        if not bad_data.is_empty():
+            raise ValueError(f'Code format mismatch: {", ".join(_df.columns)}')
 
 
 def _validate_primary_key(df: pl.DataFrame, schema: TableSchema):

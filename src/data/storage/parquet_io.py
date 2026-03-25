@@ -8,33 +8,33 @@ from glob import glob
 from src.data.schemas.raw import TableSchema
 from src.data.validators.raw import validate_table
 from src.data.utils.raw import partition_by
-import config.conf as conf
+import config.config as conf
 from src.utils.log import vlog
 
 
 src = "Storage"
 
 
-def read_parquet_schema(parquet_path: Path, desc: str = "") -> pl.DataFrame:
-    vlog(src, f"Reading {desc} schema from {parquet_path}...")
+def read_parquet_schema(path: Path, desc: str = "") -> pl.DataFrame:
+    vlog(src, f"Reading {desc} schema from {path}...")
 
-    _schema = pl.read_parquet_schema(parquet_path)
+    _schema = pl.read_parquet_schema(path)
     df = pl.DataFrame(schema=_schema)
 
     vlog(src, f"Reading {desc} schema done.")
     return df
 
 
-def read_parquets(dir_path: Path, desc: str = "") -> pl.DataFrame:
-    vlog(src, f"Reading {desc} schema from {dir_path}...")
+def read_parquets_schema(path: Path, desc: str = "") -> pl.DataFrame:
+    vlog(src, f"Reading {desc} schema from {path}...")
 
-    files = glob("*.parquet", root_dir=dir_path, recursive=False)
+    files = glob("*.parquet", root_dir=path, recursive=False)
     results = []
 
     for file in tqdm(files, desc=f"Reading {desc}:", disable=conf.debug):
         vlog(src, f"Reading {file}...")
 
-        file_path = dir_path / file
+        file_path = path / file
         _schema = pl.read_parquet_schema(file_path)
         _df = pl.DataFrame(schema=_schema)
         results.append(_df)
@@ -45,26 +45,26 @@ def read_parquets(dir_path: Path, desc: str = "") -> pl.DataFrame:
     return df
 
 
-def read_parquet(parquet_path: Path, schema: TableSchema, desc: str = "") -> pl.DataFrame:
-    vlog(src, f"Reading {desc} from {parquet_path}...")
+def read_parquet(path: Path, schema: TableSchema, desc: str = "") -> pl.DataFrame:
+    vlog(src, f"Reading {desc} from {path}...")
 
-    df = pl.read_parquet(parquet_path)
+    df = pl.read_parquet(path)
     validate_table(df, schema)
 
     vlog(src, f"Reading {desc} done.")
     return df
 
 
-def read_parquets(dir_path: Path, schema: TableSchema, desc: str = "") -> pl.DataFrame:
-    vlog(src, f"Reading {desc} from {dir_path}...")
+def read_parquets(path: Path, schema: TableSchema, desc: str = "") -> pl.DataFrame:
+    vlog(src, f"Reading {desc} from {path}...")
 
-    files = glob("*.parquet", root_dir=dir_path, recursive=False)
+    files = glob("*.parquet", root_dir=path, recursive=False)
     results = []
 
     for file in tqdm(files, desc=f"Reading {desc}:", disable=conf.debug):
         vlog(src, f"Reading {file}...")
 
-        file_path = dir_path / file
+        file_path = path / file
         _df = pl.read_parquet(file_path)
         results.append(_df)
 
@@ -75,25 +75,27 @@ def read_parquets(dir_path: Path, schema: TableSchema, desc: str = "") -> pl.Dat
     return df
 
 
-def write_parquet(df: pl.DataFrame, parquet_path: Path, schema: TableSchema, desc: str = ""):
-    vlog(src, f"Writing {desc} to {parquet_path}...")
+def write_parquet(df: pl.DataFrame, path: Path, schema: TableSchema, desc: str = ""):
+    vlog(src, f"Writing {desc} to {path}...")
 
+    path.parent.mkdir(parents=True, exist_ok=True)
     validate_table(df, schema)
-    df.write_parquet(parquet_path)
+    df.write_parquet(path)
 
     vlog(src, f"Writing {desc} done.")
 
 
-def write_by_date(df: pl.DataFrame, dir_path: Path, schema: TableSchema, desc: str = ""):
-    vlog(src, f"Writing {desc} to {dir_path}...")
+def write_parquets(df: pl.DataFrame, path: Path, schema: TableSchema, desc: str = ""):
+    vlog(src, f"Writing {desc} to {path}...")
 
+    path.mkdir(parents=True, exist_ok=True)
     validate_table(df, schema)
     results = partition_by(df, "trade_date")
     for (date_val, ), _df in tqdm(results.items(), desc=f"Writing {desc}:", disable=conf.debug):
         vlog(src, f"Writing {date_val}...")
 
         file_name = f'{date_val}.parquet'
-        file_path = dir_path / file_name
+        file_path = path / file_name
 
         _df.write_parquet(file_path)
 

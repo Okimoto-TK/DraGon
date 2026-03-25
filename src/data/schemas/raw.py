@@ -46,6 +46,39 @@ class TableSchema:
         raise KeyError(f"{name!r} not found in schema {self.name}")
 
 
+UNIVERSE_SCHEMA = TableSchema(
+    name="universe",
+    layer="raw",
+    description="Stock Universe",
+    primary_key=("code", ),
+    partition_by=(),
+    columns=(
+        ColumnSchema(
+            name="code",
+            dtype=pl.String,
+            required=True,
+            nullable=False,
+            fmt=r"^\d{6}\.[A-Z]{2}$",
+            description="The unique code for every stock.",
+        ),
+        ColumnSchema(
+            name="exchange",
+            dtype=pl.String,
+            required=True,
+            nullable=False,
+            description="The exchange of the stock.",
+        ),
+        ColumnSchema(
+            name="status",
+            dtype=pl.String,
+            required=True,
+            nullable=False,
+            description="The status of the stock.",
+        )
+    )
+)
+
+
 CALENDAR_SCHEMA = TableSchema(
     name="calendar",
     layer="raw",
@@ -58,14 +91,8 @@ CALENDAR_SCHEMA = TableSchema(
             dtype=pl.Date,
             required=True,
             nullable=False,
+            fmt="%Y%m%d",
             description="As-of date.",
-        ),
-        ColumnSchema(
-            name="is_open",
-            dtype=pl.Boolean,
-            required=True,
-            nullable=False,
-            description="Whether the market is open or not.",
         ),
     )
 )
@@ -83,6 +110,7 @@ RAW_DAILY_SCHEMA = TableSchema(
             dtype=pl.String,
             required=True,
             nullable=False,
+            fmt=r"^\d{6}\.[A-Z]{2}$",
             description="The unique code for every stock.",
         ),
         ColumnSchema(
@@ -123,15 +151,40 @@ RAW_DAILY_SCHEMA = TableSchema(
             description="The volume, in per share, not hand.",
             unit="share",
         ),
+    ),
+)
+
+RAW_ADJ_FACTOR_SCHEMA = TableSchema(
+    name="raw_adj_factor",
+    layer="raw",
+    description="Raw adj factor table.",
+    primary_key=("code", "trade_date"),
+    partition_by=("trade_date",),
+    columns=(
+        ColumnSchema(
+            name="code",
+            dtype=pl.String,
+            required=True,
+            nullable=False,
+            fmt=r"^\d{6}\.[A-Z]{2}$",
+            description="The unique code for every stock.",
+        ),
+        ColumnSchema(
+            name="trade_date",
+            dtype=pl.Date,
+            required=True,
+            nullable=False,
+            fmt="%Y%m%d",
+            description="As-of date.",
+        ),
         ColumnSchema(
             name="adj_factor",
             dtype=pl.Float64,
             description="Adjustment factor.",
             unit="factor",
         ),
-    ),
+    )
 )
-
 
 RAW_5MIN_SCHEMA = TableSchema(
     name="raw_5min",
@@ -145,6 +198,7 @@ RAW_5MIN_SCHEMA = TableSchema(
             dtype=pl.String,
             required=True,
             nullable=False,
+            fmt=r"^\d{6}\.[A-Z]{2}$",
             description="The unique code for every stock.",
         ),
         ColumnSchema(
@@ -209,6 +263,7 @@ RAW_MONEYFLOW_SCHEMA = TableSchema(
             dtype=pl.String,
             required=True,
             nullable=False,
+            fmt=r"^\d{6}\.[A-Z]{2}$",
             description="The unique code for every stock.",
         ),
         ColumnSchema(
@@ -253,6 +308,7 @@ RAW_LIMIT_SCHEMA = TableSchema(
             dtype=pl.String,
             required=True,
             nullable=False,
+            fmt=r"^\d{6}\.[A-Z]{2}$",
             description="The unique code for every stock.",
         ),
         ColumnSchema(
@@ -281,6 +337,7 @@ RAW_ST_SCHEMA = TableSchema(
             dtype=pl.String,
             required=True,
             nullable=False,
+            fmt=r"^\d{6}\.[A-Z]{2}$",
             description="The unique code for every stock.",
         ),
         ColumnSchema(
@@ -314,6 +371,7 @@ RAW_SUSPEND_SCHEMA = TableSchema(
             dtype=pl.String,
             required=True,
             nullable=False,
+            fmt=r"^\d{6}\.[A-Z]{2}$",
             description="The unique code for every stock.",
         ),
         ColumnSchema(

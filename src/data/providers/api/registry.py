@@ -1,3 +1,9 @@
+FETCH_FIELD_UNIVERSE = [
+    "ts_code",
+    "exchange",
+    "list_status"
+]
+
 FETCH_FIELD_CAL = [
     "cal_date",
     "is_open",
@@ -10,7 +16,22 @@ FETCH_FIELD_DAILY = [
     "high",
     "low",
     "close",
-    "vol"
+    "vol",
+]
+
+FETCH_FIELD_ADJ_FACTOR = [
+    "ts_code",
+    "trade_date",
+    "adj_factor"
+]
+
+FETCH_FIELD_5MIN = [
+    "t",
+    "o",
+    "h",
+    "l",
+    "c",
+    "v"
 ]
 
 FETCH_FIELD_MONEYFLOW = [
@@ -54,12 +75,28 @@ FETCH_FIELD_SUSPEND = [
     "suspend_type"
 ]
 
+FIELD_MAP_UNIVERSE = {
+    "ts_code": "code",
+    "list_status": "status"
+}
+
 FIELD_MAP_CAL = {
     "cal_date": "trade_date",
 }
 
 FIELD_MAP_DAILY = {
-    "ts_code": "code"
+    "ts_code": "code",
+}
+
+FIELD_MAP_ADJ_FACTOR = FIELD_MAP_DAILY
+
+FIELD_MAP_5MIN = {
+    "t": "trade_time",
+    "o": "open",
+    "h": "high",
+    "l": "low",
+    "c": "close",
+    "v": "vol",
 }
 
 FIELD_MAP_MONEYFLOW = FIELD_MAP_DAILY
@@ -69,12 +106,3 @@ FIELD_MAP_ST = FIELD_MAP_DAILY
 FIELD_MAP_LIMIT = FIELD_MAP_DAILY
 
 FIELD_MAP_SUSPEND = FIELD_MAP_DAILY
-
-FIELD_MAP_5MIN = {
-    "t": "trade_time",
-    "o": "open",
-    "h": "high",
-    "l": "low",
-    "c": "close",
-    "v": "volume",
-}
