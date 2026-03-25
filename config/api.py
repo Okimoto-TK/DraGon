@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Literal
 
+
 TushareMode = Literal["official", "private"]
 
 
@@ -10,6 +11,7 @@ class MairuiConfig:
     timeout: int = 2
     max_retries: int = 5
     time_format: str = "%Y-%m-%d %H:%M:%S"
+    semaphore = 2
 
 
 @dataclass(frozen=True)

@@ -13,7 +13,7 @@ DEFAULT_STATUS: Sequence[Status] = ["L", "D"]
 base_dir = Path(__file__).resolve().parent.parent
 log_dir = base_dir / 'logs'
 
-data_dir = base_dir / 'test_data'
+data_dir = base_dir / 'data'
 cache_dir = base_dir / 'cache'
 
 raw_dir = data_dir / 'raw'

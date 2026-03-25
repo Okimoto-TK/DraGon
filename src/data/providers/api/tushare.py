@@ -6,7 +6,7 @@ from tqdm import tqdm
 from typing import Callable, Sequence
 import inspect
 
-import config.config as conf
+import config.config as config
 from config.api import TushareConfig
 from src.data.providers.base import RawProvider
 from src.data.schemas.raw import (
@@ -29,15 +29,15 @@ from src.utils.log import vlog
 
 
 class TushareApi(RawProvider):
-    def __init__(self, config: TushareConfig):
+    def __init__(self, api_config: TushareConfig):
         super().__init__("Tushare")
 
         vlog(self.api, "Creating Tushare Instance...")
 
-        self.token = config.token
-        self.timeout = config.timeout
-        self.mode = config.mode
-        self.http_url = config.http_url
+        self.token = api_config.token
+        self.timeout = api_config.timeout
+        self.mode = api_config.mode
+        self.http_url = api_config.http_url
         self.pro = self._get_pro()
 
     def _get_pro(self):
@@ -91,7 +91,7 @@ class TushareApi(RawProvider):
             self.vlog("Fetching data by date...")
 
             dates = parse_calendar(calendar, start_date=query.start_date, end_date=query.end_date)
-            for date in tqdm(dates, desc=f"Fetching {query.desc}", disable=conf.debug):
+            for date in tqdm(dates, desc=f"Fetching {query.desc}", disable=config.debug):
                 self.vlog(f"Requesting data for {date}...")
 
                 _df = pl.from_pandas(interface(**{

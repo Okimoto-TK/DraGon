@@ -26,6 +26,7 @@ FETCH_FIELD_ADJ_FACTOR = [
 ]
 
 FETCH_FIELD_5MIN = [
+    "code",
     "t",
     "o",
     "h",

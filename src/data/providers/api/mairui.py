@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+import httpx
 import polars as pl
-import requests
 import inspect
-from requests.adapters import HTTPAdapter
-from urllib3 import Retry
-from tqdm import tqdm
+from tenacity import AsyncRetrying, wait_exponential, stop_after_attempt, retry_if_exception_type
+import random
+from tqdm.asyncio import tqdm as tqdm
 
-import config.config as conf
+import config.config as config
 from config.api import MairuiConfig
 from src.data.providers.api.registry import FETCH_FIELD_5MIN
 from src.data.providers.base import RawProvider
@@ -19,30 +20,24 @@ from src.data.utils.raw import align_df
 
 
 class MairuiApi(RawProvider):
-    def __init__(self, config: MairuiConfig):
+    def __init__(self, api_config: MairuiConfig):
         super().__init__("Mairui")
 
         self.vlog(f"Creating Mairui API Instance...")
 
-        self.licence = config.licence
-        self.retry = Retry(
-            total=config.max_retries,
-            status_forcelist=[500, 502, 503, 504],
-            allowed_methods=['HEAD', 'GET', 'OPTIONS'],
-            backoff_factor=1
+        self.licence = api_config.licence
+        self.retry = api_config.max_retries
+        self.time_format = api_config.time_format
+        self.client = httpx.AsyncClient(
+            timeout=api_config.timeout,
+            headers={
+                "Accept-Encoding": "gzip, deflate, br",
+                "User-Agent": "MairuiQuant/1.0"
+            }
         )
-        self.timeout = config.timeout
-        self.time_format = config.time_format
-        self.session = self._get_session()
+        self.semaphore = asyncio.Semaphore(api_config.semaphore)
 
-    def _get_session(self):
-        adapter = HTTPAdapter(max_retries=self.retry)
-        session = requests.Session()
-        session.mount('http://', adapter)
-        session.mount('https://', adapter)
-        return session
-
-    def _request_json(self, session: requests.Session, code: str, start_date: str, end_date: str):
+    async def _request(self, code: str, start_date: str, end_date: str) -> pl.DataFrame:
         self.vlog(f"Requesting JSON for {code}...")
 
         url = f'https://api.mairuiapi.com/hsstock/history/{code}/5/n/{self.licence}'
@@ -51,14 +46,37 @@ class MairuiApi(RawProvider):
             "et": end_date
         }
         try:
-            response = session.get(url, params=params, timeout=self.timeout)
-            response.raise_for_status()
-            result = response.json()
-
-            return result
+            async for attempt in AsyncRetrying(
+                    stop=stop_after_attempt(self.retry),
+                    wait=wait_exponential(multiplier=1, min=2, max=10),
+                    reraise=True
+            ):
+                with attempt:
+                    response = await self.client.get(url=url, params=params)
+                    response.raise_for_status()
+                    result = response.json()
+                    df = pl.from_dicts(result).with_columns(
+                        code=pl.lit(code)
+                    )
+                    print(df)
+                    return df
         except Exception as e:
             self.vlog(f"Failed to request JSON for {code}: {e}", level="ERROR")
             raise e
+
+    async def _controller(self, code, start_date: str, end_date: str):
+        async with self.semaphore:
+            await asyncio.sleep(random.uniform(0.1, 0.3))
+            return await self._request(code=code, start_date=start_date, end_date=end_date)
+
+    async def _async_runner(self, query: Query, codes: pl.DataFrame):
+        tasks = [self._controller(code, query.start_date, query.end_date) for code in codes.get_column("code").to_list()]
+        results = await tqdm.gather(
+            *tasks,
+            desc=f"Fetching {query.desc}...",
+            disable=config.debug
+        )
+        return results
 
     def get_universe(
             self,
@@ -92,27 +110,21 @@ class MairuiApi(RawProvider):
     ) -> pl.DataFrame:
         self.vlog(f"Fetching {query.desc} data...")
 
-        results = []
-        for code in tqdm(codes.get_column("code").to_list(), desc=f"Fetching {query.desc}:", disable=conf.debug):
-            _df = pl.DataFrame(self._request_json(
-                session=self.session,
-                code=code,
-                start_date=query.start_date,
-                end_date=query.end_date
-            )).select(FETCH_FIELD_5MIN)
-            _df = _df.rename(FIELD_MAP_5MIN).with_columns(
-                code=pl.lit(code, pl.String)
-            )
-            results.append(_df)
+        results = asyncio.run(self._async_runner(query, codes))
+        results = [r for r in results if not r.is_empty()]
 
-        if len(results) == 0:
+        df = (pl.concat(results)
+              .select(FETCH_FIELD_5MIN)
+              .rename(FIELD_MAP_5MIN))
+
+        if df.is_empty():
             self.vlog(f"No data received, building empty dataframe...", level="WARNING")
 
             df = pl.DataFrame(schema=RAW_5MIN_SCHEMA.column_names_and_types)
         else:
-            df = pl.concat(results).with_columns(
-                pl.col("trade_time").str.to_datetime(self.time_format, strict=conf.debug).dt.date().alias("trade_date"),
-                pl.col("trade_time").str.to_datetime(self.time_format, strict=conf.debug).dt.time().alias("time")
+            df = df.with_columns(
+                pl.col("trade_time").str.to_datetime(self.time_format, strict=config.debug).dt.date().alias("trade_date"),
+                pl.col("trade_time").str.to_datetime(self.time_format, strict=config.debug).dt.time().alias("time")
             ).drop("trade_time").cast(RAW_5MIN_SCHEMA.column_names_and_types)
 
         if codes is not None:

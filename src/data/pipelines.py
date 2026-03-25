@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import datetime
 from typing import Callable, Literal
 from pathlib import Path
 import polars as pl
@@ -65,7 +64,7 @@ class RawPipeline:
             desc: str,
             **_kwargs
     ):
-        df = reader(path=path, desc=desc)
+        df = reader(path=path, schema=schema, desc=desc)
         validate_table(df=df, schema=schema)
 
     def _code_filter(
@@ -95,11 +94,9 @@ class RawPipeline:
             self._fetch_data(query=query, **vars(params))
 
         if "validate" in action:
-            self._validate_date(**PARAM_MAP[query.desc])
+            params = PARAM_MAP[query.desc]
+            self._validate_date(**vars(params))
 
         if "load" in action:
             params = PARAM_MAP[query.desc]
             return self._load_data(query=query, **vars(params))
-
-
-

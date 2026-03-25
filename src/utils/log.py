@@ -5,12 +5,12 @@ import os
 import sys
 from datetime import datetime
 
-import config.config as conf
+import config.config as config
 from config.config import log_dir
 
 
 def vlog(src: str, msg: str, level: str = "INFO"):
-    if not conf.debug and level == "INFO":
+    if not config.debug and level == "INFO":
         return
 
     logger = logging.getLogger("vlog")

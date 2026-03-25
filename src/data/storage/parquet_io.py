@@ -8,7 +8,7 @@ from glob import glob
 from src.data.schemas.raw import TableSchema
 from src.data.validators.raw import validate_table
 from src.data.utils.raw import partition_by
-import config.config as conf
+import config.config as config
 from src.utils.log import vlog
 
 
@@ -31,7 +31,7 @@ def read_parquets_schema(path: Path, desc: str = "") -> pl.DataFrame:
     files = glob("*.parquet", root_dir=path, recursive=False)
     results = []
 
-    for file in tqdm(files, desc=f"Reading {desc}:", disable=conf.debug):
+    for file in tqdm(files, desc=f"Reading {desc}:", disable=config.debug):
         vlog(src, f"Reading {file}...")
 
         file_path = path / file
@@ -61,7 +61,7 @@ def read_parquets(path: Path, schema: TableSchema, desc: str = "") -> pl.DataFra
     files = glob("*.parquet", root_dir=path, recursive=False)
     results = []
 
-    for file in tqdm(files, desc=f"Reading {desc}:", disable=conf.debug):
+    for file in tqdm(files, desc=f"Reading {desc}:", disable=config.debug):
         vlog(src, f"Reading {file}...")
 
         file_path = path / file
@@ -91,7 +91,7 @@ def write_parquets(df: pl.DataFrame, path: Path, schema: TableSchema, desc: str 
     path.mkdir(parents=True, exist_ok=True)
     validate_table(df, schema)
     results = partition_by(df, "trade_date")
-    for (date_val, ), _df in tqdm(results.items(), desc=f"Writing {desc}:", disable=conf.debug):
+    for (date_val, ), _df in tqdm(results.items(), desc=f"Writing {desc}:", disable=config.debug):
         vlog(src, f"Writing {date_val}...")
 
         file_name = f'{date_val}.parquet'

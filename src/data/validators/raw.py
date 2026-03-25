@@ -1,7 +1,7 @@
 import warnings
 import polars as pl
 
-import config.config as conf
+import config.config as config
 from src.data.schemas.raw import TableSchema
 
 
@@ -14,7 +14,7 @@ def _validate_required_columns(df: pl.DataFrame, schema: TableSchema):
 def _validate_extra_columns(df: pl.DataFrame, schema: TableSchema):
     extra = set(df.columns) - set(schema.column_names)
     if extra:
-        if conf.debug:
+        if config.debug:
             raise ValueError(f'Extra columns: {", ".join(extra)}')
         else:
             warnings.warn(f'Extra columns: {", ".join(extra)}')
