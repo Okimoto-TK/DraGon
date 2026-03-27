@@ -28,10 +28,13 @@ class Query(BaseModel):
 
 
 class Params(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     api: Callable
     provider: Callable
     reader: Callable
     writer: Callable
+    sreader: Callable
     path: Path
     schema: TableSchema
-    desc: Literal["universe", "calendar", "daily", "adj_factor", "5min", "moneyflow", "limit", "st", "suspend"]
+    desc: Literal["universe", "calendar", "daily", "adj_factor", "5min", "moneyflow", "limit", "namechange", "suspend"]

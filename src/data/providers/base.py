@@ -81,12 +81,12 @@ class RawProvider(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def get_st(
+    def get_namechange(
             self,
             query: Query,
     ) -> pl.DataFrame:
         """
-        Return raw ST status data in canonical raw schema.
+        Return raw namechange data in canonical raw schema.
         """
         raise NotImplementedError
 

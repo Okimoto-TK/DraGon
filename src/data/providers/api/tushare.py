@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import polars as pl
 import tushare as ts
 from tqdm import tqdm
@@ -16,7 +17,7 @@ from src.data.schemas.raw import (
     RAW_DAILY_SCHEMA,
     RAW_ADJ_FACTOR_SCHEMA,
     RAW_MONEYFLOW_SCHEMA,
-    RAW_ST_SCHEMA,
+    RAW_NAMECHANGE_SCHEMA,
     RAW_LIMIT_SCHEMA,
     RAW_SUSPEND_SCHEMA,
 )
@@ -70,6 +71,7 @@ class TushareApi(RawProvider):
             query: Query,
             codes: pl.DataFrame | None = None,
             calendar: pl.DataFrame | None = None,
+            query_interval: bool = False,
     ):
         self.vlog(f"Fetching {query.desc}...")
 
@@ -87,6 +89,27 @@ class TushareApi(RawProvider):
             }, fields=fields)).rename(mappings)
 
             results.append(_df)
+        elif query_interval:
+            self.vlog("Fetching data by interval...")
+            df = pl.from_pandas(interface(**{
+                "start_date": query.start_date,
+                "end_date": query.end_date
+            }, fields=fields))
+
+            if df.is_empty():
+                df = pl.DataFrame(schema=schema.column_names_and_types)
+            else:
+                df = df.rename(mappings)
+                if codes is not None:
+                    df = df.filter(
+                        pl.col("code").is_in(codes.get_column("code"))
+                    )
+                df = df.with_columns(
+                    pl.col("trade_date").str.to_date(schema.get_column("trade_date").fmt)
+                )
+            self.vlog(f"{query.start_date} - {query.end_date} received.")
+
+            return df
         else:
             self.vlog("Fetching data by date...")
 
@@ -96,8 +119,12 @@ class TushareApi(RawProvider):
 
                 _df = pl.from_pandas(interface(**{
                     "trade_date": date,
-                }, fields=fields)).rename(mappings)
+                }, fields=fields))
 
+                if _df.is_empty():
+                    _df = pl.DataFrame(schema=schema.column_names_and_types)
+                else:
+                    _df = _df.rename(mappings)
                 self.vlog(f"{date} received.")
 
                 results.append(_df)
@@ -278,35 +305,36 @@ class TushareApi(RawProvider):
         self.vlog(f"{query.desc} fetched.")
         return df
 
-    def get_st(
+    def get_namechange(
             self,
             query: Query,
             codes: pl.DataFrame | None = None,
             calendar: pl.DataFrame | None = None,
     ) -> pl.DataFrame:
-        df = self._get_data(
-            self.pro.stock_st,
-            fields=FETCH_FIELD_ST,
-            schema=RAW_ST_SCHEMA,
-            mappings=FIELD_MAP_ST,
-            query=query,
-            codes=codes,
-            calendar=calendar,
-        ).with_columns(
-            is_st=pl.lit(True)
-        ).join(
-            get_grid(
+        start_year = int(query.start_date[:4])
+        end_year = int(query.end_date[:4])
+        results = []
+        for year in range(start_year, end_year + 1):
+            _query = copy.deepcopy(query)
+            _query.start_date = max(query.start_date, str(year) + "0101")
+            _query.end_date = min(query.end_date, str(year) + "1231")
+            _df = self._get_data(
+                self.pro.namechange,
+                fields=FETCH_FIELD_NAMECHANGE,
+                schema=RAW_NAMECHANGE_SCHEMA,
+                mappings=FIELD_MAP_NAMECHANGE,
+                query=_query,
                 codes=codes,
                 calendar=calendar,
-                start_date=query.start_date,
-                end_date=query.end_date
-            ),
-            on=["code", "trade_date"],
-            how="outer",
-            coalesce=True
-        ).fill_null(False)
-        df = df.sort(["code", "trade_date"])
-        validate_table(df, RAW_ST_SCHEMA)
+                query_interval=True
+            ).sort(["trade_date", "code", "ann_date"]).unique(subset=RAW_NAMECHANGE_SCHEMA.primary_key, keep="last").drop("ann_date")
+            results.append(_df)
+        if len(results) == 0:
+            df = pl.DataFrame(schema=RAW_NAMECHANGE_SCHEMA.column_names_and_types)
+        else:
+            df = pl.concat(results).sort(["trade_date", "code"]).unique()
+        validate_table(df, RAW_NAMECHANGE_SCHEMA)
+
         self.vlog(f"{query.desc} fetched.")
         return df
 
@@ -316,32 +344,41 @@ class TushareApi(RawProvider):
             codes: pl.DataFrame | None = None,
             calendar: pl.DataFrame | None = None,
     ) -> pl.DataFrame:
-        df = self._get_data(
-            self.pro.suspend_d,
-            fields=FETCH_FIELD_SUSPEND,
-            schema=RAW_SUSPEND_SCHEMA,
-            mappings=FIELD_MAP_SUSPEND,
-            query=query,
-            codes=codes,
-            calendar=calendar,
-        )
-
-        df = df.filter(
-            pl.col("suspend_type") == "S"
-        ).drop("suspend_type").with_columns(
-            is_suspend=pl.lit(True)
-        ).join(
-            get_grid(
+        start_year = int(query.start_date[:4])
+        end_year = int(query.end_date[:4])
+        results = []
+        for year in range(start_year, end_year + 1):
+            _query = copy.deepcopy(query)
+            _query.start_date = max(query.start_date, str(year) + "0101")
+            _query.end_date = min(query.end_date, str(year) + "1231")
+            _df = self._get_data(
+                self.pro.suspend_d,
+                fields=FETCH_FIELD_SUSPEND,
+                schema=RAW_SUSPEND_SCHEMA,
+                mappings=FIELD_MAP_SUSPEND,
+                query=_query,
                 codes=codes,
                 calendar=calendar,
-                start_date=query.start_date,
-                end_date=query.end_date
-            ),
-            on=["code", "trade_date"],
-            how="outer",
-            coalesce=True
-        ).fill_null(False)
-        df = df.sort(["code", "trade_date"])
+                query_interval=True
+            )
+            results.append(_df)
+        if len(results) == 0:
+            df = pl.DataFrame(schema=RAW_NAMECHANGE_SCHEMA.column_names_and_types)
+        else:
+            df = (pl.concat(results).sort(["trade_date", "code"])
+                  .filter(pl.col("suspend_type") == "S")
+                  .drop("suspend_type").with_columns(is_suspend=pl.lit(True))
+                  .join(
+                    get_grid(
+                        codes=codes,
+                        calendar=calendar,
+                        start_date=query.start_date,
+                        end_date=query.end_date
+                    ),
+                    on=["code", "trade_date"],
+                    how="outer",
+                    coalesce=True).fill_null(False))
         validate_table(df, RAW_SUSPEND_SCHEMA)
+
         self.vlog(f"{query.desc} fetched.")
         return df

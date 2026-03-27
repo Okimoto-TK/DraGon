@@ -128,12 +128,6 @@ RAW_DAILY_SCHEMA = TableSchema(
             unit="price",
         ),
         ColumnSchema(
-            name="close",
-            dtype=pl.Float64,
-            description="Close price.",
-            unit="price",
-        ),
-        ColumnSchema(
             name="high",
             dtype=pl.Float64,
             description="The highest price occurred that day.",
@@ -143,6 +137,12 @@ RAW_DAILY_SCHEMA = TableSchema(
             name="low",
             dtype=pl.Float64,
             description="The lowest price occurred that day.",
+            unit="price",
+        ),
+        ColumnSchema(
+            name="close",
+            dtype=pl.Float64,
+            description="Close price.",
             unit="price",
         ),
         ColumnSchema(
@@ -224,12 +224,6 @@ RAW_5MIN_SCHEMA = TableSchema(
             unit="price",
         ),
         ColumnSchema(
-            name="close",
-            dtype=pl.Float64,
-            description="Close price.",
-            unit="price",
-        ),
-        ColumnSchema(
             name="high",
             dtype=pl.Float64,
             description="The highest price occurred in that bar.",
@@ -239,6 +233,12 @@ RAW_5MIN_SCHEMA = TableSchema(
             name="low",
             dtype=pl.Float64,
             description="The lowest price occurred in that bar.",
+            unit="price",
+        ),
+        ColumnSchema(
+            name="close",
+            dtype=pl.Float64,
+            description="Close price.",
             unit="price",
         ),
         ColumnSchema(
@@ -325,10 +325,10 @@ RAW_LIMIT_SCHEMA = TableSchema(
 )
 
 
-RAW_ST_SCHEMA = TableSchema(
-    name="raw_st",
+RAW_NAMECHANGE_SCHEMA = TableSchema(
+    name="raw_namechange",
     layer="raw",
-    description="Raw daily ST status table.",
+    description="Raw daily namechange table.",
     primary_key=("code", "trade_date"),
     partition_by=("trade_date",),
     columns=(
@@ -341,22 +341,56 @@ RAW_ST_SCHEMA = TableSchema(
             description="The unique code for every stock.",
         ),
         ColumnSchema(
+            name="name",
+            dtype=pl.String,
+            required=True,
+            nullable=False,
+            description="The name of the stock.",
+        ),
+        ColumnSchema(
             name="trade_date",
             dtype=pl.Date,
             required=True,
             nullable=False,
             fmt="%Y%m%d",
-            description="As-of date.",
-        ),
-        ColumnSchema(
-            name="is_st",
-            dtype=pl.Boolean,
-            required=True,
-            nullable=False,
-            description="Whether the stock is an ST or *ST stock that day.",
+            description="The date begin.",
         ),
     ),
 )
+
+
+# RAW_ST_SCHEMA = TableSchema(
+#     name="raw_st",
+#     layer="raw",
+#     description="Raw daily ST status table.",
+#     primary_key=("code", "trade_date"),
+#     partition_by=("trade_date",),
+#     columns=(
+#         ColumnSchema(
+#             name="code",
+#             dtype=pl.String,
+#             required=True,
+#             nullable=False,
+#             fmt=r"^\d{6}\.[A-Z]{2}$",
+#             description="The unique code for every stock.",
+#         ),
+#         ColumnSchema(
+#             name="trade_date",
+#             dtype=pl.Date,
+#             required=True,
+#             nullable=False,
+#             fmt="%Y%m%d",
+#             description="As-of date.",
+#         ),
+#         ColumnSchema(
+#             name="is_st",
+#             dtype=pl.Boolean,
+#             required=True,
+#             nullable=False,
+#             description="Whether the stock is an ST or *ST stock that day.",
+#         ),
+#     ),
+# )
 
 
 RAW_SUSPEND_SCHEMA = TableSchema(
@@ -398,6 +432,7 @@ RAW_SCHEMAS = {
     RAW_5MIN_SCHEMA.name: RAW_5MIN_SCHEMA,
     RAW_MONEYFLOW_SCHEMA.name: RAW_MONEYFLOW_SCHEMA,
     RAW_LIMIT_SCHEMA.name: RAW_LIMIT_SCHEMA,
-    RAW_ST_SCHEMA.name: RAW_ST_SCHEMA,
+    RAW_NAMECHANGE_SCHEMA.name: RAW_NAMECHANGE_SCHEMA,
+    # RAW_ST_SCHEMA.name: RAW_ST_SCHEMA,
     RAW_SUSPEND_SCHEMA.name: RAW_SUSPEND_SCHEMA,
 }

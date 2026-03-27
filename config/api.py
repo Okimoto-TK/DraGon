@@ -8,10 +8,11 @@ TushareMode = Literal["official", "private"]
 @dataclass(frozen=True)
 class MairuiConfig:
     licence: str = "4A642DD5-3F9D-4EFE-8A68-56919734E95E"
-    timeout: int = 2
-    max_retries: int = 5
+    timeout: int = 3
+    retry_timeout: int = 120
+    max_retries: int = 15
     time_format: str = "%Y-%m-%d %H:%M:%S"
-    semaphore = 2
+    semaphore = 8
 
 
 @dataclass(frozen=True)

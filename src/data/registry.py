@@ -11,7 +11,7 @@ from src.data.schemas.raw import (
     RAW_5MIN_SCHEMA,
     RAW_MONEYFLOW_SCHEMA,
     RAW_LIMIT_SCHEMA,
-    RAW_ST_SCHEMA,
+    RAW_NAMECHANGE_SCHEMA,
     RAW_SUSPEND_SCHEMA
 )
 from src.data.providers.api.mairui import MairuiApi
@@ -26,6 +26,7 @@ PARAM_MAP = {
         provider=TushareApi.get_universe,
         reader=raw_storage.read_parquet,
         writer=raw_storage.write_parquet,
+        sreader=raw_storage.read_parquet_schema,
         path=raw_path.universe_path,
         schema=UNIVERSE_SCHEMA,
         desc="universe",
@@ -35,6 +36,7 @@ PARAM_MAP = {
         provider=TushareApi.get_calendar,
         reader=raw_storage.read_parquet,
         writer=raw_storage.write_parquet,
+        sreader=raw_storage.read_parquet_schema,
         path=raw_path.calendar_path,
         schema=CALENDAR_SCHEMA,
         desc="calendar"
@@ -44,6 +46,7 @@ PARAM_MAP = {
         provider=TushareApi.get_daily,
         reader=raw_storage.read_parquets,
         writer=raw_storage.write_parquets,
+        sreader=raw_storage.read_parquets_schema,
         path=raw_path.daily_dir,
         schema=RAW_DAILY_SCHEMA,
         desc="daily"
@@ -53,6 +56,7 @@ PARAM_MAP = {
         provider=TushareApi.get_adj_factor,
         reader=raw_storage.read_parquets,
         writer=raw_storage.write_parquets,
+        sreader=raw_storage.read_parquets_schema,
         path=raw_path.adj_factor_dir,
         schema=RAW_ADJ_FACTOR_SCHEMA,
         desc="adj_factor"
@@ -62,6 +66,7 @@ PARAM_MAP = {
         provider=MairuiApi.get_5min,
         reader=raw_storage.read_parquets,
         writer=raw_storage.write_parquets,
+        sreader=raw_storage.read_parquets_schema,
         path=raw_path.r5min_dir,
         schema=RAW_5MIN_SCHEMA,
         desc="5min"
@@ -71,6 +76,7 @@ PARAM_MAP = {
         provider=TushareApi.get_moneyflow,
         reader=raw_storage.read_parquets,
         writer=raw_storage.write_parquets,
+        sreader=raw_storage.read_parquets_schema,
         path=raw_path.moneyflow_dir,
         schema=RAW_MONEYFLOW_SCHEMA,
         desc="moneyflow"
@@ -80,24 +86,27 @@ PARAM_MAP = {
         provider=TushareApi.get_limit,
         reader=raw_storage.read_parquets,
         writer=raw_storage.write_parquets,
+        sreader=raw_storage.read_parquets_schema,
         path=raw_path.limit_dir,
         schema=RAW_LIMIT_SCHEMA,
         desc="limit"
     ),
-    "st": Params(
+    "namechange": Params(
         api=attrgetter("tushare"),
-        provider=TushareApi.get_st,
+        provider=TushareApi.get_namechange,
         reader=raw_storage.read_parquets,
         writer=raw_storage.write_parquets,
-        path=raw_path.st_dir,
-        schema=RAW_ST_SCHEMA,
-        desc="st"
+        sreader=raw_storage.read_parquets_schema,
+        path=raw_path.namechange_dir,
+        schema=RAW_NAMECHANGE_SCHEMA,
+        desc="namechange"
     ),
     "suspend": Params(
         api=attrgetter("tushare"),
         provider=TushareApi.get_suspend,
         reader=raw_storage.read_parquets,
         writer=raw_storage.write_parquets,
+        sreader=raw_storage.read_parquets_schema,
         path=raw_path.suspend_dir,
         schema=RAW_SUSPEND_SCHEMA,
         desc="suspend"

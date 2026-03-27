@@ -39,6 +39,9 @@ def read_parquets_schema(path: Path, desc: str = "") -> pl.DataFrame:
         _df = pl.DataFrame(schema=_schema)
         results.append(_df)
 
+    if len(results) == 0:
+        return pl.DataFrame()
+
     df = pl.concat(results)
 
     vlog(src, f"Reading {desc} schema done.")
@@ -68,6 +71,9 @@ def read_parquets(path: Path, schema: TableSchema, desc: str = "") -> pl.DataFra
         _df = pl.read_parquet(file_path)
         results.append(_df)
 
+    if len(results) == 0:
+        return pl.DataFrame(schema=schema.column_names_and_types)
+
     df = pl.concat(results)
     validate_table(df, schema)
 
@@ -90,11 +96,11 @@ def write_parquets(df: pl.DataFrame, path: Path, schema: TableSchema, desc: str 
 
     path.mkdir(parents=True, exist_ok=True)
     validate_table(df, schema)
-    results = partition_by(df, "trade_date")
+    results = partition_by(df, schema.partition_by)
     for (date_val, ), _df in tqdm(results.items(), desc=f"Writing {desc}:", disable=config.debug):
-        vlog(src, f"Writing {date_val}...")
+        vlog(src, f"Writing {date_val.strftime(schema.get_column("trade_date").fmt)}...")
 
-        file_name = f'{date_val}.parquet'
+        file_name = f'{date_val.strftime(schema.get_column("trade_date").fmt)}.parquet'
         file_path = path / file_name
 
         _df.write_parquet(file_path)

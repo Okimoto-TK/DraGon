@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio
 import httpx
 import polars as pl
+import polars.selectors as ps
 import inspect
-from tenacity import AsyncRetrying, wait_exponential, stop_after_attempt, retry_if_exception_type
+from tenacity import AsyncRetrying, wait_exponential, stop_after_attempt
 import random
 from tqdm.asyncio import tqdm as tqdm
 
@@ -27,6 +28,7 @@ class MairuiApi(RawProvider):
 
         self.licence = api_config.licence
         self.retry = api_config.max_retries
+        self.retry_timeout = api_config.retry_timeout
         self.time_format = api_config.time_format
         self.client = httpx.AsyncClient(
             timeout=api_config.timeout,
@@ -48,18 +50,26 @@ class MairuiApi(RawProvider):
         try:
             async for attempt in AsyncRetrying(
                     stop=stop_after_attempt(self.retry),
-                    wait=wait_exponential(multiplier=1, min=2, max=10),
+                    wait=wait_exponential(multiplier=1, min=2, max=self.retry_timeout),
                     reraise=True
             ):
                 with attempt:
                     response = await self.client.get(url=url, params=params)
                     response.raise_for_status()
                     result = response.json()
-                    df = pl.from_dicts(result).with_columns(
-                        code=pl.lit(code)
-                    )
-                    print(df)
-                    return df
+                    try:
+                        df = pl.from_dicts(result, schema=FETCH_FIELD_5MIN)
+                        if df.is_empty():
+                            return pl.DataFrame(schema=FETCH_FIELD_5MIN)
+                        else:
+                            df = df.with_columns(
+                                code=pl.lit(code)
+                            ).with_columns(
+                                ps.all().exclude(["code", "t"]).map_batches(lambda s: s.cast(pl.Float64))
+                            )
+                        return df
+                    except Exception:
+                        return pl.DataFrame(schema=FETCH_FIELD_5MIN)
         except Exception as e:
             self.vlog(f"Failed to request JSON for {code}: {e}", level="ERROR")
             raise e
@@ -112,7 +122,6 @@ class MairuiApi(RawProvider):
 
         results = asyncio.run(self._async_runner(query, codes))
         results = [r for r in results if not r.is_empty()]
-
         df = (pl.concat(results)
               .select(FETCH_FIELD_5MIN)
               .rename(FIELD_MAP_5MIN))
@@ -148,7 +157,7 @@ class MairuiApi(RawProvider):
     ) -> None:
         self._raise_not_implemented(inspect.currentframe().f_code.co_name)
 
-    def get_st(
+    def get_namechange(
             self,
             **_kwargs
     ) -> None:

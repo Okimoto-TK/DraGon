@@ -2,58 +2,51 @@ import polars as pl
 from pathlib import Path
 from tqdm import tqdm
 
+# ================= 配置区 =================
+# 1. 在这里填入你希望的最终列顺序（必须包含所有列名）
+TARGET_COLUMNS = ["code", "trade_date", "up_limit", "down_limit"]
 
-def convert_parquet_types(root_path: str):
-    # 1. 初始化路径
-    base_dir = Path(root_path)
+# 2. 待处理的文件夹路径
+SOURCE_DIR = "data/raw/limit"
 
-    # 2. 递归查找所有子文件夹下的 parquet 文件 (rglob)
-    files = list(base_dir.rglob("*.parquet"))
+
+# =========================================
+
+def align_parquet_columns(folder_path: str, schema_list: list):
+    base_dir = Path(folder_path)
+    # 获取目录下所有 parquet 文件
+    files = list(base_dir.glob("*.parquet"))
 
     if not files:
-        print(f"在 {root_path} 下未找到任何 .parquet 文件")
+        print(f"未在 {folder_path} 下找到文件。")
         return
 
-    print(f"找到 {len(files)} 个文件，开始转换类型...")
+    print(f"开始对齐列顺序，目标列数: {len(schema_list)}")
 
-    for file_path in tqdm(files, desc="Converting"):
+    for file_path in tqdm(files, desc="Aligning"):
         try:
-            # 3. 扫描文件结构 (Lazy 模式)
-            lf = pl.scan_parquet(file_path)
-            cols = lf.collect_schema().names()
+            # 1. 读取文件（使用 read_parquet 即可，因为只是调整顺序）
+            df = pl.read_parquet(file_path)
 
-            # 4. 构造转换逻辑
-            # 4. 构造转换逻辑
-            expressions = []
+            # 2. 检查列是否匹配（可选，防止因列名缺失导致报错）
+            current_cols = set(df.columns)
+            target_cols_set = set(schema_list)
 
-            # 转换 trade_date: 针对 "20150623" 这种格式
-            if "trade_date" in cols:
-                # 首先确保它是字符串，然后按格式解析
-                expressions.append(
-                    pl.col("trade_date").cast(pl.String).str.to_date("%Y%m%d")
-                )
-
-            # 转换 time: 假设你的格式是 "09:30:00"
-            if "time" in cols:
-                # 如果 time 格式是 "093000"，请改为 .str.to_time("%H%M%S")
-                # 如果是 "09:30:00"，通常 cast(pl.Time) 即可，但 str.to_time 更稳健
-                expressions.append(
-                    pl.col("time").cast(pl.String).str.to_time("%H:%M:%S")
-                )
-
-            # 如果没有任何匹配的列，跳过
-            if not expressions:
+            if not target_cols_set.issubset(current_cols):
+                missing = target_cols_set - current_cols
+                print(f"\n跳过文件 {file_path.name}: 缺少列 {missing}")
                 continue
 
-            # 5. 执行转换并覆写文件
-            df = lf.with_columns(expressions).collect()
-            df.write_parquet(file_path)
+            # 3. 核心操作：重新选择列顺序
+            # 这只改变排列，不改变数据类型或内容
+            df_aligned = df.select(schema_list)
+
+            # 4. 覆写文件
+            df_aligned.write_parquet(file_path)
 
         except Exception as e:
-            print(f"\n处理文件 {file_path} 时出错: {e}")
+            print(f"\n处理 {file_path.name} 时出错: {e}")
 
 
 if __name__ == "__main__":
-    # 请根据实际情况修改这里的路径
-    DATA_ROOT = "data"
-    convert_parquet_types(DATA_ROOT)
+    align_parquet_columns(SOURCE_DIR, TARGET_COLUMNS)

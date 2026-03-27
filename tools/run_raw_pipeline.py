@@ -4,16 +4,16 @@ from src.data.pipelines import RawPipeline
 from src.data.models import Query
 
 
-START_DATE = "20260319"
-END_DATE = "20260324"
+START_DATE = "20120101"
+END_DATE = "20260325"
 
 
 if __name__ == '__main__':
     pipeline = RawPipeline()
 
     pipeline.run(
-        action="validate",
-        query=Query(desc="5min")
+        action={"validate"},
+        query=Query(desc="namechange", start_date=START_DATE, end_date=END_DATE),
     )
 
     # daily = pipeline.run(

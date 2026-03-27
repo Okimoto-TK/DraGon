@@ -57,14 +57,14 @@ class RawPipeline:
         return df
 
     @staticmethod
-    def _validate_date(
-            reader: Callable,
+    def _validate_data(
+            sreader: Callable,
             path: Path,
             schema: TableSchema,
             desc: str,
             **_kwargs
     ):
-        df = reader(path=path, schema=schema, desc=desc)
+        df = sreader(path=path, desc=desc)
         validate_table(df=df, schema=schema)
 
     def _code_filter(
@@ -75,7 +75,7 @@ class RawPipeline:
     ):
         if method == "blacklist":
             df = self.universe.filter(
-                ~pl.col("exchange").is_in(exchange) & ~pl.col("status").is_in(status)
+                ~pl.col("exchange").is_in(exchange) | ~pl.col("status").is_in(status)
             )
 
         else:
@@ -95,7 +95,7 @@ class RawPipeline:
 
         if "validate" in action:
             params = PARAM_MAP[query.desc]
-            self._validate_date(**vars(params))
+            self._validate_data(**vars(params))
 
         if "load" in action:
             params = PARAM_MAP[query.desc]

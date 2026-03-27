@@ -65,9 +65,11 @@ FETCH_FIELD_LIMIT = [
     "down_limit"
 ]
 
-FETCH_FIELD_ST = [
+FETCH_FIELD_NAMECHANGE = [
     "ts_code",
-    "trade_date",
+    "name",
+    "start_date",
+    "ann_date",
 ]
 
 FETCH_FIELD_SUSPEND = [
@@ -102,7 +104,10 @@ FIELD_MAP_5MIN = {
 
 FIELD_MAP_MONEYFLOW = FIELD_MAP_DAILY
 
-FIELD_MAP_ST = FIELD_MAP_DAILY
+FIELD_MAP_NAMECHANGE = {
+    "ts_code": "code",
+    "start_date": "trade_date",
+}
 
 FIELD_MAP_LIMIT = FIELD_MAP_DAILY
 
