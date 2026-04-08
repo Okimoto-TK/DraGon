@@ -1,20 +1,35 @@
-import polars as pl
+"""Parquet file column alignment utility.
+
+Aligns column order across all parquet files in a directory
+to match a predefined schema.
+"""
+from __future__ import annotations
+
 from pathlib import Path
+
+import polars as pl
 from tqdm import tqdm
 
-# ================= 配置区 =================
-# 1. 在这里填入你希望的最终列顺序（必须包含所有列名）
+# ================= Configuration =================
+# Target column order (must include all column names)
 TARGET_COLUMNS = ["code", "trade_date", "up_limit", "down_limit"]
 
-# 2. 待处理的文件夹路径
+# Directory containing parquet files to process
 SOURCE_DIR = "data/raw/limit"
+# ================================================
 
 
-# =========================================
+def align_parquet_columns(folder_path: str, schema_list: list[str]) -> None:
+    """Align parquet file columns to match the target schema order.
 
-def align_parquet_columns(folder_path: str, schema_list: list):
+    Reads each parquet file in the directory, reorders columns to match
+    the schema list, and overwrites the file in place.
+
+    Args:
+        folder_path: Path to directory containing parquet files.
+        schema_list: Ordered list of column names.
+    """
     base_dir = Path(folder_path)
-    # 获取目录下所有 parquet 文件
     files = list(base_dir.glob("*.parquet"))
 
     if not files:
@@ -25,10 +40,9 @@ def align_parquet_columns(folder_path: str, schema_list: list):
 
     for file_path in tqdm(files, desc="Aligning"):
         try:
-            # 1. 读取文件（使用 read_parquet 即可，因为只是调整顺序）
             df = pl.read_parquet(file_path)
 
-            # 2. 检查列是否匹配（可选，防止因列名缺失导致报错）
+            # Verify all target columns exist in the file
             current_cols = set(df.columns)
             target_cols_set = set(schema_list)
 
@@ -37,11 +51,8 @@ def align_parquet_columns(folder_path: str, schema_list: list):
                 print(f"\n跳过文件 {file_path.name}: 缺少列 {missing}")
                 continue
 
-            # 3. 核心操作：重新选择列顺序
-            # 这只改变排列，不改变数据类型或内容
+            # Reorder columns to match schema
             df_aligned = df.select(schema_list)
-
-            # 4. 覆写文件
             df_aligned.write_parquet(file_path)
 
         except Exception as e:

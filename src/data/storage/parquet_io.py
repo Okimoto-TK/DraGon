@@ -1,109 +1,100 @@
+"""Parquet file I/O operations with schema validation."""
 from __future__ import annotations
 
-import polars as pl
-from pathlib import Path
-from tqdm import tqdm
 from glob import glob
+from pathlib import Path
+
+import config.config as config
+import polars as pl
+from tqdm import tqdm
 
 from src.data.schemas.raw import TableSchema
-from src.data.validators.raw import validate_table
 from src.data.utils.raw import partition_by
-import config.config as config
+from src.data.validators.raw import validate_table
 from src.utils.log import vlog
 
-
-src = "Storage"
+_SRC = "Storage"
 
 
 def read_parquet_schema(path: Path, desc: str = "") -> pl.DataFrame:
-    vlog(src, f"Reading {desc} schema from {path}...")
-
+    """Read parquet schema (column names and types) from a single file."""
+    vlog(_SRC, f"Reading {desc} schema from {path}...")
     _schema = pl.read_parquet_schema(path)
     df = pl.DataFrame(schema=_schema)
-
-    vlog(src, f"Reading {desc} schema done.")
+    vlog(_SRC, f"Reading {desc} schema done.")
     return df
 
 
 def read_parquets_schema(path: Path, desc: str = "") -> pl.DataFrame:
-    vlog(src, f"Reading {desc} schema from {path}...")
-
+    """Read combined schema from all parquet files in a directory."""
+    vlog(_SRC, f"Reading {desc} schema from {path}...")
     files = glob("*.parquet", root_dir=path, recursive=False)
     results = []
 
     for file in tqdm(files, desc=f"Reading {desc}:", disable=config.debug):
-        vlog(src, f"Reading {file}...")
-
+        vlog(_SRC, f"Reading {file}...")
         file_path = path / file
         _schema = pl.read_parquet_schema(file_path)
-        _df = pl.DataFrame(schema=_schema)
-        results.append(_df)
+        results.append(pl.DataFrame(schema=_schema))
 
-    if len(results) == 0:
+    if not results:
         return pl.DataFrame()
 
     df = pl.concat(results)
-
-    vlog(src, f"Reading {desc} schema done.")
+    vlog(_SRC, f"Reading {desc} schema done.")
     return df
 
 
 def read_parquet(path: Path, schema: TableSchema, desc: str = "") -> pl.DataFrame:
-    vlog(src, f"Reading {desc} from {path}...")
-
+    """Read a single parquet file and validate against schema."""
+    vlog(_SRC, f"Reading {desc} from {path}...")
     df = pl.read_parquet(path)
     validate_table(df, schema)
-
-    vlog(src, f"Reading {desc} done.")
+    vlog(_SRC, f"Reading {desc} done.")
     return df
 
 
 def read_parquets(path: Path, schema: TableSchema, desc: str = "") -> pl.DataFrame:
-    vlog(src, f"Reading {desc} from {path}...")
-
+    """Read all parquet files from a directory and concatenate."""
+    vlog(_SRC, f"Reading {desc} from {path}...")
     files = glob("*.parquet", root_dir=path, recursive=False)
     results = []
 
     for file in tqdm(files, desc=f"Reading {desc}:", disable=config.debug):
-        vlog(src, f"Reading {file}...")
-
+        vlog(_SRC, f"Reading {file}...")
         file_path = path / file
-        _df = pl.read_parquet(file_path)
-        results.append(_df)
+        results.append(pl.read_parquet(file_path))
 
-    if len(results) == 0:
+    if not results:
         return pl.DataFrame(schema=schema.column_names_and_types)
 
     df = pl.concat(results)
     validate_table(df, schema)
-
-    vlog(src, f"Reading {desc} done.")
+    vlog(_SRC, f"Reading {desc} done.")
     return df
 
 
-def write_parquet(df: pl.DataFrame, path: Path, schema: TableSchema, desc: str = ""):
-    vlog(src, f"Writing {desc} to {path}...")
-
+def write_parquet(df: pl.DataFrame, path: Path, schema: TableSchema, desc: str = "") -> None:
+    """Write DataFrame to a single parquet file after schema validation."""
+    vlog(_SRC, f"Writing {desc} to {path}...")
     path.parent.mkdir(parents=True, exist_ok=True)
     validate_table(df, schema)
     df.write_parquet(path)
+    vlog(_SRC, f"Writing {desc} done.")
 
-    vlog(src, f"Writing {desc} done.")
 
-
-def write_parquets(df: pl.DataFrame, path: Path, schema: TableSchema, desc: str = ""):
-    vlog(src, f"Writing {desc} to {path}...")
-
+def write_parquets(df: pl.DataFrame, path: Path, schema: TableSchema, desc: str = "") -> None:
+    """Partition DataFrame by date and write to separate parquet files."""
+    vlog(_SRC, f"Writing {desc} to {path}...")
     path.mkdir(parents=True, exist_ok=True)
     validate_table(df, schema)
+
     results = partition_by(df, schema.partition_by)
-    for (date_val, ), _df in tqdm(results.items(), desc=f"Writing {desc}:", disable=config.debug):
-        vlog(src, f"Writing {date_val.strftime(schema.get_column("trade_date").fmt)}...")
+    date_fmt = schema.get_column("trade_date").fmt
 
-        file_name = f'{date_val.strftime(schema.get_column("trade_date").fmt)}.parquet'
-        file_path = path / file_name
-
+    for (date_val,), _df in tqdm(results.items(), desc=f"Writing {desc}:", disable=config.debug):
+        vlog(_SRC, f"Writing {date_val.strftime(date_fmt)}...")
+        file_path = path / f"{date_val.strftime(date_fmt)}.parquet"
         _df.write_parquet(file_path)
 
-    vlog(src, f"Writing {desc} done.")
-    return df
+    vlog(_SRC, f"Writing {desc} done.")

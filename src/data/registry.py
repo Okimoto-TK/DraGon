@@ -1,26 +1,28 @@
+"""Pipeline parameter registry mapping data types to their handlers."""
 from __future__ import annotations
 
 from operator import attrgetter
 
 from config.config import raw_path
-from src.data.schemas.raw import (
-    UNIVERSE_SCHEMA,
-    CALENDAR_SCHEMA,
-    RAW_DAILY_SCHEMA,
-    RAW_ADJ_FACTOR_SCHEMA,
-    RAW_5MIN_SCHEMA,
-    RAW_MONEYFLOW_SCHEMA,
-    RAW_LIMIT_SCHEMA,
-    RAW_NAMECHANGE_SCHEMA,
-    RAW_SUSPEND_SCHEMA
-)
-from src.data.providers.api.mairui import MairuiApi
-from src.data.providers.api.tushare import TushareApi
+
 import src.data.storage.parquet_io as raw_storage
 from src.data.models import Params
+from src.data.providers.api.mairui import MairuiApi
+from src.data.providers.api.tushare import TushareApi
+from src.data.schemas.raw import (
+    CALENDAR_SCHEMA,
+    RAW_5MIN_SCHEMA,
+    RAW_ADJ_FACTOR_SCHEMA,
+    RAW_DAILY_SCHEMA,
+    RAW_LIMIT_SCHEMA,
+    RAW_MONEYFLOW_SCHEMA,
+    RAW_NAMECHANGE_SCHEMA,
+    RAW_SUSPEND_SCHEMA,
+    UNIVERSE_SCHEMA,
+)
 
-
-PARAM_MAP = {
+# Mapping from data type name to its pipeline parameters
+PARAM_MAP: dict[str, Params] = {
     "universe": Params(
         api=attrgetter("tushare"),
         provider=TushareApi.get_universe,
@@ -39,7 +41,7 @@ PARAM_MAP = {
         sreader=raw_storage.read_parquet_schema,
         path=raw_path.calendar_path,
         schema=CALENDAR_SCHEMA,
-        desc="calendar"
+        desc="calendar",
     ),
     "daily": Params(
         api=attrgetter("tushare"),
@@ -49,7 +51,7 @@ PARAM_MAP = {
         sreader=raw_storage.read_parquets_schema,
         path=raw_path.daily_dir,
         schema=RAW_DAILY_SCHEMA,
-        desc="daily"
+        desc="daily",
     ),
     "adj_factor": Params(
         api=attrgetter("tushare"),
@@ -59,7 +61,7 @@ PARAM_MAP = {
         sreader=raw_storage.read_parquets_schema,
         path=raw_path.adj_factor_dir,
         schema=RAW_ADJ_FACTOR_SCHEMA,
-        desc="adj_factor"
+        desc="adj_factor",
     ),
     "5min": Params(
         api=attrgetter("mairui"),
@@ -69,7 +71,7 @@ PARAM_MAP = {
         sreader=raw_storage.read_parquets_schema,
         path=raw_path.r5min_dir,
         schema=RAW_5MIN_SCHEMA,
-        desc="5min"
+        desc="5min",
     ),
     "moneyflow": Params(
         api=attrgetter("tushare"),
@@ -79,7 +81,7 @@ PARAM_MAP = {
         sreader=raw_storage.read_parquets_schema,
         path=raw_path.moneyflow_dir,
         schema=RAW_MONEYFLOW_SCHEMA,
-        desc="moneyflow"
+        desc="moneyflow",
     ),
     "limit": Params(
         api=attrgetter("tushare"),
@@ -89,7 +91,7 @@ PARAM_MAP = {
         sreader=raw_storage.read_parquets_schema,
         path=raw_path.limit_dir,
         schema=RAW_LIMIT_SCHEMA,
-        desc="limit"
+        desc="limit",
     ),
     "namechange": Params(
         api=attrgetter("tushare"),
@@ -99,7 +101,7 @@ PARAM_MAP = {
         sreader=raw_storage.read_parquets_schema,
         path=raw_path.namechange_dir,
         schema=RAW_NAMECHANGE_SCHEMA,
-        desc="namechange"
+        desc="namechange",
     ),
     "suspend": Params(
         api=attrgetter("tushare"),
@@ -109,6 +111,6 @@ PARAM_MAP = {
         sreader=raw_storage.read_parquets_schema,
         path=raw_path.suspend_dir,
         schema=RAW_SUSPEND_SCHEMA,
-        desc="suspend"
+        desc="suspend",
     ),
 }
