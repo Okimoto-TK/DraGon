@@ -12,7 +12,7 @@ from config.api import TushareConfig
 from tqdm import tqdm
 
 from src.data.models import Query
-from src.data.providers.api.registry import (
+from src.data.registry.api import (
     FETCH_FIELD_ADJ_FACTOR,
     FETCH_FIELD_CAL,
     FETCH_FIELD_DAILY,

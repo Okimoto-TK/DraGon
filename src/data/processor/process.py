@@ -5,7 +5,7 @@ import numpy as np
 import polars as pl
 from scipy.stats import norm
 
-from src.data.registry import LABEL_WINDOW, LABEL_WEIGHTS, MACRO_LOOKBACK
+from src.data.registry.processor import LABEL_WINDOW, LABEL_WEIGHTS, MACRO_LOOKBACK
 from src.data.schemas.processed import (
     PROCESSED_INDEX_SCHEMA,
     PROCESSED_LABEL_SCHEMA,

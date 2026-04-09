@@ -1,14 +1,40 @@
-"""Pipeline parameter registry mapping data types to their handlers."""
+"""Raw pipeline parameter registry and API field mappings."""
 from __future__ import annotations
 
 from operator import attrgetter
 
 from config.config import raw_path
 
-import src.data.storage.parquet_io as raw_storage
-from src.data.models import Params
+from src.data.models import RawParams
 from src.data.providers.api.mairui import MairuiApi
 from src.data.providers.api.tushare import TushareApi
+from src.data.registry.api import (
+    FETCH_FIELD_5MIN,
+    FETCH_FIELD_ADJ_FACTOR,
+    FETCH_FIELD_CAL,
+    FETCH_FIELD_DAILY,
+    FETCH_FIELD_LIMIT,
+    FETCH_FIELD_MONEYFLOW,
+    FETCH_FIELD_NAMECHANGE,
+    FETCH_FIELD_SUSPEND,
+    FETCH_FIELD_UNIVERSE,
+    FIELD_MAP_5MIN,
+    FIELD_MAP_ADJ_FACTOR,
+    FIELD_MAP_CAL,
+    FIELD_MAP_DAILY,
+    FIELD_MAP_LIMIT,
+    FIELD_MAP_MONEYFLOW,
+    FIELD_MAP_NAMECHANGE,
+    FIELD_MAP_SUSPEND,
+    FIELD_MAP_UNIVERSE,
+)
+from src.data.registry.processor import (
+    LABEL_WEIGHTS,
+    LABEL_WINDOW,
+    MACRO_LOOKBACK,
+    MEZZO_LOOKBACK,
+    MICRO_LOOKBACK,
+)
 from src.data.schemas.raw import (
     CALENDAR_SCHEMA,
     RAW_5MIN_SCHEMA,
@@ -20,105 +46,104 @@ from src.data.schemas.raw import (
     RAW_SUSPEND_SCHEMA,
     UNIVERSE_SCHEMA,
 )
-
-# === Processing Window Constants ===
-
-MACRO_LOOKBACK = 64
-MEZZO_LOOKBACK = 64
-MICRO_LOOKBACK = 48
-LABEL_WINDOW = 10
-LABEL_WEIGHTS = [1, 1, 1, 0.9, 0.8, 0.7, 0.5, 0.3, 0.1, 0.1]
+from src.data.storage.parquet_io import (
+    read_parquet,
+    read_parquet_schema,
+    read_parquets,
+    read_parquets_schema,
+    write_parquet,
+    write_parquets,
+)
 
 # === Pipeline Parameter Registry ===
 
-# Mapping from data type name to its pipeline parameters
-PARAM_MAP: dict[str, Params] = {
-    "universe": Params(
+PARAM_MAP: dict[str, RawParams] = {
+    "universe": RawParams(
         api=attrgetter("tushare"),
         provider=TushareApi.get_universe,
-        reader=raw_storage.read_parquet,
-        writer=raw_storage.write_parquet,
-        sreader=raw_storage.read_parquet_schema,
+        reader=read_parquet,
+        writer=write_parquet,
+        sreader=read_parquet_schema,
         path=raw_path.universe_path,
         schema=UNIVERSE_SCHEMA,
         desc="universe",
     ),
-    "calendar": Params(
+    "calendar": RawParams(
         api=attrgetter("tushare"),
         provider=TushareApi.get_calendar,
-        reader=raw_storage.read_parquet,
-        writer=raw_storage.write_parquet,
-        sreader=raw_storage.read_parquet_schema,
+        reader=read_parquet,
+        writer=write_parquet,
+        sreader=read_parquet_schema,
         path=raw_path.calendar_path,
         schema=CALENDAR_SCHEMA,
         desc="calendar",
     ),
-    "daily": Params(
+    "daily": RawParams(
         api=attrgetter("tushare"),
         provider=TushareApi.get_daily,
-        reader=raw_storage.read_parquets,
-        writer=raw_storage.write_parquets,
-        sreader=raw_storage.read_parquets_schema,
+        reader=read_parquets,
+        writer=write_parquets,
+        sreader=read_parquets_schema,
         path=raw_path.daily_dir,
         schema=RAW_DAILY_SCHEMA,
         desc="daily",
     ),
-    "adj_factor": Params(
+    "adj_factor": RawParams(
         api=attrgetter("tushare"),
         provider=TushareApi.get_adj_factor,
-        reader=raw_storage.read_parquets,
-        writer=raw_storage.write_parquets,
-        sreader=raw_storage.read_parquets_schema,
+        reader=read_parquets,
+        writer=write_parquets,
+        sreader=read_parquets_schema,
         path=raw_path.adj_factor_dir,
         schema=RAW_ADJ_FACTOR_SCHEMA,
         desc="adj_factor",
     ),
-    "5min": Params(
+    "5min": RawParams(
         api=attrgetter("mairui"),
         provider=MairuiApi.get_5min,
-        reader=raw_storage.read_parquets,
-        writer=raw_storage.write_parquets,
-        sreader=raw_storage.read_parquets_schema,
+        reader=read_parquets,
+        writer=write_parquets,
+        sreader=read_parquets_schema,
         path=raw_path.r5min_dir,
         schema=RAW_5MIN_SCHEMA,
         desc="5min",
     ),
-    "moneyflow": Params(
+    "moneyflow": RawParams(
         api=attrgetter("tushare"),
         provider=TushareApi.get_moneyflow,
-        reader=raw_storage.read_parquets,
-        writer=raw_storage.write_parquets,
-        sreader=raw_storage.read_parquets_schema,
+        reader=read_parquets,
+        writer=write_parquets,
+        sreader=read_parquets_schema,
         path=raw_path.moneyflow_dir,
         schema=RAW_MONEYFLOW_SCHEMA,
         desc="moneyflow",
     ),
-    "limit": Params(
+    "limit": RawParams(
         api=attrgetter("tushare"),
         provider=TushareApi.get_limit,
-        reader=raw_storage.read_parquets,
-        writer=raw_storage.write_parquets,
-        sreader=raw_storage.read_parquets_schema,
+        reader=read_parquets,
+        writer=write_parquets,
+        sreader=read_parquets_schema,
         path=raw_path.limit_dir,
         schema=RAW_LIMIT_SCHEMA,
         desc="limit",
     ),
-    "namechange": Params(
+    "namechange": RawParams(
         api=attrgetter("tushare"),
         provider=TushareApi.get_namechange,
-        reader=raw_storage.read_parquets,
-        writer=raw_storage.write_parquets,
-        sreader=raw_storage.read_parquets_schema,
+        reader=read_parquets,
+        writer=write_parquets,
+        sreader=read_parquets_schema,
         path=raw_path.namechange_dir,
         schema=RAW_NAMECHANGE_SCHEMA,
         desc="namechange",
     ),
-    "suspend": Params(
+    "suspend": RawParams(
         api=attrgetter("tushare"),
         provider=TushareApi.get_suspend,
-        reader=raw_storage.read_parquets,
-        writer=raw_storage.write_parquets,
-        sreader=raw_storage.read_parquets_schema,
+        reader=read_parquets,
+        writer=write_parquets,
+        sreader=read_parquets_schema,
         path=raw_path.suspend_dir,
         schema=RAW_SUSPEND_SCHEMA,
         desc="suspend",

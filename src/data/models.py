@@ -99,18 +99,34 @@ class Query(BaseModel):
 
 
 class Params(BaseModel):
-    """Pipeline parameters binding API, storage, and schema for a data type."""
+    """Base pipeline parameters for data type handlers."""
 
     model_config = ConfigDict(extra="forbid")
 
-    api: Callable
-    provider: Callable
     reader: Callable
     writer: Callable
     sreader: Callable
     path: Path
     schema: TableSchema
+
+
+class RawParams(Params):
+    """Pipeline parameters binding API, storage, and schema for raw data."""
+
+    api: Callable
+    provider: Callable
     desc: Literal[
         "universe", "calendar", "daily", "adj_factor",
         "5min", "moneyflow", "limit", "namechange", "suspend",
     ]
+
+
+class ProcessedParams(Params):
+    """Pipeline parameters for processed data storage and retrieval."""
+
+    processor: Callable
+    desc: Literal[
+        "index", "mask", "macro", "mezzo", "micro", "sidechain", "label",
+    ]
+    raw_deps: tuple[str, ...] = ()
+    processor_kwargs: dict = ()

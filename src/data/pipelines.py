@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 from typing import Literal
 
 import polars as pl
@@ -9,9 +10,10 @@ from config.api import MairuiConfig, TushareConfig
 from config.config import DEFAULT_EXCHANGE, DEFAULT_STATUS
 
 from src.data.models import Query, TableSchema
+from src.data.registry.processed import PROCESSED_PARAM_MAP
 from src.data.providers.api.mairui import MairuiApi
 from src.data.providers.api.tushare import TushareApi
-from src.data.registry import PARAM_MAP
+from src.data.registry.raw import PARAM_MAP
 from src.data.types import Action, Exchange, Status
 from src.data.validators import validate_table
 
@@ -139,5 +141,121 @@ class RawPipeline:
         if "load" in action:
             params = PARAM_MAP[query.desc]
             result = self._load_data(query=query, **vars(params))
+
+        return result
+
+
+class ProcessedPipeline:
+    """Orchestrates processing of raw data into processed features.
+
+    All storage parameters are bound in ProcessedParams.
+    Raw data is fetched via an injected RawPipeline instance.
+    """
+
+    def __init__(self, raw_pipe: RawPipeline) -> None:
+        """Initialize the processed pipeline.
+
+        Args:
+            raw_pipe: A RawPipeline instance to fetch raw data from.
+        """
+        self.raw_pipe = raw_pipe
+
+    @staticmethod
+    def _process(
+        processor: Callable,
+        writer: Callable,
+        path: Path,
+        schema: TableSchema,
+        desc: str,
+        **kwargs,
+    ) -> None:
+        """Process raw data into features, then write to storage.
+
+        Args:
+            processor: Callable that returns processed DataFrame.
+            writer: Storage writer function.
+            path: Storage path.
+            schema: Table schema for validation.
+            desc: Description for logging.
+            **kwargs: Raw DataFrames passed to processor.
+        """
+        df = processor(**kwargs)
+        writer(df=df, path=path, schema=schema, desc=desc)
+
+    @staticmethod
+    def _validate(
+        reader: Callable,
+        path: Path,
+        schema: TableSchema,
+        desc: str,
+    ) -> None:
+        """Load processed data and validate against schema.
+
+        Args:
+            reader: Storage reader function.
+            path: Storage path.
+            schema: Table schema for validation.
+            desc: Description for logging.
+        """
+        df = reader(path=path, schema=schema, desc=desc)
+        validate_table(df=df, schema=schema)
+
+    def run(
+        self,
+        action: Action | set[Action],
+        desc: str,
+    ) -> pl.DataFrame | None:
+        """Execute pipeline actions for the given feature type.
+
+        Args:
+            action: Single action or set of actions to perform.
+            desc: Feature type descriptor (e.g., 'macro', 'mask').
+
+        Returns:
+            DataFrame if 'load' action is performed, otherwise None.
+        """
+        result = None
+        params = PROCESSED_PARAM_MAP[desc]
+
+        # Fetch raw dependencies from RawPipeline
+        raw_data: dict[str, pl.DataFrame | None] = {}
+        for raw_type in params.raw_deps:
+            raw_data[raw_type] = self.raw_pipe.run(
+                action={"load"},
+                query=Query(desc=raw_type),
+            )
+
+        # Build processor kwargs: raw data + pre-bound kwargs
+        proc_kwargs = {**raw_data}
+        if "index_df" not in proc_kwargs:
+            proc_kwargs["index_df"] = self.raw_pipe.codes
+        proc_kwargs.update(params.processor_kwargs)
+
+        if "process" in action:
+            if params.processor is None:
+                raise ValueError(f"No processor bound for {desc!r}")
+            self._process(
+                processor=params.processor,
+                writer=params.writer,
+                path=params.path,
+                schema=params.schema,
+                desc=desc,
+                **proc_kwargs,
+            )
+
+        if "validate" in action:
+            self._validate(
+                reader=params.sreader,
+                path=params.path,
+                schema=params.schema,
+                desc=desc,
+            )
+
+        if "load" in action:
+            result = params.reader(
+                path=params.path,
+                schema=params.schema,
+                desc=desc,
+            )
 
         return result

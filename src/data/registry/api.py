@@ -1,8 +1,4 @@
-"""Field mappings and fetch configurations for data provider APIs.
-
-Defines which fields to fetch from each API endpoint and how to
-map them to canonical column names.
-"""
+"""API field mappings and fetch configurations."""
 from __future__ import annotations
 
 # === Tushare field selections ===

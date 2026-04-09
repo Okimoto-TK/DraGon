@@ -24,7 +24,7 @@ cache_dir = base_dir / "cache"
 
 raw_dir = data_dir / "raw"
 
-# Parquet file paths
+# Raw parquet file paths
 raw_path = SimpleNamespace(
     universe_path=raw_dir / "universe.parquet",
     calendar_path=raw_dir / "calendar.parquet",
@@ -35,4 +35,17 @@ raw_path = SimpleNamespace(
     limit_dir=raw_dir / "limit",
     namechange_dir=raw_dir / "namechange",
     suspend_dir=raw_dir / "suspend",
+)
+
+processed_dir = data_dir / "processed"
+
+# Processed parquet file paths
+processed_path = SimpleNamespace(
+    index_dir=processed_dir / "index",
+    mask_dir=processed_dir / "mask",
+    macro_dir=processed_dir / "macro",
+    mezzo_dir=processed_dir / "mezzo",
+    micro_dir=processed_dir / "micro",
+    sidechain_dir=processed_dir / "sidechain",
+    label_dir=processed_dir / "label",
 )

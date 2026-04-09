@@ -14,7 +14,7 @@ from tenacity import AsyncRetrying, stop_after_attempt, wait_exponential
 from tqdm.asyncio import tqdm as tqdm_asyncio
 
 from src.data.models import Query
-from src.data.providers.api.registry import FETCH_FIELD_5MIN, FIELD_MAP_5MIN
+from src.data.registry.api import FETCH_FIELD_5MIN, FIELD_MAP_5MIN
 from src.data.providers.base import RawProvider
 from src.data.schemas.raw import RAW_5MIN_SCHEMA
 from src.data.utils.raw import align_df

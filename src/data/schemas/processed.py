@@ -44,7 +44,7 @@ PROCESSED_INDEX_SCHEMA = TableSchema(
     layer="processed",
     description="Logical unique identifier index with suspension gaps stitched.",
     primary_key=("code", "trade_date"),
-    partition_by=("trade_date",),
+    partition_by=("code",),
     columns=(
         ColumnSchema(
             name="code",
@@ -78,7 +78,7 @@ PROCESSED_MASK_SCHEMA = TableSchema(
     layer="processed",
     description="Filter mask for non-ST stocks with no physical suspension in next H days.",
     primary_key=("code", "trade_date"),
-    partition_by=("trade_date",),
+    partition_by=("code",),
     columns=(
         ColumnSchema(
             name="code",
@@ -112,7 +112,7 @@ PROCESSED_MACRO_SCHEMA = TableSchema(
     layer="processed",
     description="Daily-scale backbone features (NormalRank or Raw).",
     primary_key=("code", "trade_date"),
-    partition_by=("trade_date",),
+    partition_by=("code",),
     columns=(
         ColumnSchema(
             name="code",
@@ -140,7 +140,7 @@ PROCESSED_MEZZO_SCHEMA = TableSchema(
     layer="processed",
     description="30-minute scale backbone features (NormalRank or Raw).",
     primary_key=("code", "trade_date", "time_index"),
-    partition_by=("trade_date",),
+    partition_by=("code",),
     columns=(
         ColumnSchema(
             name="code",
@@ -175,7 +175,7 @@ PROCESSED_MICRO_SCHEMA = TableSchema(
     layer="processed",
     description="5-minute scale backbone features (NormalRank or Raw).",
     primary_key=("code", "trade_date", "time_index"),
-    partition_by=("trade_date",),
+    partition_by=("code",),
     columns=(
         ColumnSchema(
             name="code",
@@ -210,7 +210,7 @@ PROCESSED_SIDECHAIN_SCHEMA = TableSchema(
     layer="processed",
     description="Energy modulation sidechain features (preserve absolute magnitude information).",
     primary_key=("code", "trade_date"),
-    partition_by=("trade_date",),
+    partition_by=("code",),
     columns=(
         ColumnSchema(
             name="code",
@@ -272,7 +272,7 @@ PROCESSED_LABEL_SCHEMA = TableSchema(
     layer="processed",
     description="Prediction labels (PowerRank label).",
     primary_key=("code", "trade_date"),
-    partition_by=("trade_date",),
+    partition_by=("code",),
     columns=(
         ColumnSchema(
             name="code",
