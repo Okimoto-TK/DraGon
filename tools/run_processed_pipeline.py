@@ -7,9 +7,9 @@ from src.data.pipelines import RawPipeline, ProcessedPipeline
 FEATURE_TYPES = [
     # "index",
     # "mask",
-    "macro",
+    # "macro",
     # "mezzo",
-    # "micro",
+    "micro",
     # "sidechain",
     # "label",
 ]

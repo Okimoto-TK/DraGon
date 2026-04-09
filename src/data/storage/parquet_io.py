@@ -79,6 +79,7 @@ def write_parquet(df: pl.DataFrame, path: Path, schema: TableSchema, desc: str =
     vlog(_SRC, f"Writing {desc} to {path}...")
     path.parent.mkdir(parents=True, exist_ok=True)
     validate_table(df, schema)
+    df = df.select(schema.column_names)
     df.write_parquet(path)
     vlog(_SRC, f"Writing {desc} done.")
 
@@ -88,6 +89,7 @@ def write_parquets(df: pl.DataFrame, path: Path, schema: TableSchema, desc: str 
     vlog(_SRC, f"Writing {desc} to {path}...")
     path.mkdir(parents=True, exist_ok=True)
     validate_table(df, schema)
+    df = df.select(schema.column_names)
 
     results = partition_by(df, schema.partition_by)
     
