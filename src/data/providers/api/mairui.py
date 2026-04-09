@@ -18,7 +18,7 @@ from src.data.providers.api.registry import FETCH_FIELD_5MIN, FIELD_MAP_5MIN
 from src.data.providers.base import RawProvider
 from src.data.schemas.raw import RAW_5MIN_SCHEMA
 from src.data.utils.raw import align_df
-from src.data.validators.raw import validate_table
+from src.data.validators import validate_table
 
 
 class MairuiApi(RawProvider):

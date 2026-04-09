@@ -6,7 +6,7 @@ import warnings
 import config.config as config
 import polars as pl
 
-from src.data.schemas.raw import TableSchema
+from src.data.models import TableSchema
 
 
 def _validate_required_columns(df: pl.DataFrame, schema: TableSchema) -> None:

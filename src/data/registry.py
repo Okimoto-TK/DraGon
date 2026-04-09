@@ -21,6 +21,16 @@ from src.data.schemas.raw import (
     UNIVERSE_SCHEMA,
 )
 
+# === Processing Window Constants ===
+
+MACRO_LOOKBACK = 64
+MEZZO_LOOKBACK = 64
+MICRO_LOOKBACK = 48
+LABEL_WINDOW = 10
+LABEL_WEIGHTS = [1, 1, 1, 0.9, 0.8, 0.7, 0.5, 0.3, 0.1, 0.1]
+
+# === Pipeline Parameter Registry ===
+
 # Mapping from data type name to its pipeline parameters
 PARAM_MAP: dict[str, Params] = {
     "universe": Params(

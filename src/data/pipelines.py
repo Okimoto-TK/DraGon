@@ -8,13 +8,12 @@ import polars as pl
 from config.api import MairuiConfig, TushareConfig
 from config.config import DEFAULT_EXCHANGE, DEFAULT_STATUS
 
-from src.data.models import Query
+from src.data.models import Query, TableSchema
 from src.data.providers.api.mairui import MairuiApi
 from src.data.providers.api.tushare import TushareApi
 from src.data.registry import PARAM_MAP
-from src.data.schemas.raw import TableSchema
 from src.data.types import Action, Exchange, Status
-from src.data.validators.raw import validate_table
+from src.data.validators import validate_table
 
 
 class RawPipeline:

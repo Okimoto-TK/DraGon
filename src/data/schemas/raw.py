@@ -1,83 +1,13 @@
 """Schema definitions for raw data tables.
 
-Defines column structures, data types, and validation rules
+Defines column structures and validation rules
 for all raw data tables in the pipeline.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import TypeAlias
-
 import polars as pl
 
-# Supported Polars data types for schema columns
-DType: TypeAlias = (
-    type[pl.String]
-    | type[pl.Float64]
-    | type[pl.Int64]
-    | type[pl.Boolean]
-    | type[pl.Date]
-    | type[pl.Time]
-)
-
-
-@dataclass(frozen=True)
-class ColumnSchema:
-    """Schema definition for a single column in a table."""
-
-    name: str
-    dtype: DType
-    required: bool = True
-    nullable: bool = True
-    fmt: str | None = None  # Regex pattern or date/time format
-    unit: str | None = None  # Unit of measurement (e.g., "price", "share")
-    description: str = ""
-
-
-@dataclass(frozen=True)
-class TableSchema:
-    """Schema definition for an entire table."""
-
-    name: str
-    layer: str
-    description: str
-    primary_key: tuple[str, ...]
-    partition_by: tuple[str, ...]
-    columns: tuple[ColumnSchema, ...]
-    allow_extra_columns: bool = True
-    provider_select_only_schema_columns: bool = True
-
-    @property
-    def column_names(self) -> tuple[str, ...]:
-        """Return tuple of all column names."""
-        return tuple(col.name for col in self.columns)
-
-    @property
-    def required_columns(self) -> tuple[str, ...]:
-        """Return tuple of required column names."""
-        return tuple(col.name for col in self.columns if col.required)
-
-    @property
-    def column_names_and_types(self) -> dict[str, type]:
-        """Return dict mapping column names to their data types."""
-        return {col.name: col.dtype for col in self.columns}
-
-    def get_column(self, name: str) -> ColumnSchema:
-        """Get column schema by name.
-
-        Args:
-            name: Column name to look up.
-
-        Returns:
-            ColumnSchema for the requested column.
-
-        Raises:
-            KeyError: If column name not found.
-        """
-        for col in self.columns:
-            if col.name == name:
-                return col
-        raise KeyError(f"{name!r} not found in schema {self.name}")
+from ..models import ColumnSchema, TableSchema
 
 
 # === Table Schema Definitions ===

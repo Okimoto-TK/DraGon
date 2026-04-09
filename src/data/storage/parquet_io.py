@@ -8,9 +8,9 @@ import config.config as config
 import polars as pl
 from tqdm import tqdm
 
-from src.data.schemas.raw import TableSchema
+from src.data.models import TableSchema
 from src.data.utils.raw import partition_by
-from src.data.validators.raw import validate_table
+from src.data.validators import validate_table
 from src.utils.log import vlog
 
 _SRC = "Storage"

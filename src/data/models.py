@@ -1,14 +1,15 @@
-"""Data models for queries and pipeline parameters."""
+"""Data models for queries, pipeline parameters, and schema definitions."""
 from __future__ import annotations
 
 import warnings
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
-from src.data.schemas.raw import TableSchema
+from src.data.types import DType
 
 # Suppress pydantic warning about shadowing 'schema' field name
 warnings.filterwarnings(
@@ -16,6 +17,69 @@ warnings.filterwarnings(
     message='Field name "schema" in "Params" shadows an attribute in parent "BaseModel"',
 )
 
+
+# === Schema Definition Classes ===
+
+@dataclass(frozen=True)
+class ColumnSchema:
+    """Schema definition for a single column in a table."""
+
+    name: str
+    dtype: DType
+    required: bool = True
+    nullable: bool = True
+    fmt: str | None = None  # Regex pattern or date/time format
+    unit: str | None = None  # Unit of measurement
+    description: str = ""
+
+
+@dataclass(frozen=True)
+class TableSchema:
+    """Schema definition for an entire table."""
+
+    name: str
+    layer: str
+    description: str
+    primary_key: tuple[str, ...]
+    partition_by: tuple[str, ...]
+    columns: tuple[ColumnSchema, ...]
+    allow_extra_columns: bool = True
+    provider_select_only_schema_columns: bool = True
+
+    @property
+    def column_names(self) -> tuple[str, ...]:
+        """Return tuple of all column names."""
+        return tuple(col.name for col in self.columns)
+
+    @property
+    def required_columns(self) -> tuple[str, ...]:
+        """Return tuple of required column names."""
+        return tuple(col.name for col in self.columns if col.required)
+
+    @property
+    def column_names_and_types(self) -> dict[str, type]:
+        """Return dict mapping column names to their data types."""
+        return {col.name: col.dtype for col in self.columns}
+
+    def get_column(self, name: str) -> ColumnSchema:
+        """Get column schema by name.
+
+        Args:
+            name: Column name to look up.
+
+        Returns:
+            ColumnSchema for the requested column.
+
+        Raises:
+            KeyError: If column name not found.
+        """
+        for col in self.columns:
+            if col.name == name:
+                return col
+        raise KeyError(f"{name!r} not found in schema {self.name}")
+
+
+# === Query and Pipeline Parameter Models ===
 
 class Query(BaseModel):
     """Query parameters for data fetching with date range validation."""

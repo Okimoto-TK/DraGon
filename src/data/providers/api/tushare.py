@@ -44,7 +44,7 @@ from src.data.schemas.raw import (
 )
 from src.data.types import Map
 from src.data.utils.raw import align_df, get_grid, parse_calendar
-from src.data.validators.raw import validate_table
+from src.data.validators import validate_table
 from src.utils.log import vlog
 
 
