@@ -239,7 +239,7 @@ RAW_MONEYFLOW_SCHEMA = TableSchema(
         ),
         ColumnSchema(
             name="buy_sm_vol",
-            dtype=pl.Int64,
+            dtype=pl.Float64,
             description="Volume of small buying orders.",
             unit="volume",
         ),
@@ -251,7 +251,7 @@ RAW_MONEYFLOW_SCHEMA = TableSchema(
         ),
         ColumnSchema(
             name="sell_sm_vol",
-            dtype=pl.Int64,
+            dtype=pl.Float64,
             description="Volume of small selling orders.",
             unit="volume",
         ),
@@ -263,7 +263,7 @@ RAW_MONEYFLOW_SCHEMA = TableSchema(
         ),
         ColumnSchema(
             name="buy_md_vol",
-            dtype=pl.Int64,
+            dtype=pl.Float64,
             description="Volume of medium buying orders.",
             unit="volume",
         ),
@@ -275,7 +275,7 @@ RAW_MONEYFLOW_SCHEMA = TableSchema(
         ),
         ColumnSchema(
             name="sell_md_vol",
-            dtype=pl.Int64,
+            dtype=pl.Float64,
             description="Volume of medium selling orders.",
             unit="volume",
         ),
@@ -287,7 +287,7 @@ RAW_MONEYFLOW_SCHEMA = TableSchema(
         ),
         ColumnSchema(
             name="buy_lg_vol",
-            dtype=pl.Int64,
+            dtype=pl.Float64,
             description="Volume of large buying orders.",
             unit="volume",
         ),
@@ -299,7 +299,7 @@ RAW_MONEYFLOW_SCHEMA = TableSchema(
         ),
         ColumnSchema(
             name="sell_lg_vol",
-            dtype=pl.Int64,
+            dtype=pl.Float64,
             description="Volume of large selling orders.",
             unit="volume",
         ),
@@ -311,7 +311,7 @@ RAW_MONEYFLOW_SCHEMA = TableSchema(
         ),
         ColumnSchema(
             name="buy_elg_vol",
-            dtype=pl.Int64,
+            dtype=pl.Float64,
             description="Volume of extra-large buying orders.",
             unit="volume",
         ),
@@ -323,7 +323,7 @@ RAW_MONEYFLOW_SCHEMA = TableSchema(
         ),
         ColumnSchema(
             name="sell_elg_vol",
-            dtype=pl.Int64,
+            dtype=pl.Float64,
             description="Volume of extra-large selling orders.",
             unit="volume",
         ),
@@ -335,7 +335,7 @@ RAW_MONEYFLOW_SCHEMA = TableSchema(
         ),
         ColumnSchema(
             name="net_mf_vol",
-            dtype=pl.Int64,
+            dtype=pl.Float64,
             description="Net volume of money flow.",
             unit="volume",
         ),

@@ -2,8 +2,12 @@
 from __future__ import annotations
 
 import numpy as np
+from numpy.lib.stride_tricks import sliding_window_view
 import polars as pl
 from scipy.stats import norm
+from tqdm import tqdm
+
+import config.config as config
 
 from src.data.registry.processor import LABEL_WINDOW, LABEL_WEIGHTS, MACRO_LOOKBACK
 from src.data.schemas.processed import (
@@ -16,13 +20,17 @@ from src.data.schemas.processed import (
     PROCESSED_SIDECHAIN_SCHEMA,
 )
 from src.data.validators import validate_table
+from src.utils.log import vlog
+
+_SRC = "OHLCV"
 
 
-def process_index(suspend_df: pl.DataFrame) -> pl.DataFrame:
+def process_index(suspend_df: pl.DataFrame, **_kwargs) -> pl.DataFrame:
     """Process suspend data into logical index table.
 
     Args:
         suspend_df: DataFrame with code, trade_date, is_suspend columns.
+        **_kwargs: Unused additional arguments.
 
     Returns:
         DataFrame with code, trade_date, logic_index columns.
@@ -43,6 +51,7 @@ def process_mask(
     suspend_df: pl.DataFrame,
     namechange_df: pl.DataFrame,
     index_df: pl.DataFrame,
+    **_kwargs,
 ) -> pl.DataFrame:
     """Process suspend and namechange data into filter mask table.
 
@@ -81,8 +90,11 @@ def process_mask(
     # Sort by code and trade_date
     df = df.sort(["code", "trade_date"])
 
-    # Compute filter_mask per code group
-    def _compute_mask(group: pl.DataFrame) -> pl.DataFrame:
+    # Compute filter_mask per code group with progress bar
+    codes = df["code"].unique().to_list()
+    results = []
+    for code in tqdm(codes, desc="Processing mask", disable=config.debug):
+        group = df.filter(pl.col("code") == code)
         n = len(group)
         suspend = group["is_suspend"].to_numpy()
         st = group["is_st"].to_numpy()
@@ -105,9 +117,9 @@ def process_mask(
             # filter_mask is True only when all conditions are satisfied
             mask.append(not future_suspend and not future_st and not window_st)
 
-        return group.with_columns(filter_mask=pl.Series(mask, dtype=pl.Boolean))
+        results.append(group.with_columns(filter_mask=pl.Series(mask, dtype=pl.Boolean)))
 
-    result = df.group_by("code").map_groups(_compute_mask)
+    result = pl.concat(results)
 
     result = result.sort(["code", "trade_date"]).select(
         ["code", "trade_date", "filter_mask"]
@@ -123,6 +135,7 @@ def process_macro(
     daily_df: pl.DataFrame,
     adj_factor_df: pl.DataFrame,
     lookback: int = MACRO_LOOKBACK,
+    **_kwargs,
 ) -> pl.DataFrame:
     """Process daily OHLCV data into macro backbone features.
 
@@ -135,7 +148,8 @@ def process_macro(
     Returns:
         DataFrame with code, trade_date, mcr_f1..mcr_f10 columns.
     """
-    # Adjust prices by adj_factor
+    # Adjust prices by adj_factor with progress
+    tqdm.pandas(disable=config.debug, desc="Adjusting prices")
     daily_adj = daily_df.join(
         adj_factor_df.select(["code", "trade_date", "adj_factor"]),
         on=["code", "trade_date"],
@@ -147,7 +161,8 @@ def process_macro(
         (pl.col("close") * pl.col("adj_factor")).alias("close"),
     ).drop("adj_factor")
 
-    # Process OHLCV features
+    # Process OHLCV features with progress
+    tqdm.write(f"Processing {lookback}-step features...")
     result = _process_ohlcv(
         index_df=index_df,
         ohlcv_df=daily_adj,
@@ -167,6 +182,7 @@ def process_micro(
     min5_df: pl.DataFrame,
     adj_factor_df: pl.DataFrame,
     lookback: int = MACRO_LOOKBACK,
+    **_kwargs,
 ) -> pl.DataFrame:
     """Process 5-minute OHLCV data into micro backbone features.
 
@@ -179,12 +195,14 @@ def process_micro(
     Returns:
         DataFrame with code, trade_date, time_index, mic_f1..mic_f10 columns.
     """
-    # Generate time_index: rank time within each (code, trade_date)
+    # Generate time_index with progress
+    tqdm.write("Generating time index...")
     min5_indexed = min5_df.sort(["code", "trade_date", "time"]).with_columns(
         time_index=pl.int_range(1, pl.len() + 1).over(["code", "trade_date"]).cast(pl.Int32)
     ).drop("time")
 
-    # Adjust prices by adj_factor
+    # Adjust prices by adj_factor with progress
+    tqdm.write("Adjusting prices...")
     min5_adj = min5_indexed.join(
         adj_factor_df.select(["code", "trade_date", "adj_factor"]),
         on=["code", "trade_date"],
@@ -196,7 +214,8 @@ def process_micro(
         (pl.col("close") * pl.col("adj_factor")).alias("close"),
     ).drop("adj_factor")
 
-    # Process OHLCV features (time_index is now present)
+    # Process OHLCV features for micro (time_index present) with progress
+    tqdm.write(f"Processing {lookback}-step micro features...")
     result = _process_ohlcv(
         index_df=index_df,
         ohlcv_df=min5_adj,
@@ -204,7 +223,7 @@ def process_micro(
     )
 
     # Rename f* to mic_f*
-    for i in range(1, 11):
+    for i in tqdm(range(1, 11), desc="Renaming micro features", disable=config.debug):
         result = result.rename({f"f{i}": f"mic_f{i}"})
 
     validate_table(result, PROCESSED_MICRO_SCHEMA)
@@ -216,6 +235,7 @@ def process_mezzo(
     min5_df: pl.DataFrame,
     adj_factor_df: pl.DataFrame,
     lookback: int = MACRO_LOOKBACK,
+    **_kwargs,
 ) -> pl.DataFrame:
     """Process 5-minute OHLCV data into mezzo (30-min) backbone features.
 
@@ -228,10 +248,12 @@ def process_mezzo(
     Returns:
         DataFrame with code, trade_date, time_index, mzo_f1..mzo_f10 columns.
     """
-    # Aggregate 5-min bars to 30-min bars
+    # Aggregate 5-min bars to 30-min bars with progress
+    tqdm.write("Aggregating to 30-min bars...")
     min30 = _aggregate_30min(min5_df)
 
-    # Adjust prices by adj_factor
+    # Adjust prices by adj_factor with progress
+    tqdm.write("Adjusting prices...")
     min30_adj = min30.join(
         adj_factor_df.select(["code", "trade_date", "adj_factor"]),
         on=["code", "trade_date"],
@@ -243,7 +265,8 @@ def process_mezzo(
         (pl.col("close") * pl.col("adj_factor")).alias("close"),
     ).drop("adj_factor")
 
-    # Process OHLCV features (time_index is now present)
+    # Process OHLCV features for mezzo (time_index present) with progress
+    tqdm.write(f"Processing {lookback}-step mezzo features...")
     result = _process_ohlcv(
         index_df=index_df,
         ohlcv_df=min30_adj,
@@ -251,7 +274,7 @@ def process_mezzo(
     )
 
     # Rename f* to mzo_f*
-    for i in range(1, 11):
+    for i in tqdm(range(1, 11), desc="Renaming mezzo features", disable=config.debug):
         result = result.rename({f"f{i}": f"mzo_f{i}"})
 
     validate_table(result, PROCESSED_MEZZO_SCHEMA)
@@ -264,6 +287,7 @@ def process_sidechain(
     adj_factor_df: pl.DataFrame,
     moneyflow_df: pl.DataFrame,
     lookback: int = MACRO_LOOKBACK,
+    **_kwargs,
 ) -> pl.DataFrame:
     """Process moneyflow and daily data into sidechain energy modulation features.
 
@@ -277,7 +301,8 @@ def process_sidechain(
     Returns:
         DataFrame with code, trade_date, mf_abs_rank, mf_impact, mf_conviction, energy_factor, mkt_vola_rank columns.
     """
-    # Adjust prices by adj_factor
+    # Adjust prices by adj_factor with progress
+    tqdm.write("Adjusting prices...")
     daily_adj = daily_df.join(
         adj_factor_df.select(["code", "trade_date", "adj_factor"]),
         on=["code", "trade_date"],
@@ -289,14 +314,16 @@ def process_sidechain(
         (pl.col("close") * pl.col("adj_factor")).alias("close"),
     ).drop("adj_factor")
 
-    # Merge daily with moneyflow
+    # Merge daily with moneyflow with progress
+    tqdm.write("Merging moneyflow data...")
     df = daily_adj.join(
         moneyflow_df,
         on=["code", "trade_date"],
         how="inner",
     )
 
-    # Compute main force metrics
+    # Compute main force metrics with progress
+    tqdm.write("Computing sidechain features...")
     buy_main = pl.col("buy_lg_amount") + pl.col("buy_elg_amount")
     sell_main = pl.col("sell_lg_amount") + pl.col("sell_elg_amount")
     net_main = buy_main - sell_main
@@ -351,6 +378,7 @@ def process_label(
     index_df: pl.DataFrame,
     daily_df: pl.DataFrame,
     adj_factor_df: pl.DataFrame,
+    **_kwargs,
 ) -> pl.DataFrame:
     """Process daily adjusted prices into prediction labels.
 
@@ -362,7 +390,8 @@ def process_label(
     Returns:
         DataFrame with code, trade_date, label_final columns.
     """
-    # Adjust prices by adj_factor
+    # Adjust prices by adj_factor with progress
+    tqdm.write("Adjusting prices...")
     daily_adj = daily_df.join(
         adj_factor_df.select(["code", "trade_date", "adj_factor"]),
         on=["code", "trade_date"],
@@ -372,7 +401,8 @@ def process_label(
         adj_close=pl.col("close") * pl.col("adj_factor"),
     ).sort(["code", "trade_date"])
 
-    # Compute future log returns and weights
+    # Compute future log returns and weights with progress
+    tqdm.write("Computing label features...")
     H = LABEL_WINDOW
     w = LABEL_WEIGHTS
 
@@ -432,12 +462,46 @@ def _normal_rank(s: pl.Series) -> pl.Series:
     return pl.Series(norm.ppf((ranked.to_numpy() - 0.5) / n))
 
 
-def _linreg_slope(s: pl.Series) -> float | None:
-    """Compute linear regression slope for a window."""
-    vals = s.to_numpy()
-    if len(vals) < 2 or np.any(np.isnan(vals)):
-        return None
-    return float(np.polyfit(np.arange(len(s)), vals, 1)[0])
+def vectorized_rolling_slope(s: pl.Series, n: int) -> pl.Series:
+    """
+    全量向量化：1次函数调用，算完一整只股票的所有斜率
+    """
+    y = s.to_numpy()
+    L = len(y)
+
+    if L < n:
+        return pl.Series(s.name, np.full(L, np.nan))
+
+    # 1. 把你代码里的核心常数提出来（完全一样）
+    x = np.arange(n, dtype=np.float64)
+    x_mean = (n - 1) / 2.0
+    denom = (n * n * n - n) / 12.0
+
+    if denom == 0:
+        return pl.Series(s.name, np.full(L, 0.0))
+
+    # 2. 核心魔法：直接切出所有滚动窗口，形成 (L-n+1, n) 的矩阵
+    # 这一步是内存零拷贝的，瞬间完成
+    y_windows = sliding_window_view(y, window_shape=n)
+
+    # 3. 对应你代码里的：y - y_mean
+    # 这里我们按行求均值，并保持维度 (L-n+1, 1) 以便广播相减
+    y_means = y_windows.mean(axis=1, keepdims=True)
+
+    # 4. 对应你代码里的：np.sum((x - x_mean) * (y - y_mean))
+    # 直接利用矩阵乘法（np.dot），让 C 语言底层跑满 CPU
+    # y_windows - y_means 是 (L-n+1, n)
+    # x - x_mean 是 (n,)
+    numer = np.dot(y_windows - y_means, x - x_mean)
+
+    # 5. 除以固定的分母
+    slopes = numer / denom
+
+    # 6. 前面补齐 n-1 个 NaN，对齐原始长度
+    result = np.full(L, np.nan)
+    result[n - 1:] = slopes
+
+    return pl.Series(s.name, result)
 
 
 def _process_ohlcv(
@@ -445,16 +509,8 @@ def _process_ohlcv(
     ohlcv_df: pl.DataFrame,
     lookback: int = MACRO_LOOKBACK,
 ) -> pl.DataFrame:
-    """Process OHLCV data into 10 backbone features.
-
-    Args:
-        index_df: DataFrame with code, trade_date, logic_index columns.
-        ohlcv_df: DataFrame with code, trade_date, [time_index], open, high, low, close, amount columns.
-        lookback: Lookback window for T6-T10 features.
-
-    Returns:
-        DataFrame with same primary key as ohlcv_df plus f1..f10 columns.
-    """
+    """Process OHLCV data into 10 backbone features."""
+    vlog(_SRC, "Joining index...")
     # Join with index
     df = ohlcv_df.join(
         index_df.select(["code", "trade_date", "logic_index"]),
@@ -470,6 +526,7 @@ def _process_ohlcv(
     df = df.sort(sort_cols)
 
     # === Helper columns ===
+    vlog(_SRC, "Calculating helper columns...")
     short_lookback = max(lookback // 4, 1)
     df = df.with_columns([
         pl.col("close").shift(1).over("code").alias("close_prev"),
@@ -515,6 +572,7 @@ def _process_ohlcv(
     )
 
     # T8: normalized slope (NormalRank): LinReg(C,n).slope / ATR(n)
+    vlog(_SRC, "Computing T8 (ATR/Slope)...")
     # True Range
     tr = pl.max_horizontal([
         pl.col("high") - pl.col("low"),
@@ -525,14 +583,18 @@ def _process_ohlcv(
     df = df.with_columns(
         pl.col("tr").rolling_mean(lookback).over("code").alias("atr")
     )
+    vlog(_SRC, "Computing Slope...")
     # Rolling LinReg slope
     df = df.with_columns(
-        pl.col("close").rolling_map(_linreg_slope, window_size=lookback).over("code").alias("slope")
+        pl.col("close")
+        .map_batches(lambda s: vectorized_rolling_slope(s, lookback))
+        .over("code")
+        .alias("slope")
     )
     df = df.with_columns(
         (pl.col("slope") / (pl.col("atr") + _EPS)).alias("f8_raw")
     )
-
+    vlog(_SRC, "Computing T9...")
     # T9: OBV ratio (Raw): sum(sgn(ri)*Amount_i) / sum(Amount_i)
     df = df.with_columns(
         ((pl.col("f1_raw").sign() * pl.col("amount")).rolling_sum(lookback).over("code") /
@@ -541,10 +603,11 @@ def _process_ohlcv(
 
     # T10: cross-period momentum (NormalRank): ln(Ct / Ct-n)
     df = df.with_columns(
-        (pl.col("close").log() - pl.col("close").shift(lookback).over("code")).alias("f10_raw")
+        (pl.col("close").log() - pl.col("close").log().shift(lookback).over("code")).alias("f10_raw")
     )
 
     # === Apply NormalRank ===
+    vlog(_SRC, "Applying NormalRank...")
     norm_rank_cols = ["f1_raw", "f3_raw", "f4_raw", "f5_raw", "f6_raw", "f8_raw", "f10_raw"]
     for col in norm_rank_cols:
         df = df.with_columns(
@@ -563,6 +626,7 @@ def _process_ohlcv(
         df = df.rename({f"f{i}_raw": f"f{i}"})
 
     # Select output columns
+    vlog(_SRC, "Selecting output columns...")
     select_cols = (
         ["code", "trade_date"]
         + (["time_index"] if has_time_index else [])

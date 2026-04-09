@@ -41,7 +41,7 @@ processed_dir = data_dir / "processed"
 
 # Processed parquet file paths
 processed_path = SimpleNamespace(
-    index_dir=processed_dir / "index",
+    index_path=processed_dir / "index.parquet",
     mask_dir=processed_dir / "mask",
     macro_dir=processed_dir / "macro",
     mezzo_dir=processed_dir / "mezzo",

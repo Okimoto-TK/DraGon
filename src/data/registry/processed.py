@@ -39,10 +39,10 @@ PROCESSED_PARAM_MAP: dict[str, ProcessedParams] = {
         reader=read_parquet,
         writer=write_parquet,
         sreader=read_parquet_schema,
-        path=processed_path.index_dir,
+        path=processed_path.index_path,
         schema=PROCESSED_INDEX_SCHEMA,
         desc="index",
-        raw_deps=("suspend",),
+        raw_deps={"suspend_df": "suspend"},
         processor_kwargs={},
     ),
     "mask": ProcessedParams(
@@ -53,7 +53,7 @@ PROCESSED_PARAM_MAP: dict[str, ProcessedParams] = {
         path=processed_path.mask_dir,
         schema=PROCESSED_MASK_SCHEMA,
         desc="mask",
-        raw_deps=("suspend", "namechange"),
+        raw_deps={"suspend_df": "suspend", "namechange_df": "namechange"},
         processor_kwargs={},
     ),
     "macro": ProcessedParams(
@@ -64,7 +64,7 @@ PROCESSED_PARAM_MAP: dict[str, ProcessedParams] = {
         path=processed_path.macro_dir,
         schema=PROCESSED_MACRO_SCHEMA,
         desc="macro",
-        raw_deps=("daily", "adj_factor"),
+        raw_deps={"daily_df": "daily", "adj_factor_df": "adj_factor"},
         processor_kwargs={"lookback": MACRO_LOOKBACK},
     ),
     "mezzo": ProcessedParams(
@@ -75,7 +75,7 @@ PROCESSED_PARAM_MAP: dict[str, ProcessedParams] = {
         path=processed_path.mezzo_dir,
         schema=PROCESSED_MEZZO_SCHEMA,
         desc="mezzo",
-        raw_deps=("5min", "adj_factor"),
+        raw_deps={"min5_df": "5min", "adj_factor_df": "adj_factor"},
         processor_kwargs={"lookback": MACRO_LOOKBACK},
     ),
     "micro": ProcessedParams(
@@ -86,7 +86,7 @@ PROCESSED_PARAM_MAP: dict[str, ProcessedParams] = {
         path=processed_path.micro_dir,
         schema=PROCESSED_MICRO_SCHEMA,
         desc="micro",
-        raw_deps=("5min", "adj_factor"),
+        raw_deps={"min5_df": "5min", "adj_factor_df": "adj_factor"},
         processor_kwargs={"lookback": MACRO_LOOKBACK},
     ),
     "sidechain": ProcessedParams(
@@ -97,7 +97,7 @@ PROCESSED_PARAM_MAP: dict[str, ProcessedParams] = {
         path=processed_path.sidechain_dir,
         schema=PROCESSED_SIDECHAIN_SCHEMA,
         desc="sidechain",
-        raw_deps=("daily", "adj_factor", "moneyflow"),
+        raw_deps={"daily_df": "daily", "adj_factor_df": "adj_factor", "moneyflow_df": "moneyflow"},
         processor_kwargs={"lookback": MACRO_LOOKBACK},
     ),
     "label": ProcessedParams(
@@ -108,7 +108,7 @@ PROCESSED_PARAM_MAP: dict[str, ProcessedParams] = {
         path=processed_path.label_dir,
         schema=PROCESSED_LABEL_SCHEMA,
         desc="label",
-        raw_deps=("daily", "adj_factor"),
+        raw_deps={"daily_df": "daily", "adj_factor_df": "adj_factor"},
         processor_kwargs={},
     ),
 }

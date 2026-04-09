@@ -23,7 +23,7 @@ class MairuiConfig:
 class TushareConfig:
     """Configuration for Tushare API client."""
 
-    mode: TushareMode = "private"
-    token: str = "nGiMftDngiLxiTZzpDVDxMpgOqrSPblmorglqyvXvLTvTNNhuJPyPNwXWZMzyVWz"
+    mode: TushareMode = "official"
+    token: str = "73a0950ad993c5aa49444b84198f11b920f9d16ac56a816e81644eb5"
     timeout: int = 5
-    http_url: str | None = "http://121.40.135.59:8010"
+    http_url: str | None = None

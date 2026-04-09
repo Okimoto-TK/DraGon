@@ -15,7 +15,7 @@ Exchange = Literal["SSE", "SZSE", "BSE"]
 Status = Literal["L", "D", "P", "G"]
 
 # Pipeline actions
-Action = Literal["fetch", "load", "validate"]
+Action = Literal["fetch", "load", "validate", "process"]
 
 # Supported Polars data types for schema columns
 DType: TypeAlias = (

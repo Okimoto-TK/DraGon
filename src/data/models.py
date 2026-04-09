@@ -128,5 +128,5 @@ class ProcessedParams(Params):
     desc: Literal[
         "index", "mask", "macro", "mezzo", "micro", "sidechain", "label",
     ]
-    raw_deps: tuple[str, ...] = ()
-    processor_kwargs: dict = ()
+    raw_deps: dict[str, str] = {}  # kwarg_name -> raw_type
+    processor_kwargs: dict = {}

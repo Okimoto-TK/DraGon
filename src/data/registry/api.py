@@ -5,7 +5,7 @@ from __future__ import annotations
 
 FETCH_FIELD_UNIVERSE = ["ts_code", "exchange", "list_status"]
 FETCH_FIELD_CAL = ["cal_date", "is_open"]
-FETCH_FIELD_DAILY = ["ts_code", "trade_date", "open", "high", "low", "close", "vol"]
+FETCH_FIELD_DAILY = ["ts_code", "trade_date", "open", "high", "low", "close", "vol", "amount"]
 FETCH_FIELD_ADJ_FACTOR = ["ts_code", "trade_date", "adj_factor"]
 FETCH_FIELD_MONEYFLOW = [
     "ts_code",
@@ -35,7 +35,7 @@ FETCH_FIELD_SUSPEND = ["ts_code", "trade_date", "suspend_type"]
 
 # === Mairui field selections ===
 
-FETCH_FIELD_5MIN = ["code", "t", "o", "h", "l", "c", "v"]
+FETCH_FIELD_5MIN = ["code", "t", "o", "h", "l", "c", "v", "a"]
 
 # === Column name mappings (source -> canonical) ===
 
@@ -54,6 +54,7 @@ FIELD_MAP_5MIN = {
     "l": "low",
     "c": "close",
     "v": "vol",
+    "a": "amount"
 }
 
 FIELD_MAP_NAMECHANGE = {"ts_code": "code", "start_date": "trade_date"}

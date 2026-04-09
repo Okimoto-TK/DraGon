@@ -184,10 +184,11 @@ class ProcessedPipeline:
 
     @staticmethod
     def _validate(
-        reader: Callable,
+        sreader: Callable,
         path: Path,
         schema: TableSchema,
         desc: str,
+        **_kwargs,
     ) -> None:
         """Load processed data and validate against schema.
 
@@ -197,7 +198,7 @@ class ProcessedPipeline:
             schema: Table schema for validation.
             desc: Description for logging.
         """
-        df = reader(path=path, schema=schema, desc=desc)
+        df = sreader(path=path, desc=desc)
         validate_table(df=df, schema=schema)
 
     def run(
@@ -219,18 +220,25 @@ class ProcessedPipeline:
 
         # Fetch raw dependencies from RawPipeline
         raw_data: dict[str, pl.DataFrame | None] = {}
-        for raw_type in params.raw_deps:
-            raw_data[raw_type] = self.raw_pipe.run(
+        for kwarg_name, raw_type in params.raw_deps.items():
+            raw_data[kwarg_name] = self.raw_pipe.run(
                 action={"load"},
                 query=Query(desc=raw_type),
             )
 
         # Build processor kwargs: raw data + pre-bound kwargs
         proc_kwargs = {**raw_data}
-        if "index_df" not in proc_kwargs:
-            proc_kwargs["index_df"] = self.raw_pipe.codes
-        proc_kwargs.update(params.processor_kwargs)
 
+        # Load processed index if needed (skip when processing index itself)
+        if desc != "index":
+            index_params = PROCESSED_PARAM_MAP["index"]
+            proc_kwargs["index_df"] = index_params.reader(
+                path=index_params.path,
+                schema=index_params.schema,
+                desc="index",
+            )
+
+        proc_kwargs.update(params.processor_kwargs)
         if "process" in action:
             if params.processor is None:
                 raise ValueError(f"No processor bound for {desc!r}")
@@ -245,7 +253,7 @@ class ProcessedPipeline:
 
         if "validate" in action:
             self._validate(
-                reader=params.sreader,
+                sreader=params.sreader,
                 path=params.path,
                 schema=params.schema,
                 desc=desc,

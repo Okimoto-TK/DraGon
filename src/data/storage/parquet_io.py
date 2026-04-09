@@ -84,17 +84,26 @@ def write_parquet(df: pl.DataFrame, path: Path, schema: TableSchema, desc: str =
 
 
 def write_parquets(df: pl.DataFrame, path: Path, schema: TableSchema, desc: str = "") -> None:
-    """Partition DataFrame by date and write to separate parquet files."""
+    """Partition DataFrame and write to separate parquet files based on schema.partition_by."""
     vlog(_SRC, f"Writing {desc} to {path}...")
     path.mkdir(parents=True, exist_ok=True)
     validate_table(df, schema)
 
     results = partition_by(df, schema.partition_by)
-    date_fmt = schema.get_column("trade_date").fmt
+    
+    partition_col = schema.partition_by[0]
+    is_date_col = partition_col == "trade_date"
+    date_fmt = schema.get_column("trade_date").fmt if is_date_col else "%s"
 
-    for (date_val,), _df in tqdm(results.items(), desc=f"Writing {desc}:", disable=config.debug):
-        vlog(_SRC, f"Writing {date_val.strftime(date_fmt)}...")
-        file_path = path / f"{date_val.strftime(date_fmt)}.parquet"
+    for keys, _df in tqdm(results.items(), desc=f"Writing {desc}:", disable=config.debug):
+        val = keys[0]
+        if is_date_col:
+            filename = f"{val.strftime(date_fmt)}.parquet"
+        else:
+            filename = f"{val}.parquet"
+        
+        vlog(_SRC, f"Writing {filename}...")
+        file_path = path / filename
         _df.write_parquet(file_path)
 
     vlog(_SRC, f"Writing {desc} done.")
