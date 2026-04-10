@@ -74,21 +74,18 @@ class MairuiApi(RawProvider):
                     response.raise_for_status()
                     result = response.json()
 
-                    try:
-                        df = pl.from_dicts(result, schema=FETCH_FIELD_5MIN)
-                        if df.is_empty():
-                            return pl.DataFrame(schema=FETCH_FIELD_5MIN)
-                        df = df.with_columns(code=pl.lit(code)).with_columns(
-                            ps.all()
-                            .exclude(["code", "t"])
-                            .map_batches(lambda s: s.cast(pl.Float64))
-                        )
-                        return df
-                    except Exception:
+                    df = pl.from_dicts(result, schema=FETCH_FIELD_5MIN)
+                    if df.is_empty():
                         return pl.DataFrame(schema=FETCH_FIELD_5MIN)
+                    df = df.with_columns(code=pl.lit(code)).with_columns(
+                        ps.all()
+                        .exclude(["code", "t"])
+                        .cast(pl.Float64)
+                    )
+                    return df
         except Exception as e:
             self.vlog(f"Failed to request JSON for {code}: {e}", level="ERROR")
-            raise
+            return pl.DataFrame(schema=FETCH_FIELD_5MIN)
 
     async def _controller(
         self, code: str, start_date: str, end_date: str
@@ -151,6 +148,7 @@ class MairuiApi(RawProvider):
                 .str.to_datetime(self.time_format, strict=config.debug)
                 .dt.time()
                 .alias("time"),
+                pl.col("vol") * 100
             ).drop("trade_time").cast(RAW_5MIN_SCHEMA.column_names_and_types)
 
         if codes is not None:

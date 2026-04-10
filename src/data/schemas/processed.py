@@ -13,13 +13,14 @@ from ..types import DType
 
 # === Helper: Generate feature column schemas ===
 
-def _generate_feature_columns(prefix: str, count: int, dtype: DType = pl.Float64) -> tuple[ColumnSchema, ...]:
+def _generate_feature_columns(prefix: str, count: int, dtype: DType = pl.Float64, start_from: int = 1) -> tuple[ColumnSchema, ...]:
     """Generate feature column schemas with sequential numbering.
 
     Args:
         prefix: Column name prefix (e.g., "mcr_f", "mzo_f", "mic_f").
         count: Number of features to generate.
         dtype: Data type for the columns.
+        start_from: Starting index for feature numbering.
 
     Returns:
         Tuple of ColumnSchema objects.
@@ -32,7 +33,7 @@ def _generate_feature_columns(prefix: str, count: int, dtype: DType = pl.Float64
             nullable=True,
             description=f"Feature {i} ({prefix.rstrip('_f')})",
         )
-        for i in range(1, count + 1)
+        for i in range(start_from, start_from + count)
     )
 
 
@@ -130,7 +131,7 @@ PROCESSED_MACRO_SCHEMA = TableSchema(
             fmt="%Y%m%d",
             description="As-of date.",
         ),
-        *_generate_feature_columns("mcr_f", 10, pl.Float64),
+        *_generate_feature_columns("mcr_f", 9, pl.Float64, start_from=0),
     ),
 )
 
@@ -165,7 +166,7 @@ PROCESSED_MEZZO_SCHEMA = TableSchema(
             nullable=False,
             description="Time index for 30-minute bars within the trading day.",
         ),
-        *_generate_feature_columns("mzo_f", 10, pl.Float64),
+        *_generate_feature_columns("mzo_f", 9, pl.Float64, start_from=0),
     ),
 )
 
@@ -200,7 +201,7 @@ PROCESSED_MICRO_SCHEMA = TableSchema(
             nullable=False,
             description="Time index for 5-minute bars within the trading day.",
         ),
-        *_generate_feature_columns("mic_f", 10, pl.Float64),
+        *_generate_feature_columns("mic_f", 9, pl.Float64, start_from=0),
     ),
 )
 
@@ -208,7 +209,7 @@ PROCESSED_MICRO_SCHEMA = TableSchema(
 PROCESSED_SIDECHAIN_SCHEMA = TableSchema(
     name="processed_sidechain",
     layer="processed",
-    description="Energy modulation sidechain features (preserve absolute magnitude information).",
+    description="Sidechain energy modulation features (gap, moneyflow, volume surge).",
     primary_key=("code", "trade_date"),
     partition_by=("code",),
     columns=(
@@ -229,39 +230,46 @@ PROCESSED_SIDECHAIN_SCHEMA = TableSchema(
             description="As-of date.",
         ),
         ColumnSchema(
-            name="mf_abs_rank",
+            name="gap",
             dtype=pl.Float64,
             required=True,
             nullable=True,
-            description="Money flow absolute rank.",
+            description="Overnight gap: ln(Open_t / Close_{t-1})",
         ),
         ColumnSchema(
-            name="mf_impact",
+            name="gap_rank",
             dtype=pl.Float64,
             required=True,
             nullable=True,
-            description="Money flow impact.",
+            description="Gap cross-sectional normal rank",
         ),
         ColumnSchema(
-            name="mf_conviction",
+            name="mf_net_ratio",
             dtype=pl.Float64,
             required=True,
             nullable=True,
-            description="Money flow conviction.",
+            description="Main force net ratio: (buy_main - sell_main) / Amount",
         ),
         ColumnSchema(
-            name="energy_factor",
+            name="mf_concentration",
             dtype=pl.Float64,
             required=True,
             nullable=True,
-            description="Energy factor.",
+            description="Main force concentration: (buy_main + sell_main) / Amount",
         ),
         ColumnSchema(
-            name="mkt_vola_rank",
+            name="amt_surge_rank",
             dtype=pl.Float64,
             required=True,
             nullable=True,
-            description="Market volatility rank.",
+            description="Volume surge normal rank: NormalRank(Amount / MA(Amount, 5))",
+        ),
+        ColumnSchema(
+            name="velocity_rank",
+            dtype=pl.Float64,
+            required=True,
+            nullable=True,
+            description="Velocity cross-sectional normal rank: NormalRank(ln(Close_t / Close_{t-1}))",
         ),
     ),
 )

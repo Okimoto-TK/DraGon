@@ -92,7 +92,7 @@ def write_parquets(df: pl.DataFrame, path: Path, schema: TableSchema, desc: str 
     df = df.select(schema.column_names)
 
     results = partition_by(df, schema.partition_by)
-    
+
     partition_col = schema.partition_by[0]
     is_date_col = partition_col == "trade_date"
     date_fmt = schema.get_column("trade_date").fmt if is_date_col else "%s"
@@ -103,9 +103,38 @@ def write_parquets(df: pl.DataFrame, path: Path, schema: TableSchema, desc: str 
             filename = f"{val.strftime(date_fmt)}.parquet"
         else:
             filename = f"{val}.parquet"
-        
+
         vlog(_SRC, f"Writing {filename}...")
         file_path = path / filename
         _df.write_parquet(file_path)
 
+    vlog(_SRC, f"Writing {desc} done.")
+
+
+# === Lazy I/O Functions ===
+
+def scan_parquets(path: Path, desc: str = "") -> pl.LazyFrame:
+    """Scan all parquet files from a directory lazily (no memory overhead)."""
+    vlog(_SRC, f"Scanning {desc} from {path}...")
+    lf = pl.scan_parquet(path / "*.parquet")
+    vlog(_SRC, f"Scanning {desc} done.")
+    return lf
+
+
+def write_parquets_lazy(
+    lf: pl.LazyFrame,
+    path: Path,
+    schema: TableSchema,
+    desc: str = "",
+) -> None:
+    """Write LazyFrame to parquet files partitioned by code using streaming sink."""
+    vlog(_SRC, f"Writing {desc} to {path}...")
+    path.mkdir(parents=True, exist_ok=True)
+    
+    # Sink to parquet files partitioned by code
+    lf.sink_parquet(
+        path / "{code}.parquet",
+        partition_by=["code"],
+        maintain_order=False,
+    )
     vlog(_SRC, f"Writing {desc} done.")

@@ -10,8 +10,8 @@ FEATURE_TYPES = [
     # "macro",
     # "mezzo",
     "micro",
-    # "sidechain",
-    # "label",
+    "sidechain",
+    "label",
 ]
 
 
@@ -23,7 +23,7 @@ def main() -> None:
     for desc in FEATURE_TYPES:
         print(f"Processing {desc}...")
         processed_pipe.run(
-            action={"validate"},
+            action={"process", "validate"},
             desc=desc,
         )
         print(f"Done processing {desc}.")

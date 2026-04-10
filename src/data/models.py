@@ -5,7 +5,7 @@ import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Any
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
@@ -129,5 +129,6 @@ class ProcessedParams(Params):
     desc: Literal[
         "index", "mask", "macro", "mezzo", "micro", "sidechain", "label",
     ]
-    raw_deps: dict[str, str] = {}  # kwarg_name -> raw_type
-    processor_kwargs: dict = {}
+    raw_deps: dict[str, str] = {}  # kwarg_name -> raw_type (eager loaded)
+    lazy_deps: dict[str, str] = {}  # kwarg_name -> raw_type (lazy scanned)
+    processor_kwargs: dict[str, Any] = {}

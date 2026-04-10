@@ -174,150 +174,6 @@ class ProcessedPipeline:
         df = params.sreader(path=params.path, desc=desc)
         validate_table(df=df, schema=params.schema)
 
-    @staticmethod
-    def _process_chunk(
-        action: Action | set[Action],
-        desc: str,
-        params: "ProcessedParams",
-        **proc_kwargs,
-    ) -> None:
-        """Chunked executor for high-volume data (micro, mezzo).
-
-        Strategy:
-        1. Process in chunks, splitting each chunk by Code and saving to cache.
-        2. Merge by iterating Codes (low memory usage) to build final parquet files.
-        
-        Note: This method only handles 'process' action.
-        Validate and Load are handled by the caller (run method).
-        """
-        from glob import glob
-        from datetime import date
-        import shutil
-        from config.config import cache_dir
-        from src.data.registry.processor import CHUNK_DAYS
-
-        chunk_days = CHUNK_DAYS
-
-        # 1. Identify raw data directories
-        raw_5min_dir = PARAM_MAP["5min"].path
-        raw_adj_dir = PARAM_MAP["adj_factor"].path
-
-        # 2. Get available dates
-        files = sorted(glob("*.parquet", root_dir=raw_5min_dir, recursive=False))
-        dates = [Path(f).stem for f in files]
-        if not dates:
-            return None
-
-        # 3. Load Index once
-        try:
-            index_params = PROCESSED_PARAM_MAP["index"]
-            index_df = index_params.reader(
-                path=index_params.path,
-                schema=index_params.schema,
-                desc="index",
-            )
-        except Exception:
-            return None
-
-        # 3.5 Setup cache directory
-        cache_path = cache_dir / desc
-        if cache_path.exists():
-            shutil.rmtree(cache_path)
-
-        # State for tail-carry
-        tail_5min: pl.DataFrame | None = None
-        tail_adj: pl.DataFrame | None = None
-        
-        all_codes = set()
-
-        # 4. Loop through chunks
-        for i in tqdm(range(0, len(dates), chunk_days), desc=f"Processing {desc} (chunked)"):
-            current_dates = dates[i : i + chunk_days]
-            chunk_dir = cache_path / f"chunk_{i:04d}"
-            chunk_dir.mkdir(parents=True, exist_ok=True)
-
-            # Load new chunk
-            new_5min = load_parquet_files(raw_5min_dir, current_dates)
-            new_adj = load_parquet_files(raw_adj_dir, current_dates)
-
-            if new_5min.is_empty():
-                continue
-
-            # Concat with tail
-            if tail_5min is not None:
-                chunk_5min = pl.concat([tail_5min, new_5min])
-                chunk_adj = pl.concat([tail_adj, new_adj])
-            else:
-                chunk_5min = new_5min
-                chunk_adj = new_adj
-
-            # Process
-            proc_kwargs["min5_df"] = chunk_5min
-            proc_kwargs["adj_factor_df"] = chunk_adj
-            proc_kwargs["index_df"] = index_df
-
-            res = params.processor(**proc_kwargs)
-
-            # Filter to current dates only
-            date_objs = [date(int(d[:4]), int(d[4:6]), int(d[6:])) for d in current_dates]
-            final_res = res.filter(pl.col("trade_date").is_in(date_objs))
-
-            # Write to cache split by Code
-            codes_in_chunk = final_res["code"].unique().to_list()
-            all_codes.update(codes_in_chunk)
-
-            for code in codes_in_chunk:
-                code_df = final_res.filter(pl.col("code") == code)
-                code_df.write_parquet(chunk_dir / f"{code}.parquet")
-
-            # Update Tail (Last 2 days)
-            tail_dates = current_dates[-2:]
-            tail_5min = load_parquet_files(raw_5min_dir, tail_dates)
-            tail_adj = load_parquet_files(raw_adj_dir, tail_dates)
-
-            del chunk_5min
-            del chunk_adj
-            del res
-            del final_res
-            gc.collect()
-
-        # 5. Merge by Code (Low Memory Strategy)
-        # Only merge if process action was requested
-        if "process" in action:
-            # Clean final directory
-            if params.path.exists():
-                shutil.rmtree(params.path)
-            params.path.mkdir(parents=True, exist_ok=True)
-
-            # Sort codes to process deterministically
-            sorted_codes = sorted(list(all_codes))
-
-            for code in tqdm(sorted_codes, desc=f"Merging {desc} by code"):
-                # Find all chunk files for this specific code
-                chunk_files = sorted(cache_path.glob(f"*/{code}.parquet"))
-
-                if not chunk_files:
-                    continue
-
-                # Read and concat only for THIS code (Very small memory footprint)
-                dfs = [pl.read_parquet(f) for f in chunk_files]
-                merged = pl.concat(dfs)
-
-                # Deduplicate
-                merged = merged.unique(
-                    subset=["trade_date", "time_index"], keep="last"
-                ).sort(["trade_date", "time_index"])
-
-                # Write to final destination
-                merged.write_parquet(params.path / f"{code}.parquet")
-
-                del dfs
-                del merged
-
-        # 6. Cleanup cache
-        if cache_path.exists():
-            shutil.rmtree(cache_path)
-
     def run(
         self,
         action: Action | set[Action],
@@ -327,12 +183,22 @@ class ProcessedPipeline:
         """Run the pipeline using the executor bound in ProcessedParams."""
         params = PROCESSED_PARAM_MAP[desc]
 
-        # Fetch raw dependencies (used for _process, ignored by _process_chunk)
+        # Fetch raw dependencies (eager loaded)
         raw_data: dict[str, pl.DataFrame | None] = {}
         for kwarg_name, raw_type in params.raw_deps.items():
             raw_data[kwarg_name] = self.raw_pipe.run(
                 action={"load"},
                 query=Query(desc=raw_type),
+            )
+
+        # Fetch lazy dependencies (scanned, no memory overhead)
+        from src.data.storage.parquet_io import scan_parquets
+        lazy_data: dict[str, pl.LazyFrame | None] = {}
+        for kwarg_name, raw_type in params.lazy_deps.items():
+            raw_params = PARAM_MAP[raw_type]
+            lazy_data[kwarg_name] = scan_parquets(
+                path=raw_params.path,
+                desc=raw_type,
             )
 
         # Load Index
@@ -344,7 +210,7 @@ class ProcessedPipeline:
                 desc="index",
             )
 
-        kwargs = {**raw_data, **params.processor_kwargs, **extra_kwargs}
+        kwargs = {**raw_data, **lazy_data, **params.processor_kwargs, **extra_kwargs}
 
         # 1. Execute processing (either standard or chunked)
         if "process" in action:

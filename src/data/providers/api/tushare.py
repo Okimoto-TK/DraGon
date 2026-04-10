@@ -7,6 +7,7 @@ from collections.abc import Callable, Sequence
 
 import config.config as config
 import polars as pl
+import polars.selectors as cs
 import tushare as ts
 from config.api import TushareConfig
 from tqdm import tqdm
@@ -245,7 +246,10 @@ class TushareApi(RawProvider):
                 codes=codes,
                 calendar=calendar,
             )
-            .with_columns(pl.col("vol") * 100)
+            .with_columns(
+                pl.col("vol") * 100,
+                pl.col("amount") * 1000
+            )
             .cast(RAW_DAILY_SCHEMA.column_names_and_types)
         )
         if codes is not None and calendar is not None:
@@ -311,7 +315,10 @@ class TushareApi(RawProvider):
             query=query,
             codes=codes,
             calendar=calendar,
-        ).cast(RAW_MONEYFLOW_SCHEMA.column_names_and_types)
+        ).cast(RAW_MONEYFLOW_SCHEMA.column_names_and_types).with_columns(
+            cs.contains("amount") * 10000,
+            cs.contains("vol") * 100
+        )
 
         if codes is not None and calendar is not None:
             df = align_df(

@@ -28,8 +28,10 @@ from src.data.storage.parquet_io import (
     read_parquet_schema,
     read_parquets,
     read_parquets_schema,
+    scan_parquets,
     write_parquet,
     write_parquets,
+    write_parquets_lazy,
 )
 
 # Processed pipeline registry mapping feature type to schema and path
@@ -67,31 +69,33 @@ PROCESSED_PARAM_MAP: dict[str, ProcessedParams] = {
         path=processed_path.macro_dir,
         schema=PROCESSED_MACRO_SCHEMA,
         desc="macro",
-        raw_deps={"daily_df": "daily", "adj_factor_df": "adj_factor"},
+        raw_deps={"daily_df": "daily", "adj_factor_df": "adj_factor", "limit_df": "limit"},
         processor_kwargs={"lookback": MACRO_LOOKBACK},
     ),
     "mezzo": ProcessedParams(
         processor=process_mezzo,
-        proc="_process_chunk",  # String method name for chunked processing
-        reader=read_parquets,
-        writer=write_parquets,
+        proc="_process",  # Standard process with lazy frames
+        reader=scan_parquets,
+        writer=write_parquets_lazy,
         sreader=read_parquets_schema,
         path=processed_path.mezzo_dir,
         schema=PROCESSED_MEZZO_SCHEMA,
         desc="mezzo",
-        raw_deps={},
+        raw_deps={"adj_factor_df": "adj_factor", "limit_df": "limit"},
+        lazy_deps={"min5_lf": "5min"},
         processor_kwargs={"lookback": MEZZO_LOOKBACK},
     ),
     "micro": ProcessedParams(
         processor=process_micro,
-        proc="_process_chunk",  # String method name for chunked processing
-        reader=read_parquets,
-        writer=write_parquets,
+        proc="_process",  # Standard process with lazy frames
+        reader=scan_parquets,
+        writer=write_parquets_lazy,
         sreader=read_parquets_schema,
         path=processed_path.micro_dir,
         schema=PROCESSED_MICRO_SCHEMA,
         desc="micro",
-        raw_deps={},
+        raw_deps={"adj_factor_df": "adj_factor", "limit_df": "limit"},
+        lazy_deps={"min5_lf": "5min"},
         processor_kwargs={"lookback": MICRO_LOOKBACK},
     ),
     "sidechain": ProcessedParams(
