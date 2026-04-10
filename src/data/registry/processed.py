@@ -13,7 +13,7 @@ from src.data.processor.process import (
     process_micro,
     process_sidechain,
 )
-from src.data.registry.processor import LABEL_WINDOW, MACRO_LOOKBACK
+from src.data.registry.processor import MACRO_LOOKBACK, MEZZO_LOOKBACK, MICRO_LOOKBACK
 from src.data.schemas.processed import (
     PROCESSED_INDEX_SCHEMA,
     PROCESSED_LABEL_SCHEMA,
@@ -36,6 +36,7 @@ from src.data.storage.parquet_io import (
 PROCESSED_PARAM_MAP: dict[str, ProcessedParams] = {
     "index": ProcessedParams(
         processor=process_index,
+        proc="_process",  # String method name to avoid circular imports
         reader=read_parquet,
         writer=write_parquet,
         sreader=read_parquet_schema,
@@ -47,6 +48,7 @@ PROCESSED_PARAM_MAP: dict[str, ProcessedParams] = {
     ),
     "mask": ProcessedParams(
         processor=process_mask,
+        proc="_process",  # String method name
         reader=read_parquets,
         writer=write_parquets,
         sreader=read_parquets_schema,
@@ -58,6 +60,7 @@ PROCESSED_PARAM_MAP: dict[str, ProcessedParams] = {
     ),
     "macro": ProcessedParams(
         processor=process_macro,
+        proc="_process",  # String method name
         reader=read_parquets,
         writer=write_parquets,
         sreader=read_parquets_schema,
@@ -69,28 +72,31 @@ PROCESSED_PARAM_MAP: dict[str, ProcessedParams] = {
     ),
     "mezzo": ProcessedParams(
         processor=process_mezzo,
+        proc="_process_chunk",  # String method name for chunked processing
         reader=read_parquets,
         writer=write_parquets,
         sreader=read_parquets_schema,
         path=processed_path.mezzo_dir,
         schema=PROCESSED_MEZZO_SCHEMA,
         desc="mezzo",
-        raw_deps={"min5_df": "5min", "adj_factor_df": "adj_factor"},
-        processor_kwargs={"lookback": MACRO_LOOKBACK},
+        raw_deps={},
+        processor_kwargs={"lookback": MEZZO_LOOKBACK},
     ),
     "micro": ProcessedParams(
         processor=process_micro,
+        proc="_process_chunk",  # String method name for chunked processing
         reader=read_parquets,
         writer=write_parquets,
         sreader=read_parquets_schema,
         path=processed_path.micro_dir,
         schema=PROCESSED_MICRO_SCHEMA,
         desc="micro",
-        raw_deps={"min5_df": "5min", "adj_factor_df": "adj_factor"},
-        processor_kwargs={"lookback": MACRO_LOOKBACK},
+        raw_deps={},
+        processor_kwargs={"lookback": MICRO_LOOKBACK},
     ),
     "sidechain": ProcessedParams(
         processor=process_sidechain,
+        proc="_process",  # String method name
         reader=read_parquets,
         writer=write_parquets,
         sreader=read_parquets_schema,
@@ -102,6 +108,7 @@ PROCESSED_PARAM_MAP: dict[str, ProcessedParams] = {
     ),
     "label": ProcessedParams(
         processor=process_label,
+        proc="_process",  # String method name
         reader=read_parquets,
         writer=write_parquets,
         sreader=read_parquets_schema,

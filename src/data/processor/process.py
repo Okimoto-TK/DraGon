@@ -196,13 +196,11 @@ def process_micro(
         DataFrame with code, trade_date, time_index, mic_f1..mic_f10 columns.
     """
     # Generate time_index with progress
-    tqdm.write("Generating time index...")
     min5_indexed = min5_df.sort(["code", "trade_date", "time"]).with_columns(
         time_index=pl.int_range(1, pl.len() + 1).over(["code", "trade_date"]).cast(pl.Int32)
     ).drop("time")
 
     # Adjust prices by adj_factor with progress
-    tqdm.write("Adjusting prices...")
     min5_adj = min5_indexed.join(
         adj_factor_df.select(["code", "trade_date", "adj_factor"]),
         on=["code", "trade_date"],
@@ -215,7 +213,6 @@ def process_micro(
     ).drop("adj_factor")
 
     # Process OHLCV features for micro (time_index present) with progress
-    tqdm.write(f"Processing {lookback}-step micro features...")
     result = _process_ohlcv(
         index_df=index_df,
         ohlcv_df=min5_adj,
@@ -223,7 +220,7 @@ def process_micro(
     )
 
     # Rename f* to mic_f*
-    for i in tqdm(range(1, 11), desc="Renaming micro features", disable=config.debug):
+    for i in range(1, 11):
         result = result.rename({f"f{i}": f"mic_f{i}"})
 
     validate_table(result, PROCESSED_MICRO_SCHEMA)

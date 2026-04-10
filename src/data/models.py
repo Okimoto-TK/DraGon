@@ -125,6 +125,7 @@ class ProcessedParams(Params):
     """Pipeline parameters for processed data storage and retrieval."""
 
     processor: Callable
+    proc: str = "_process"  # Method name to dispatch (e.g., "_process", "_process_chunk")
     desc: Literal[
         "index", "mask", "macro", "mezzo", "micro", "sidechain", "label",
     ]

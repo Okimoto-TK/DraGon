@@ -23,7 +23,7 @@ def main() -> None:
     for desc in FEATURE_TYPES:
         print(f"Processing {desc}...")
         processed_pipe.run(
-            action={"process", "validate", "load"},
+            action={"validate"},
             desc=desc,
         )
         print(f"Done processing {desc}.")
