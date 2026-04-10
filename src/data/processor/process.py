@@ -535,7 +535,8 @@ def _process_ohlcv(
     )
 
     # Determine structure
-    has_time_index = "time_index" in df.columns
+    schema_names = df.collect_schema().names()
+    has_time_index = "time_index" in schema_names
     sort_cols = ["code", "trade_date"] + (["time_index"] if has_time_index else [])
     group_key = ["trade_date"] + (["time_index"] if has_time_index else [])
 
@@ -628,7 +629,8 @@ def _process_ohlcv(
 
     # Drop helper columns
     cols_to_drop = ["logic_index", "up_limit", "down_limit", "step_idx", "weekday"]
-    df = df.drop([c for c in cols_to_drop if c in df.columns])
+    actual_drop = [c for c in cols_to_drop if c in df.collect_schema().names()]
+    df = df.drop(actual_drop)
 
     # Rename f*_raw to f*
     for i in range(9):
@@ -640,10 +642,10 @@ def _process_ohlcv(
         + (["time_index"] if has_time_index else [])
         + [f"f{i}" for i in range(9)]
     )
-    result = df.select([c for c in select_cols if c in df.columns])
+    result = df.select(select_cols)
 
     # Drop time column if present
-    if "time" in result.columns:
+    if "time" in result.collect_schema().names():
         result = result.drop("time")
 
     return result

@@ -9,7 +9,7 @@ from src.data.types import Exchange, Status
 
 # Debug & validation settings
 strict = True
-debug = False
+debug = True
 
 # Default filter criteria for stock universe
 DEFAULT_EXCHANGE: Sequence[Exchange] = ["SSE", "SZSE"]

@@ -84,34 +84,51 @@ def write_parquet(df: pl.DataFrame, path: Path, schema: TableSchema, desc: str =
     vlog(_SRC, f"Writing {desc} done.")
 
 
-def write_parquets(df: pl.DataFrame, path: Path, schema: TableSchema, desc: str = "") -> None:
-    """Partition DataFrame and write to separate parquet files based on schema.partition_by."""
+def write_parquets(df: pl.DataFrame | pl.LazyFrame, path: Path, schema: TableSchema, desc: str = "") -> None:
+    """Integrated Eager and Lazy partitioned writer.
+
+    For LazyFrame: sinks the entire LazyFrame to a single parquet file,
+    streaming data to disk without full collect.
+    For DataFrame: uses eager partition_by.
+    """
     vlog(_SRC, f"Writing {desc} to {path}...")
     path.mkdir(parents=True, exist_ok=True)
-    validate_table(df, schema)
-    df = df.select(schema.column_names)
 
-    results = partition_by(df, schema.partition_by)
+    if not schema.partition_by:
+        raise ValueError(f"Schema {schema} must define 'partition_by' for partitioned writing.")
 
     partition_col = schema.partition_by[0]
     is_date_col = partition_col == "trade_date"
     date_fmt = schema.get_column("trade_date").fmt if is_date_col else "%s"
 
-    for keys, _df in tqdm(results.items(), desc=f"Writing {desc}:", disable=config.debug):
-        val = keys[0]
-        if is_date_col:
-            filename = f"{val.strftime(date_fmt)}.parquet"
-        else:
-            filename = f"{val}.parquet"
+    # --- LazyFrame: single file sink ---
+    if isinstance(df, pl.LazyFrame):
+        vlog(_SRC, f"Detected LazyFrame, sinking to single file for {desc}...")
 
-        vlog(_SRC, f"Writing {filename}...")
-        file_path = path / filename
-        _df.write_parquet(file_path)
+        # Select columns to match schema
+        lf = df.select(schema.column_names)
+
+        # Sink entire LazyFrame to a single parquet file (streaming, no full collect)
+        output_path = path / "cache.parquet"
+        lf.sink_parquet(output_path)
+
+    # --- DataFrame: eager path ---
+    else:
+        vlog(_SRC, f"Detected DataFrame, using eager partitioning for {desc}...")
+        validate_table(df, schema)
+        df = df.select(schema.column_names)
+
+        results = partition_by(df, schema.partition_by)
+
+        for keys, _df in tqdm(results.items(), desc=f"Writing {desc}:", disable=config.debug):
+            val = keys[0]
+            filename = f"{val.strftime(date_fmt)}.parquet" if is_date_col else f"{val}.parquet"
+
+            vlog(_SRC, f"Writing {filename}...")
+            _df.write_parquet(path / filename)
 
     vlog(_SRC, f"Writing {desc} done.")
 
-
-# === Lazy I/O Functions ===
 
 def scan_parquets(path: Path, desc: str = "") -> pl.LazyFrame:
     """Scan all parquet files from a directory lazily (no memory overhead)."""
@@ -119,22 +136,3 @@ def scan_parquets(path: Path, desc: str = "") -> pl.LazyFrame:
     lf = pl.scan_parquet(path / "*.parquet")
     vlog(_SRC, f"Scanning {desc} done.")
     return lf
-
-
-def write_parquets_lazy(
-    lf: pl.LazyFrame,
-    path: Path,
-    schema: TableSchema,
-    desc: str = "",
-) -> None:
-    """Write LazyFrame to parquet files partitioned by code using streaming sink."""
-    vlog(_SRC, f"Writing {desc} to {path}...")
-    path.mkdir(parents=True, exist_ok=True)
-    
-    # Sink to parquet files partitioned by code
-    lf.sink_parquet(
-        path / "{code}.parquet",
-        partition_by=["code"],
-        maintain_order=False,
-    )
-    vlog(_SRC, f"Writing {desc} done.")

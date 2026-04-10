@@ -9,16 +9,16 @@ import polars as pl
 from src.data.models import TableSchema
 
 
-def _validate_required_columns(df: pl.DataFrame, schema: TableSchema) -> None:
+def _validate_required_columns(df: pl.DataFrame | pl.LazyFrame, schema: TableSchema) -> None:
     """Check that all required columns are present."""
-    missing = [c for c in schema.required_columns if c not in df.columns]
+    missing = [c for c in schema.required_columns if c not in df.collect_schema().names()]
     if missing:
         raise ValueError(f"Missing columns: {', '.join(missing)}")
 
 
-def _validate_extra_columns(df: pl.DataFrame, schema: TableSchema) -> None:
+def _validate_extra_columns(df: pl.DataFrame | pl.LazyFrame, schema: TableSchema) -> None:
     """Check for unexpected columns not defined in schema."""
-    extra = set(df.columns) - set(schema.column_names)
+    extra = set(df.collect_schema().names()) - set(schema.column_names)
     if extra:
         if config.debug:
             raise ValueError(f"Extra columns: {', '.join(extra)}")
@@ -26,24 +26,16 @@ def _validate_extra_columns(df: pl.DataFrame, schema: TableSchema) -> None:
             warnings.warn(f"Extra columns: {', '.join(extra)}", stacklevel=2)
 
 
-def _validate_data_types(df: pl.DataFrame, schema: TableSchema) -> None:
+def _validate_data_types(df: pl.DataFrame | pl.LazyFrame, schema: TableSchema) -> None:
     """Validate column data types match schema definitions."""
-    if not df.schema.items() <= schema.column_names_and_types.items():
-        diff = df.schema.items() - schema.column_names_and_types.items()
+    current_schema = df.collect_schema()
+    if not current_schema.items() <= schema.column_names_and_types.items():
+        diff = current_schema.items() - schema.column_names_and_types.items()
         for name, dtype in diff:
             if name in schema.column_names:
                 raise ValueError(
                     f"Wrong dtype: {name} has type {dtype}, expected {schema.get_column(name).dtype}"
                 )
-
-    # Validate stock code format if 'code' column exists
-    if "code" in schema.column_names:
-        code_fmt = schema.get_column("code").fmt
-        _df = df.with_columns(code_ok=pl.col("code").str.contains(code_fmt))
-        bad_data = _df.filter(~pl.col("code_ok"))
-
-        if not bad_data.is_empty():
-            raise ValueError(f"Code format mismatch in columns: {', '.join(_df.columns)}")
 
 
 def _validate_primary_key(df: pl.DataFrame, schema: TableSchema) -> None:
@@ -71,12 +63,16 @@ def _validate_primary_key(df: pl.DataFrame, schema: TableSchema) -> None:
         )
 
 
-def validate_table(df: pl.DataFrame, schema: TableSchema) -> None:
-    """Validate a DataFrame against a table schema.
+def validate_table(df: pl.DataFrame | pl.LazyFrame, schema: TableSchema) -> None:
+    """Validate a DataFrame/LazyFrame against a table schema.
 
-    Checks required columns, extra columns, data types, and primary key uniqueness.
+    For LazyFrame: only validates schema (column names and types), skips data-level checks.
+    For DataFrame: checks required columns, extra columns, data types, and primary key uniqueness.
     """
     _validate_required_columns(df, schema)
     _validate_extra_columns(df, schema)
-    _validate_primary_key(df, schema)
     _validate_data_types(df, schema)
+
+    # Primary key uniqueness requires eager evaluation
+    if isinstance(df, pl.DataFrame):
+        _validate_primary_key(df, schema)

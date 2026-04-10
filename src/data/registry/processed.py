@@ -31,7 +31,6 @@ from src.data.storage.parquet_io import (
     scan_parquets,
     write_parquet,
     write_parquets,
-    write_parquets_lazy,
 )
 
 # Processed pipeline registry mapping feature type to schema and path
@@ -76,7 +75,7 @@ PROCESSED_PARAM_MAP: dict[str, ProcessedParams] = {
         processor=process_mezzo,
         proc="_process",  # Standard process with lazy frames
         reader=scan_parquets,
-        writer=write_parquets_lazy,
+        writer=write_parquets,
         sreader=read_parquets_schema,
         path=processed_path.mezzo_dir,
         schema=PROCESSED_MEZZO_SCHEMA,
@@ -89,7 +88,7 @@ PROCESSED_PARAM_MAP: dict[str, ProcessedParams] = {
         processor=process_micro,
         proc="_process",  # Standard process with lazy frames
         reader=scan_parquets,
-        writer=write_parquets_lazy,
+        writer=write_parquets,
         sreader=read_parquets_schema,
         path=processed_path.micro_dir,
         schema=PROCESSED_MICRO_SCHEMA,
