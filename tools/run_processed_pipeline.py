@@ -8,9 +8,9 @@ FEATURE_TYPES = [
     # "index",
     # "mask",
     # "macro",
-    "mezzo",
-    "micro",
-    "sidechain",
+    # "mezzo",
+    # "micro",
+    # "sidechain",
     "label",
 ]
 

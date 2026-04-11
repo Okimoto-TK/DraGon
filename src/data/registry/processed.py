@@ -13,7 +13,6 @@ from src.data.processor.process import (
     process_micro,
     process_sidechain,
 )
-from src.data.registry.processor import MACRO_LOOKBACK, MEZZO_LOOKBACK, MICRO_LOOKBACK
 from src.data.schemas.processed import (
     PROCESSED_INDEX_SCHEMA,
     PROCESSED_LABEL_SCHEMA,
@@ -28,7 +27,6 @@ from src.data.storage.parquet_io import (
     read_parquet_schema,
     read_parquets,
     read_parquets_schema,
-    scan_parquets,
     write_parquet,
     write_parquets,
 )
@@ -45,7 +43,6 @@ PROCESSED_PARAM_MAP: dict[str, ProcessedParams] = {
         schema=PROCESSED_INDEX_SCHEMA,
         desc="index",
         raw_deps={"suspend_df": "suspend"},
-        processor_kwargs={},
     ),
     "mask": ProcessedParams(
         processor=process_mask,
@@ -57,7 +54,6 @@ PROCESSED_PARAM_MAP: dict[str, ProcessedParams] = {
         schema=PROCESSED_MASK_SCHEMA,
         desc="mask",
         raw_deps={"suspend_df": "suspend", "namechange_df": "namechange"},
-        processor_kwargs={},
     ),
     "macro": ProcessedParams(
         processor=process_macro,
@@ -69,33 +65,28 @@ PROCESSED_PARAM_MAP: dict[str, ProcessedParams] = {
         schema=PROCESSED_MACRO_SCHEMA,
         desc="macro",
         raw_deps={"daily_df": "daily", "adj_factor_df": "adj_factor", "limit_df": "limit"},
-        processor_kwargs={"lookback": MACRO_LOOKBACK},
     ),
     "mezzo": ProcessedParams(
         processor=process_mezzo,
-        proc="_process",  # Standard process with lazy frames
-        reader=scan_parquets,
+        proc="_process_chunk",  # Chunked processing
+        reader=read_parquets,
         writer=write_parquets,
         sreader=read_parquets_schema,
         path=processed_path.mezzo_dir,
         schema=PROCESSED_MEZZO_SCHEMA,
         desc="mezzo",
-        raw_deps={"adj_factor_df": "adj_factor", "limit_df": "limit"},
-        lazy_deps={"min5_lf": "5min"},
-        processor_kwargs={"lookback": MEZZO_LOOKBACK},
+        raw_deps={},
     ),
     "micro": ProcessedParams(
         processor=process_micro,
-        proc="_process",  # Standard process with lazy frames
-        reader=scan_parquets,
+        proc="_process_chunk",  # Chunked processing
+        reader=read_parquets,
         writer=write_parquets,
         sreader=read_parquets_schema,
         path=processed_path.micro_dir,
         schema=PROCESSED_MICRO_SCHEMA,
         desc="micro",
-        raw_deps={"adj_factor_df": "adj_factor", "limit_df": "limit"},
-        lazy_deps={"min5_lf": "5min"},
-        processor_kwargs={"lookback": MICRO_LOOKBACK},
+        raw_deps={},
     ),
     "sidechain": ProcessedParams(
         processor=process_sidechain,
@@ -107,7 +98,6 @@ PROCESSED_PARAM_MAP: dict[str, ProcessedParams] = {
         schema=PROCESSED_SIDECHAIN_SCHEMA,
         desc="sidechain",
         raw_deps={"daily_df": "daily", "adj_factor_df": "adj_factor", "moneyflow_df": "moneyflow"},
-        processor_kwargs={"lookback": MACRO_LOOKBACK},
     ),
     "label": ProcessedParams(
         processor=process_label,
@@ -119,6 +109,5 @@ PROCESSED_PARAM_MAP: dict[str, ProcessedParams] = {
         schema=PROCESSED_LABEL_SCHEMA,
         desc="label",
         raw_deps={"daily_df": "daily", "adj_factor_df": "adj_factor"},
-        processor_kwargs={},
     ),
 }

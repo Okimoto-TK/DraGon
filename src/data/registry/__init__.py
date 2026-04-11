@@ -21,12 +21,14 @@ from .api import (
     FIELD_MAP_SUSPEND,
     FIELD_MAP_UNIVERSE,
 )
+from .dataset import (
+    MACRO_LOOKBACK,
+    MEZZO_LOOKBACK,
+    MICRO_LOOKBACK
+)
 from .processor import (
     LABEL_WEIGHTS,
     LABEL_WINDOW,
-    MACRO_LOOKBACK,
-    MEZZO_LOOKBACK,
-    MICRO_LOOKBACK,
 )
 from .processed import PROCESSED_PARAM_MAP
 from .raw import PARAM_MAP

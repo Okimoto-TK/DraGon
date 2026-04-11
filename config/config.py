@@ -9,7 +9,7 @@ from src.data.types import Exchange, Status
 
 # Debug & validation settings
 strict = True
-debug = True
+debug = False
 
 # Default filter criteria for stock universe
 DEFAULT_EXCHANGE: Sequence[Exchange] = ["SSE", "SZSE"]
@@ -49,3 +49,5 @@ processed_path = SimpleNamespace(
     sidechain_dir=processed_dir / "sidechain",
     label_dir=processed_dir / "label",
 )
+
+assembled_dir = data_dir / "assembled"

@@ -130,5 +130,4 @@ class ProcessedParams(Params):
         "index", "mask", "macro", "mezzo", "micro", "sidechain", "label",
     ]
     raw_deps: dict[str, str] = {}  # kwarg_name -> raw_type (eager loaded)
-    lazy_deps: dict[str, str] = {}  # kwarg_name -> raw_type (lazy scanned)
     processor_kwargs: dict[str, Any] = {}

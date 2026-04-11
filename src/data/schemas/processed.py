@@ -258,6 +258,13 @@ PROCESSED_SIDECHAIN_SCHEMA = TableSchema(
             description="Main force concentration: (buy_main + sell_main) / Amount",
         ),
         ColumnSchema(
+            name="mf_net_rank",
+            dtype=pl.Float64,
+            required=True,
+            nullable=True,
+            description="Main force net rank: NormalRank(mf_net_ratio)",
+        ),
+        ColumnSchema(
             name="amt_surge_rank",
             dtype=pl.Float64,
             required=True,
@@ -271,6 +278,13 @@ PROCESSED_SIDECHAIN_SCHEMA = TableSchema(
             nullable=True,
             description="Velocity cross-sectional normal rank: NormalRank(ln(Close_t / Close_{t-1}))",
         ),
+        ColumnSchema(
+            name="amihud_impact",
+            dtype=pl.Float64,
+            required=True,
+            nullable=True,
+            description="Amihud illiquidity rank: NormalRank(abs(Velocity) / Amount)",
+        ),
     ),
 )
 
@@ -278,7 +292,7 @@ PROCESSED_SIDECHAIN_SCHEMA = TableSchema(
 PROCESSED_LABEL_SCHEMA = TableSchema(
     name="processed_label",
     layer="processed",
-    description="Prediction labels (PowerRank label).",
+    description="Dense orthogonal physical labels for Path-Dependent Risk-Adjusted Return (PDRAR) modeling.",
     primary_key=("code", "trade_date"),
     partition_by=("code",),
     columns=(
@@ -299,11 +313,32 @@ PROCESSED_LABEL_SCHEMA = TableSchema(
             description="As-of date.",
         ),
         ColumnSchema(
-            name="label_final",
+            name="label_S",
             dtype=pl.Float64,
             required=True,
             nullable=True,
-            description="PowerRank label.",
+            description="Weighted cumulative log return (Trend/Location).",
+        ),
+        ColumnSchema(
+            name="label_M",
+            dtype=pl.Float64,
+            required=True,
+            nullable=True,
+            description="Maximum cumulative log return (Right-tail/Peak) over the path.",
+        ),
+        ColumnSchema(
+            name="label_MDD",
+            dtype=pl.Float64,
+            required=True,
+            nullable=True,
+            description="Maximum drawdown (Left-tail/Risk) over the path.",
+        ),
+        ColumnSchema(
+            name="label_RV",
+            dtype=pl.Float64,
+            required=True,
+            nullable=True,
+            description="Realized volatility (Root sum of squared daily returns / Scale).",
         ),
     ),
 )

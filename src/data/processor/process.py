@@ -8,7 +8,7 @@ from tqdm import tqdm
 
 import config.config as config
 
-from src.data.registry.processor import LABEL_WINDOW, LABEL_WEIGHTS, MACRO_LOOKBACK
+from src.data.registry.processor import LABEL_WINDOW, LABEL_WEIGHTS, FEAT_WINDOW
 from src.data.schemas.processed import (
     PROCESSED_INDEX_SCHEMA,
     PROCESSED_LABEL_SCHEMA,
@@ -131,8 +131,8 @@ def process_mask(
             future_suspend = suspend[i:future_end].any()
             future_st = st[i:future_end].any()
 
-            # Index window [T-MACRO_LOOKBACK+1, T]: no ST (by logic_index)
-            lookback_start = current_idx - MACRO_LOOKBACK + 1
+            # Index window [T - FEAT_WINDOW, T]: no ST (by logic_index)
+            lookback_start = current_idx - FEAT_WINDOW
             lookback_mask = (logic_idx >= lookback_start) & (logic_idx <= current_idx)
             window_st = st[lookback_mask].any()
 
@@ -160,7 +160,6 @@ def process_macro(
     daily_df: pl.DataFrame,
     adj_factor_df: pl.DataFrame,
     limit_df: pl.DataFrame,
-    lookback: int = MACRO_LOOKBACK,
     **_kwargs,
 ) -> pl.DataFrame:
     """Process daily OHLCV data into macro backbone features.
@@ -176,7 +175,6 @@ def process_macro(
         DataFrame with code, trade_date, mcr_f0..mcr_f6 columns.
     """
     # Adjust prices by adj_factor with progress
-    tqdm.pandas(disable=config.debug, desc="Adjusting prices")
     daily_adj = daily_df.join(
         adj_factor_df.select(["code", "trade_date", "adj_factor"]),
         on=["code", "trade_date"],
@@ -188,13 +186,20 @@ def process_macro(
         (pl.col("close") * pl.col("adj_factor")).alias("close"),
     ).drop("adj_factor")
 
+    limit_adj = limit_df.join(
+        adj_factor_df.select(["code", "trade_date", "adj_factor"]),
+        on=["code", "trade_date"],
+        how="left",
+    ).with_columns(
+        (pl.col("up_limit") * pl.col("adj_factor")).alias("up_limit"),
+        (pl.col("down_limit") * pl.col("adj_factor")).alias("down_limit"),
+    ).drop("adj_factor")
+
     # Process OHLCV features with progress
-    tqdm.write(f"Processing {lookback}-step features...")
     result = _process_ohlcv(
         index_df=index_df,
-        ohlcv_lf=pl.LazyFrame(daily_adj),
-        limit_df=limit_df,
-        lookback=lookback,
+        ohlcv_df=daily_adj,
+        limit_df=limit_adj,
         freq="macro",
     )
 
@@ -208,32 +213,31 @@ def process_macro(
 
 def process_micro(
     index_df: pl.DataFrame,
-    min5_lf: pl.LazyFrame,
+    min5_df: pl.LazyFrame,
     adj_factor_df: pl.DataFrame,
     limit_df: pl.DataFrame,
-    lookback: int = MACRO_LOOKBACK,
     **_kwargs,
-) -> pl.LazyFrame:
-    """Process 5-minute OHLCV data into micro backbone features using Lazy evaluation.
+) -> pl.DataFrame:
+    """Process 5-minute OHLCV data into micro backbone features.
 
     Args:
         index_df: DataFrame with code, trade_date, logic_index columns.
-        min5_lf: LazyFrame with code, trade_date, time, open, high, low, close, amount columns.
+        min5_df: DataFrame with code, trade_date, time, open, high, low, close, amount columns.
         adj_factor_df: DataFrame with code, trade_date, adj_factor columns.
         limit_df: DataFrame with code, trade_date, up_limit, down_limit columns.
         lookback: Lookback window for feature calculation.
 
     Returns:
-        LazyFrame with code, trade_date, time_index, mic_f0..mic_f6 columns.
+        DataFrame with code, trade_date, time_index, mic_f0..mic_f8 columns.
     """
-    # Generate time_index lazily
-    min5_indexed = min5_lf.sort(["code", "trade_date", "time"]).with_columns(
+    # Generate time_index
+    min5_indexed = min5_df.sort(["code", "trade_date", "time"]).with_columns(
         time_index=pl.int_range(1, pl.len() + 1).over(["code", "trade_date"]).cast(pl.Int32)
     ).drop("time")
 
-    # Adjust prices by adj_factor lazily
+    # Adjust prices by adj_factor
     min5_adj = min5_indexed.join(
-        pl.LazyFrame(adj_factor_df).select(["code", "trade_date", "adj_factor"]),
+        adj_factor_df.select(["code", "trade_date", "adj_factor"]),
         on=["code", "trade_date"],
         how="left",
     ).with_columns(
@@ -243,12 +247,20 @@ def process_micro(
         (pl.col("close") * pl.col("adj_factor")).alias("close"),
     ).drop("adj_factor")
 
-    # Process OHLCV features for micro (time_index present) lazily
+    limit_adj = limit_df.join(
+        adj_factor_df.select(["code", "trade_date", "adj_factor"]),
+        on=["code", "trade_date"],
+        how="left",
+    ).with_columns(
+        (pl.col("up_limit") * pl.col("adj_factor")).alias("up_limit"),
+        (pl.col("down_limit") * pl.col("adj_factor")).alias("down_limit"),
+    ).drop("adj_factor")
+
+    # Process OHLCV features for micro (time_index present)
     result = _process_ohlcv(
         index_df=index_df,
-        ohlcv_lf=min5_adj,
-        limit_df=limit_df,
-        lookback=lookback,
+        ohlcv_df=min5_adj,
+        limit_df=limit_adj,
         freq="micro",
     )
 
@@ -262,30 +274,29 @@ def process_micro(
 
 def process_mezzo(
     index_df: pl.DataFrame,
-    min5_lf: pl.LazyFrame,
+    min5_df: pl.DataFrame,
     adj_factor_df: pl.DataFrame,
     limit_df: pl.DataFrame,
-    lookback: int = MACRO_LOOKBACK,
     **_kwargs,
-) -> pl.LazyFrame:
-    """Process 5-minute OHLCV data into mezzo (30-min) backbone features using Lazy evaluation.
+) -> pl.DataFrame:
+    """Process 5-minute OHLCV data into mezzo (30-min) backbone features.
 
     Args:
         index_df: DataFrame with code, trade_date, logic_index columns.
-        min5_lf: LazyFrame with code, trade_date, time, open, high, low, close, amount columns.
+        min5_df: DataFrame with code, trade_date, time, open, high, low, close, amount columns.
         adj_factor_df: DataFrame with code, trade_date, adj_factor columns.
         limit_df: DataFrame with code, trade_date, up_limit, down_limit columns.
         lookback: Lookback window for feature calculation.
 
     Returns:
-        LazyFrame with code, trade_date, time_index, mzo_f0..mzo_f6 columns.
+        DataFrame with code, trade_date, time_index, mzo_f0..mzo_f8 columns.
     """
-    # Aggregate 5-min bars to 30-min bars lazily
-    min30 = _aggregate_30min_lazy(min5_lf)
+    # Aggregate 5-min bars to 30-min bars
+    min30 = _aggregate_30min(min5_df)
 
-    # Adjust prices by adj_factor lazily
+    # Adjust prices by adj_factor
     min30_adj = min30.join(
-        pl.LazyFrame(adj_factor_df).select(["code", "trade_date", "adj_factor"]),
+        adj_factor_df.select(["code", "trade_date", "adj_factor"]),
         on=["code", "trade_date"],
         how="left",
     ).with_columns(
@@ -295,12 +306,20 @@ def process_mezzo(
         (pl.col("close") * pl.col("adj_factor")).alias("close"),
     ).drop("adj_factor")
 
-    # Process OHLCV features for mezzo (time_index present) lazily
+    limit_adj = limit_df.join(
+        adj_factor_df.select(["code", "trade_date", "adj_factor"]),
+        on=["code", "trade_date"],
+        how="left",
+    ).with_columns(
+        (pl.col("up_limit") * pl.col("adj_factor")).alias("up_limit"),
+        (pl.col("down_limit") * pl.col("adj_factor")).alias("down_limit"),
+    ).drop("adj_factor")
+
+    # Process OHLCV features for mezzo (time_index present)
     result = _process_ohlcv(
         index_df=index_df,
-        ohlcv_lf=min30_adj,
-        limit_df=limit_df,
-        lookback=lookback,
+        ohlcv_df=min30_adj,
+        limit_df=limit_adj,
         freq="mezzo",
     )
 
@@ -317,7 +336,6 @@ def process_sidechain(
     daily_df: pl.DataFrame,
     adj_factor_df: pl.DataFrame,
     moneyflow_df: pl.DataFrame,
-    lookback: int = MACRO_LOOKBACK,
     **_kwargs,
 ) -> pl.DataFrame:
     """Process moneyflow and daily data into sidechain features.
@@ -330,8 +348,8 @@ def process_sidechain(
         lookback: Lookback window for feature calculation.
 
     Returns:
-        DataFrame with code, trade_date, gap, gap_rank, mf_net_ratio, mf_concentration,
-        amt_surge_rank, velocity_rank columns.
+        DataFrame with code, trade_date, gap, gap_rank, mf_net_ratio, mf_net_rank, mf_concentration,
+        amt_surge_rank, velocity_rank, amihud_impact columns.
     """
     # Adjust prices by adj_factor
     daily_adj = daily_df.join(
@@ -361,45 +379,53 @@ def process_sidechain(
 
     df = df.sort(["code", "trade_date"])
 
-    # === 1. Gap: ln(Open_t / Close_{t-1}) ===
+    # === Step 1: Time-series features (over code) ===
+    df = df.with_columns([
+        # Gap: ln(Open_t / Close_{t-1})
+        (pl.col("open").log() - pl.col("close").shift(1).over("code").log()).alias("gap"),
+        # Velocity: ln(Close_t / Close_{t-1})
+        (pl.col("close").log() - pl.col("close").shift(1).over("code").log()).alias("velocity_raw"),
+        # Volume surge: Amount / MA(Amount, 5)
+        (pl.col("amount") / (pl.col("amount").rolling_mean(5).over("code") + _EPS)).alias("amt_surge_raw"),
+    ])
+
+    # === Step 1.5: Compute Amihud raw (depends on velocity_raw) ===
     df = df.with_columns(
-        (pl.col("open").log() - pl.col("close").shift(1).over("code").log()).alias("gap")
+        (pl.col("velocity_raw").abs() / (pl.col("amount") + _EPS)).alias("amihud_raw")
     )
 
-    # === 2. Gap Rank: NormalRank(gap) ===
+    # === Step 2: Cross-sectional ranks (over trade_date) ===
     group_key = ["trade_date"]
-    df = df.with_columns(
-        pl.col("gap").map_batches(_normal_rank).over(group_key).alias("gap_rank")
-    )
+    df = df.with_columns([
+        # Gap rank
+        pl.col("gap").map_batches(_normal_rank).over(group_key).alias("gap_rank"),
+        # Velocity rank
+        pl.col("velocity_raw").map_batches(_normal_rank).over(group_key).alias("velocity_rank"),
+        # Volume surge rank
+        pl.col("amt_surge_raw").map_batches(_normal_rank).over(group_key).alias("amt_surge_rank"),
+        # Amihud impact rank
+        pl.col("amihud_raw").map_batches(_normal_rank).over(group_key).alias("amihud_impact"),
+    ])
 
-    # === 3 & 4. Money flow features ===
+    # === Step 3: Money flow features (no window context) ===
     buy_main = pl.col("buy_lg_amount") + pl.col("buy_elg_amount")
     sell_main = pl.col("sell_lg_amount") + pl.col("sell_elg_amount")
 
     df = df.with_columns([
         # mf_net_ratio: (buy_main - sell_main) / Amount
         ((buy_main - sell_main) / (pl.col("amount") + _EPS)).alias("mf_net_ratio"),
+        # mf_net_rank: NormalRank(mf_net_ratio) over trade_date
+        ((buy_main - sell_main) / (pl.col("amount") + _EPS)).map_batches(_normal_rank).over(group_key).alias("mf_net_rank"),
         # mf_concentration: (buy_main + sell_main) / Amount
         ((buy_main + sell_main) / (pl.col("amount") + _EPS)).alias("mf_concentration"),
     ])
 
-    # === 5. Volume Surge Rank: NormalRank(Amount / MA(Amount, 5)) ===
-    amt_ma5 = pl.col("amount").rolling_mean(5).over("code")
-    df = df.with_columns(
-        (pl.col("amount") / (amt_ma5 + _EPS)).map_batches(_normal_rank).over(group_key).alias("amt_surge_rank")
-    )
-
-    # === 6. Velocity Rank: NormalRank(ln(Close_t / Close_{t-1})) ===
-    velocity = pl.col("close").log() - pl.col("close").shift(1).over("code").log()
-    df = df.with_columns(
-        velocity.map_batches(_normal_rank).over(group_key).alias("velocity_rank")
-    )
-
     # Select output columns
     result = df.select([
         "code", "trade_date", "gap", "gap_rank",
-        "mf_net_ratio", "mf_concentration",
+        "mf_net_ratio", "mf_net_rank", "mf_concentration",
         "amt_surge_rank", "velocity_rank",
+        "amihud_impact",
     ]).sort(["code", "trade_date"])
 
     validate_table(result, PROCESSED_SIDECHAIN_SCHEMA)
@@ -407,12 +433,12 @@ def process_sidechain(
 
 
 def process_label(
-    index_df: pl.DataFrame,
-    daily_df: pl.DataFrame,
-    adj_factor_df: pl.DataFrame,
-    **_kwargs,
+        index_df: pl.DataFrame,
+        daily_df: pl.DataFrame,
+        adj_factor_df: pl.DataFrame,
+        **_kwargs,
 ) -> pl.DataFrame:
-    """Process daily adjusted prices into prediction labels.
+    """Process daily adjusted prices into dense, orthogonal physical prediction labels.
 
     Args:
         index_df: DataFrame with code, trade_date, logic_index columns.
@@ -420,7 +446,7 @@ def process_label(
         adj_factor_df: DataFrame with code, trade_date, adj_factor columns.
 
     Returns:
-        DataFrame with code, trade_date, label_final columns.
+        DataFrame with code, trade_date, label_S, label_M, label_MDD, label_RV columns.
     """
     # Adjust prices by adj_factor with progress
     tqdm.write("Adjusting prices...")
@@ -440,50 +466,72 @@ def process_label(
         how="inner",
     )
 
-    # Compute future log returns and weights with progress
-    tqdm.write("Computing label features...")
+    # Compute future log returns and dense orthogonal path metrics
+    tqdm.write("Computing Dense Orthogonal Labels (S, M, MDD, RV)...")
     H = LABEL_WINDOW
     w = LABEL_WEIGHTS
 
-    # Compute weighted sum S_t and max peak M_t
-    # S_t = sum_{k=1}^{H} w_k * ln(C_{t+k} / O_{t+1})
-    # M_t = max_{k=1}^{H} ln(C_{t+k} / O_{t+1})
+    # 交易起点：明天的开盘价 (t+1 open)
     next_open_log = pl.col("adj_open").log().shift(-1).over("code")
 
-    weighted_sum = pl.lit(0.0)
-    max_ret = pl.lit(-float("inf"))
+    # --- 状态初始化 ---
+    weighted_sum = pl.lit(0.0)  # 用于 S
+    max_ret = pl.lit(-float("inf"))  # 用于 M
+    max_log_price_so_far = next_open_log  # 用于 MDD
+    max_drawdown = pl.lit(0.0)  # 用于 MDD
+
+    sum_sq_daily_ret = pl.lit(0.0)  # 用于 RV (实现波动率)
+    prev_log_price = next_open_log  # 用于计算每日独立收益
 
     for k in range(1, H + 1):
-        future_log_ret = pl.col("adj_close").log().shift(-k).over("code") - next_open_log
-        weighted_sum = weighted_sum + w[k - 1] * future_log_ret
-        max_ret = pl.max_horizontal(max_ret, future_log_ret)
+        # t+k 日的收盘价
+        current_log_price = pl.col("adj_close").log().shift(-k).over("code")
 
+        # 1. 累计收益 (相对于买入点)
+        future_cum_ret = current_log_price - next_open_log
+
+        # 2. 每日独立收益 (相对于前一日，用于计算真实波动率)
+        daily_ret = current_log_price - prev_log_price
+
+        # --- 更新四个正交标签 ---
+
+        # Label 1: S (加权趋势)
+        weighted_sum = weighted_sum + w[k - 1] * future_cum_ret
+
+        # Label 2: M (路径最大爆发力)
+        max_ret = pl.max_horizontal(max_ret, future_cum_ret)
+
+        # Label 3: MDD (路径最大回撤)
+        max_log_price_so_far = pl.max_horizontal(max_log_price_so_far, current_log_price)
+        current_drawdown = max_log_price_so_far - current_log_price
+        max_drawdown = pl.max_horizontal(max_drawdown, current_drawdown)
+
+        # Label 4: RV (实现波动率的平方和累计)
+        sum_sq_daily_ret = sum_sq_daily_ret + (daily_ret ** 2)
+
+        # 滚动前一日价格
+        prev_log_price = current_log_price
+
+    # 最终赋值：将中间变量转化为最终的物理标签
     df = df.with_columns([
-        weighted_sum.alias("S"),
-        max_ret.alias("M"),
+        weighted_sum.alias("label_S"),
+        max_ret.alias("label_M"),
+        max_drawdown.alias("label_MDD"),
+        sum_sq_daily_ret.sqrt().alias("label_RV")  # 波动率 = 每日收益平方和的平方根
     ])
 
-    # Cross-sectional NormalRank within each trade_date
-    group_key = ["trade_date"]
-    df = df.with_columns([
-        pl.col("S").map_batches(_normal_rank).over(group_key).alias("R_S"),
-        pl.col("M").map_batches(_normal_rank).over(group_key).alias("R_M"),
-    ])
-
-    # Weight fusion: F_t = NormalRank(0.5 * R_S + 0.5 * R_M) within each trade_date
-    df = df.with_columns(
-        (0.5 * pl.col("R_S") + 0.5 * pl.col("R_M")).map_batches(_normal_rank).over(group_key).alias("F")
-    )
-
-    # Label_final = F (直接输出，不再做 ^3 增强)
-    df = df.with_columns(
-        pl.col("F").alias("label_final")
-    )
+    # 清理时间序列末尾无法获取未来 H 天数据的空值
+    # df = df.drop_nulls(subset=["label_S"])
 
     # Select output columns
-    result = df.select(["code", "trade_date", "label_final"]).sort(["code", "trade_date"])
+    result = df.select([
+        "code", "trade_date",
+        "label_S", "label_M", "label_MDD", "label_RV"
+    ]).sort(["code", "trade_date"])
 
+    # 注意：这里的 PROCESSED_LABEL_SCHEMA 需要在你的代码配置中更新为包含这4个新列
     validate_table(result, PROCESSED_LABEL_SCHEMA)
+
     return result
 
 
@@ -492,12 +540,11 @@ def process_label(
 
 def _process_ohlcv(
     index_df: pl.DataFrame,
-    ohlcv_lf: pl.LazyFrame,
+    ohlcv_df: pl.DataFrame,
     limit_df: pl.DataFrame,
-    lookback: int = MACRO_LOOKBACK,
     freq: str = "macro",
-) -> pl.LazyFrame:
-    """Process OHLCV data into 9 backbone features (f0-f8) using Lazy evaluation.
+) -> pl.DataFrame:
+    """Process OHLCV data into 9 backbone features (f0-f8).
 
     Features:
         f0: Velocity (瞬时速度) - Raw
@@ -512,31 +559,29 @@ def _process_ohlcv(
 
     Args:
         index_df: DataFrame with code, trade_date, logic_index columns.
-        ohlcv_lf: LazyFrame with code, trade_date, open, high, low, close, amount columns.
+        ohlcv_df: DataFrame with code, trade_date, open, high, low, close, amount columns.
         limit_df: DataFrame with code, trade_date, up_limit, down_limit columns.
-        lookback: Lookback window for NormalRank (unused for raw features).
         freq: Frequency type - "macro", "mezzo", or "micro".
 
     Returns:
-        LazyFrame with code, trade_date, [time_index], f0-f8 columns.
+        DataFrame with code, trade_date, [time_index], f0-f8 columns.
     """
     # Join with index (inner to exclude suspend days)
-    df = ohlcv_lf.join(
-        pl.LazyFrame(index_df).select(["code", "trade_date", "logic_index"]),
+    df = ohlcv_df.join(
+        index_df.select(["code", "trade_date", "logic_index"]),
         on=["code", "trade_date"],
         how="inner",
     )
 
     # Join with limit data for Gravity (F4)
     df = df.join(
-        pl.LazyFrame(limit_df).select(["code", "trade_date", "up_limit", "down_limit"]),
+        limit_df.select(["code", "trade_date", "up_limit", "down_limit"]),
         on=["code", "trade_date"],
         how="left",
     )
 
     # Determine structure
-    schema_names = df.collect_schema().names()
-    has_time_index = "time_index" in schema_names
+    has_time_index = "time_index" in df.columns
     sort_cols = ["code", "trade_date"] + (["time_index"] if has_time_index else [])
     group_key = ["trade_date"] + (["time_index"] if has_time_index else [])
 
@@ -629,8 +674,7 @@ def _process_ohlcv(
 
     # Drop helper columns
     cols_to_drop = ["logic_index", "up_limit", "down_limit", "step_idx", "weekday"]
-    actual_drop = [c for c in cols_to_drop if c in df.collect_schema().names()]
-    df = df.drop(actual_drop)
+    df = df.drop([c for c in cols_to_drop if c in df.columns])
 
     # Rename f*_raw to f*
     for i in range(9):
@@ -642,10 +686,10 @@ def _process_ohlcv(
         + (["time_index"] if has_time_index else [])
         + [f"f{i}" for i in range(9)]
     )
-    result = df.select(select_cols)
+    result = df.select([c for c in select_cols if c in df.columns])
 
     # Drop time column if present
-    if "time" in result.collect_schema().names():
+    if "time" in result.columns:
         result = result.drop("time")
 
     return result

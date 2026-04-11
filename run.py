@@ -1,63 +1,49 @@
-"""Parquet file column alignment utility.
-
-Aligns column order across all parquet files in a directory
-to match a predefined schema.
-"""
-from __future__ import annotations
-
+import pandas as pd
 from pathlib import Path
 
-import polars as pl
-from tqdm import tqdm
 
-# ================= Configuration =================
-# Target column order (must include all column names)
-TARGET_COLUMNS = ["code", "trade_date", "up_limit", "down_limit"]
-
-# Directory containing parquet files to process
-SOURCE_DIR = "data/raw/limit"
-# ================================================
-
-
-def align_parquet_columns(folder_path: str, schema_list: list[str]) -> None:
-    """Align parquet file columns to match the target schema order.
-
-    Reads each parquet file in the directory, reorders columns to match
-    the schema list, and overwrites the file in place.
-
-    Args:
-        folder_path: Path to directory containing parquet files.
-        schema_list: Ordered list of column names.
-    """
-    base_dir = Path(folder_path)
-    files = list(base_dir.glob("*.parquet"))
-
+def process_moneyflow_data(directory):
+    # 转换为 Path 对象方便路径操作
+    root_dir = Path(directory)
+    
+    # 获取目录下所有 parquet 文件
+    files = list(root_dir.glob("*.parquet"))
+    
     if not files:
-        print(f"未在 {folder_path} 下找到文件。")
+        print(f"在 {directory} 下未找到 parquet 文件。")
         return
 
-    print(f"开始对齐列顺序，目标列数: {len(schema_list)}")
-
-    for file_path in tqdm(files, desc="Aligning"):
+    for file_path in files:
         try:
-            df = pl.read_parquet(file_path)
-
-            # Verify all target columns exist in the file
-            current_cols = set(df.columns)
-            target_cols_set = set(schema_list)
-
-            if not target_cols_set.issubset(current_cols):
-                missing = target_cols_set - current_cols
-                print(f"\n跳过文件 {file_path.name}: 缺少列 {missing}")
-                continue
-
-            # Reorder columns to match schema
-            df_aligned = df.select(schema_list)
-            df_aligned.write_parquet(file_path)
-
+            # 读取文件
+            df = pd.read_parquet(file_path)
+            
+            # 记录是否有修改，避免不必要的保存
+            modified = False
+            
+            for col in df.columns:
+                # 处理包含 'amount' 的列 (不区分大小写用 .lower())
+                if 'amount' in col.lower():
+                    df[col] = df[col] * 10000
+                    modified = True
+                
+                # 处理包含 'vol' 的列
+                elif 'vol' in col.lower():
+                    df[col] = df[col] * 100
+                    modified = True
+            
+            if modified:
+                # 覆盖原文件保存
+                df.to_parquet(file_path, index=False)
+                print(f"成功处理并更新: {file_path.name}")
+            else:
+                print(f"跳过（未匹配到列）: {file_path.name}")
+                
         except Exception as e:
-            print(f"\n处理 {file_path.name} 时出错: {e}")
+            print(f"处理文件 {file_path.name} 时出错: {e}")
 
 
 if __name__ == "__main__":
-    align_parquet_columns(SOURCE_DIR, TARGET_COLUMNS)
+    target_path = "data/raw/moneyflow"
+    process_moneyflow_data(target_path
+                           )
