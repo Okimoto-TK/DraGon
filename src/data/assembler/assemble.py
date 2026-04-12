@@ -85,3 +85,11 @@ def process_single_stock(code: str):
     except Exception as e:
         print(f" {code} 组装失败: {e}")
         raise e
+
+
+def assemble_all() -> None:
+    """Assemble all processed per-code parquet files into ``.npy`` arrays."""
+    assembled_dir.mkdir(parents=True, exist_ok=True)
+    all_codes = [f.stem for f in processed_path.mask_dir.glob("*.parquet")]
+    for code in all_codes:
+        process_single_stock(code)

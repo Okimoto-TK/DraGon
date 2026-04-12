@@ -1,0 +1,105 @@
+"""2D joint feature refinement blocks."""
+from __future__ import annotations
+
+from config.config import lmf_dim as DEFAULT_LMF_DIM
+from torch import Tensor, nn
+
+
+class ResConv2dBlock(nn.Module):
+    """A shape-preserving residual Conv2d block."""
+
+    def __init__(
+        self,
+        channels: int = DEFAULT_LMF_DIM,
+        *,
+        kernel_size: int = 3,
+        expansion: int = 2,
+        dropout: float = 0.0,
+        bias: bool = True,
+    ) -> None:
+        super().__init__()
+
+        if channels <= 0:
+            msg = f"channels must be positive, got {channels}"
+            raise ValueError(msg)
+
+        if kernel_size <= 0 or kernel_size % 2 == 0:
+            msg = f"kernel_size must be a positive odd integer, got {kernel_size}"
+            raise ValueError(msg)
+
+        if expansion <= 0:
+            msg = f"expansion must be positive, got {expansion}"
+            raise ValueError(msg)
+
+        if not 0.0 <= dropout < 1.0:
+            msg = f"dropout must be in [0, 1), got {dropout}"
+            raise ValueError(msg)
+
+        hidden_channels = channels * expansion
+        padding = kernel_size // 2
+
+        self.channels = channels
+        self.block = nn.Sequential(
+            nn.Conv2d(
+                in_channels=channels,
+                out_channels=hidden_channels,
+                kernel_size=kernel_size,
+                stride=1,
+                padding=padding,
+                bias=bias,
+            ),
+            nn.GELU(),
+            nn.Dropout2d(dropout) if dropout > 0.0 else nn.Identity(),
+            nn.Conv2d(
+                in_channels=hidden_channels,
+                out_channels=channels,
+                kernel_size=kernel_size,
+                stride=1,
+                padding=padding,
+                bias=bias,
+            ),
+        )
+
+    def forward(self, x: Tensor) -> Tensor:
+        if x.ndim != 4:
+            msg = f"Expected input shape [B, C, LX, LY], got {tuple(x.shape)}"
+            raise ValueError(msg)
+
+        if x.shape[1] != self.channels:
+            msg = f"Expected {self.channels} channels, got {x.shape[1]}"
+            raise ValueError(msg)
+
+        return x + self.block(x)
+
+
+class JointNet2D(nn.Module):
+    """Refine pairwise fusion maps with shallow residual Conv2d blocks."""
+
+    def __init__(self, channels: int = DEFAULT_LMF_DIM) -> None:
+        super().__init__()
+
+        if channels <= 0:
+            msg = f"channels must be positive, got {channels}"
+            raise ValueError(msg)
+
+        self.channels = channels
+        self.net = nn.Sequential(
+            nn.Conv2d(channels, channels, kernel_size=1, stride=1),
+            nn.GELU(),
+            ResConv2dBlock(channels, kernel_size=3),
+            ResConv2dBlock(channels, kernel_size=3),
+        )
+
+    def forward(self, x: Tensor) -> Tensor:
+        if x.ndim != 4:
+            msg = f"Expected input shape [B, C, LX, LY], got {tuple(x.shape)}"
+            raise ValueError(msg)
+
+        if x.shape[1] != self.channels:
+            msg = f"Expected {self.channels} channels, got {x.shape[1]}"
+            raise ValueError(msg)
+
+        return self.net(x)
+
+
+__all__ = ["JointNet2D", "ResConv2dBlock"]

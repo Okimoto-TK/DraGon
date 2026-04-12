@@ -4,15 +4,10 @@ from __future__ import annotations
 from config.config import processed_path
 
 from src.data.models import ProcessedParams
-from src.data.processor.process import (
-    process_index,
-    process_label,
-    process_macro,
-    process_mask,
-    process_mezzo,
-    process_micro,
-    process_sidechain,
-)
+from src.data.processor.basic import process_index, process_mask
+from src.data.processor.label import process_label
+from src.data.processor.ohlcv import process_macro, process_mezzo, process_micro
+from src.data.processor.sidechain import process_sidechain
 from src.data.schemas.processed import (
     PROCESSED_INDEX_SCHEMA,
     PROCESSED_LABEL_SCHEMA,

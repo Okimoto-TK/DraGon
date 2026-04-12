@@ -5,7 +5,18 @@ from __future__ import annotations
 
 FEAT_WINDOW = 5
 LABEL_WINDOW = 10
-LABEL_WEIGHTS = [1, 1, 1, 0.9, 0.8, 0.7, 0.5, 0.3, 0.1, 0.1]
+LABEL_WEIGHTS = [
+    0.070,
+    0.075,
+    0.080,
+    0.085,
+    0.090,
+    0.100,
+    0.105,
+    0.120,
+    0.130,
+    0.145,
+]
 
 # === Chunking Configuration ===
 

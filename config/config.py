@@ -51,3 +51,12 @@ processed_path = SimpleNamespace(
 )
 
 assembled_dir = data_dir / "assembled"
+
+# Model defaults
+hidden_dim = 32
+lmf_dim = 16
+lmf_rank = 4
+latent_token = 8
+macro_decomp_level = 3
+mezzo_decomp_level = 3
+micro_decomp_level = 3

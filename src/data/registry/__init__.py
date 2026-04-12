@@ -1,6 +1,8 @@
 """Registry module for raw and processed pipeline parameters."""
 from __future__ import annotations
 
+from importlib import import_module
+
 from .api import (
     FETCH_FIELD_5MIN,
     FETCH_FIELD_ADJ_FACTOR,
@@ -30,8 +32,6 @@ from .processor import (
     LABEL_WEIGHTS,
     LABEL_WINDOW,
 )
-from .processed import PROCESSED_PARAM_MAP
-from .raw import PARAM_MAP
 
 __all__ = [
     # API field mappings
@@ -63,3 +63,12 @@ __all__ = [
     "PARAM_MAP",
     "PROCESSED_PARAM_MAP",
 ]
+
+
+def __getattr__(name: str):
+    """Lazily load heavy registry maps to avoid circular imports."""
+    if name == "PARAM_MAP":
+        return import_module("src.data.registry.raw").PARAM_MAP
+    if name == "PROCESSED_PARAM_MAP":
+        return import_module("src.data.registry.processed").PROCESSED_PARAM_MAP
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
