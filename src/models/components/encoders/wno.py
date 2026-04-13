@@ -5,6 +5,7 @@ import torch
 import torch.nn.functional as F
 from config.config import hidden_dim as DEFAULT_HIDDEN_DIM
 from config.config import lmf_dim as DEFAULT_LMF_DIM
+from config.config import wno_num_blocks as DEFAULT_WNO_NUM_BLOCKS
 from torch import Tensor, nn
 
 from src.models.components.encoders.res_conv_1d import ResConv1dBlock
@@ -141,7 +142,7 @@ class WNOBlock(nn.Module):
 
 
 class WNOEncoder(nn.Module):
-    """Encode [B, C, L] into [B, lmf_dim, L] with two WNO blocks."""
+    """Encode [B, C, L] into [B, lmf_dim, L] with stacked WNO blocks."""
 
     def __init__(
         self,
@@ -149,6 +150,7 @@ class WNOEncoder(nn.Module):
         hidden_dim: int = DEFAULT_HIDDEN_DIM,
         lmf_dim: int = DEFAULT_LMF_DIM,
         decomp_level: int = 3,
+        num_blocks: int = DEFAULT_WNO_NUM_BLOCKS,
     ) -> None:
         super().__init__()
 
@@ -167,16 +169,20 @@ class WNOEncoder(nn.Module):
         if decomp_level <= 0:
             msg = f"decomp_level must be positive, got {decomp_level}"
             raise ValueError(msg)
+        if num_blocks <= 0:
+            msg = f"num_blocks must be positive, got {num_blocks}"
+            raise ValueError(msg)
 
         self.in_channels = in_channels
         self.hidden_dim = hidden_dim
         self.lmf_dim = lmf_dim
         self.decomp_level = decomp_level
+        self.num_blocks = num_blocks
+        blocks = [WNOBlock(hidden_dim, decomp_level=decomp_level) for _ in range(num_blocks)]
         self.encoder = nn.Sequential(
             nn.Conv1d(in_channels, hidden_dim, kernel_size=1, stride=1),
             nn.GELU(),
-            WNOBlock(hidden_dim, decomp_level=decomp_level),
-            WNOBlock(hidden_dim, decomp_level=decomp_level),
+            *blocks,
             nn.Conv1d(hidden_dim, lmf_dim, kernel_size=1, stride=1),
         )
 

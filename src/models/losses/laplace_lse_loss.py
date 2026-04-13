@@ -1,6 +1,13 @@
 from __future__ import annotations
 
 import torch
+from config.config import freeze_ema_beta as DEFAULT_FREEZE_EMA_BETA
+from config.config import freeze_min_steps as DEFAULT_FREEZE_MIN_STEPS
+from config.config import freeze_patience_steps as DEFAULT_FREEZE_PATIENCE_STEPS
+from config.config import freeze_scale_s0_M as DEFAULT_S0_M
+from config.config import freeze_scale_s0_MDD as DEFAULT_S0_MDD
+from config.config import freeze_scale_s0_RV as DEFAULT_S0_RV
+from config.config import freeze_scale_s0_S as DEFAULT_S0_S
 from torch import Tensor, nn
 
 
@@ -24,22 +31,46 @@ class LaplaceLSELoss(nn.Module):
         lse_mix: float = 0.25,
         eps: float = 1e-6,
         use_target_normalization: bool = False,
+        *,
+        s0_S: float = DEFAULT_S0_S,
+        s0_M: float = DEFAULT_S0_M,
+        s0_MDD: float = DEFAULT_S0_MDD,
+        s0_RV: float = DEFAULT_S0_RV,
+        min_freeze_steps: int = DEFAULT_FREEZE_MIN_STEPS,
+        patience_steps: int = DEFAULT_FREEZE_PATIENCE_STEPS,
+        ema_beta: float = DEFAULT_FREEZE_EMA_BETA,
     ) -> None:
         super().__init__()
         if tau <= 0:
             raise ValueError("tau must be positive")
         if not (0.0 <= lse_mix <= 1.0):
             raise ValueError("lse_mix must be in [0, 1]")
+        if min_freeze_steps < 0:
+            raise ValueError("min_freeze_steps must be non-negative")
+        if patience_steps <= 0:
+            raise ValueError("patience_steps must be positive")
+        if not (0.0 <= ema_beta < 1.0):
+            raise ValueError("ema_beta must be in [0, 1)")
 
         self.tau = float(tau)
         self.lse_mix = float(lse_mix)
         self.eps = float(eps)
         self.use_target_normalization = bool(use_target_normalization)
+        self.min_freeze_steps = int(min_freeze_steps)
+        self.patience_steps = int(patience_steps)
+        self.ema_beta = float(ema_beta)
 
         # default to identity normalization
         for task in self.TASKS:
             self.register_buffer(f"mean_{task}", torch.tensor(0.0, dtype=torch.float32))
             self.register_buffer(f"std_{task}", torch.tensor(1.0, dtype=torch.float32))
+            s0_value = float(locals()[f"s0_{task}"])
+            self.register_buffer(f"s0_{task}", torch.tensor(s0_value, dtype=torch.float32))
+            self.register_buffer(f"ema_mae_{task}", torch.tensor(s0_value, dtype=torch.float32))
+
+        self.register_buffer("train_step_count", torch.tensor(0, dtype=torch.long))
+        self.register_buffer("freeze_good_steps", torch.tensor(0, dtype=torch.long))
+        self.register_buffer("scale_unfrozen", torch.tensor(False, dtype=torch.bool))
 
     @torch.no_grad()
     def set_target_stats(self, stats: dict[str, tuple[float, float]]) -> None:
@@ -90,6 +121,40 @@ class LaplaceLSELoss(nn.Module):
         scale = scale.clamp_min(self.eps)
         return torch.abs(target - pred) / scale + torch.log(scale)
 
+    def _fixed_scale(self, pred: Tensor, task: str) -> Tensor:
+        return torch.full_like(pred, float(getattr(self, f"s0_{task}").item()))
+
+    @torch.no_grad()
+    def _update_freeze_state(self, preds: dict[str, Tensor], targets: dict[str, Tensor]) -> None:
+        if self.scale_unfrozen.item():
+            return
+
+        good = True
+        for task in self.TASKS:
+            pred = preds[f"pred_{task}"].detach()
+            target = self._get_target(targets, task).detach().to(device=pred.device, dtype=pred.dtype)
+            if pred.ndim == 2 and pred.size(-1) == 1:
+                pred = pred.squeeze(-1)
+            if target.ndim == 2 and target.size(-1) == 1:
+                target = target.squeeze(-1)
+
+            ema_buffer = getattr(self, f"ema_mae_{task}")
+            mae = torch.mean(torch.abs(pred - target)).float().to(device=ema_buffer.device)
+            ema_buffer.mul_(self.ema_beta).add_(mae * (1.0 - self.ema_beta))
+
+            threshold = 0.9 * getattr(self, f"s0_{task}")
+            if bool((ema_buffer > threshold).item()):
+                good = False
+
+        self.train_step_count.add_(1)
+        if int(self.train_step_count.item()) >= self.min_freeze_steps and good:
+            self.freeze_good_steps.add_(1)
+        else:
+            self.freeze_good_steps.zero_()
+
+        if int(self.freeze_good_steps.item()) >= self.patience_steps:
+            self.scale_unfrozen.fill_(True)
+
     def forward(
         self,
         preds: dict[str, Tensor],
@@ -100,7 +165,7 @@ class LaplaceLSELoss(nn.Module):
 
         for task in self.TASKS:
             pred = preds[f"pred_{task}"]
-            scale = preds[f"scale_{task}"]
+            scale = preds[f"scale_{task}"] if self.scale_unfrozen.item() else self._fixed_scale(pred, task)
             target = self._get_target(targets, task)
 
             per_sample = self._laplace_nll(pred, scale, target, task)
@@ -117,5 +182,29 @@ class LaplaceLSELoss(nn.Module):
         metrics["loss_avg"] = loss_avg.detach()
         metrics["loss_lse"] = loss_lse.detach()
         metrics["loss_total"] = loss_total.detach()
+        metrics["freeze/fixed_scale_active"] = torch.tensor(
+            0.0 if self.scale_unfrozen.item() else 1.0,
+            device=loss_total.device,
+        )
+        metrics["freeze/scale_unfrozen"] = torch.tensor(
+            1.0 if self.scale_unfrozen.item() else 0.0,
+            device=loss_total.device,
+        )
+        metrics["freeze/train_step_count"] = self.train_step_count.detach().to(device=loss_total.device, dtype=torch.float32)
+        metrics["freeze/good_steps"] = self.freeze_good_steps.detach().to(device=loss_total.device, dtype=torch.float32)
+        metrics["freeze/min_freeze_steps"] = torch.tensor(float(self.min_freeze_steps), device=loss_total.device)
+        metrics["freeze/patience_steps"] = torch.tensor(float(self.patience_steps), device=loss_total.device)
+        for task in self.TASKS:
+            metrics[f"freeze/ema_mae/{task}"] = getattr(self, f"ema_mae_{task}").detach().to(
+                device=loss_total.device,
+                dtype=torch.float32,
+            )
+            metrics[f"freeze/s0/{task}"] = getattr(self, f"s0_{task}").detach().to(
+                device=loss_total.device,
+                dtype=torch.float32,
+            )
+
+        if self.training:
+            self._update_freeze_state(preds, targets)
 
         return loss_total, metrics

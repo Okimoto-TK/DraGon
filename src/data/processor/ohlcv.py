@@ -199,7 +199,7 @@ def _process_ohlcv(
     else:
         f0_expr = pl.col("close").log() - pl.col("open").log()
         f1_expr = (pl.col("amount") + 1).log() - (
-            pl.col("amount").shift(1).over(["code", "trade_date"]) + 1
+            pl.col("amount").shift(1).over("code") + 1
         ).log()
 
     df = df.with_columns([

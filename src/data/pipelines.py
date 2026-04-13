@@ -12,7 +12,7 @@ from config.config import DEFAULT_EXCHANGE, DEFAULT_STATUS
 from tqdm import tqdm
 
 from config.config import assembled_dir, processed_path, debug
-from src.data.assembler.assemble import process_single_stock
+from src.data.assembler.assemble import assemble_all
 from src.data.models import Query, TableSchema, ProcessedParams
 from src.data.registry.processed import PROCESSED_PARAM_MAP
 from src.data.storage.parquet_io import read_parquet_by_dates
@@ -153,6 +153,8 @@ class RawPipeline:
 class ProcessedPipeline:
     """Orchestrates processing of raw data into processed features."""
 
+    _MERGE_BUCKETS = 64
+
     def __init__(self, raw_pipe: RawPipeline) -> None:
         self.raw_pipe = raw_pipe
 
@@ -194,6 +196,7 @@ class ProcessedPipeline:
         Note: This method only handles 'process' action.
         Validate and Load are handled by the caller (run method).
         """
+        from collections import defaultdict
         from glob import glob
         from datetime import date
         import shutil
@@ -220,6 +223,7 @@ class ProcessedPipeline:
             schema=index_params.schema,
             desc="index",
         )
+        index_dates = index_df.select(["code", "trade_date"]).unique()
 
         # 3.5 Setup cache directory
         cache_path = cache_dir / desc
@@ -231,13 +235,11 @@ class ProcessedPipeline:
         tail_adj: pl.DataFrame | None = None
         tail_limit: pl.DataFrame | None = None
 
-        all_codes = set()
+        bucket_chunk_files: dict[int, list[Path]] = defaultdict(list)
 
         # 4. Loop through chunks
         for i in tqdm(range(0, len(dates), chunk_days), desc=f"Processing {desc} (chunked)"):
             current_dates = dates[i: i + chunk_days]
-            chunk_dir = cache_path / f"chunk_{i:04d}"
-            chunk_dir.mkdir(parents=True, exist_ok=True)
 
             # Load new chunk
             new_5min = read_parquet_by_dates(raw_5min_dir, current_dates)
@@ -269,25 +271,72 @@ class ProcessedPipeline:
             date_objs = [date(int(d[:4]), int(d[4:6]), int(d[6:])) for d in current_dates]
             final_res = res.filter(pl.col("trade_date").is_in(date_objs))
 
-            # Write to cache split by Code
-            codes_in_chunk = final_res["code"].unique().to_list()
-            all_codes.update(codes_in_chunk)
+            # Write cache split by merge bucket to avoid generating huge numbers of tiny files.
+            if not final_res.is_empty():
+                chunk_dir = cache_path / f"chunk_{i:04d}"
+                chunk_dir.mkdir(parents=True, exist_ok=True)
+                bucketed_res = final_res.with_columns(
+                    (
+                        pl.col("code").str.slice(0, 6).cast(pl.Int32) % ProcessedPipeline._MERGE_BUCKETS
+                    ).alias("_merge_bucket")
+                )
+                partitions = bucketed_res.partition_by("_merge_bucket", as_dict=True, maintain_order=True)
+                for key, bucket_df in partitions.items():
+                    bucket = int(key[0] if isinstance(key, tuple) else key)
+                    chunk_file = chunk_dir / f"bucket_{bucket:02d}.parquet"
+                    bucket_df.drop("_merge_bucket").write_parquet(
+                        chunk_file,
+                        compression="uncompressed",
+                    )
+                    bucket_chunk_files[bucket].append(chunk_file)
+                del bucketed_res
 
-            for code in codes_in_chunk:
-                code_df = final_res.filter(pl.col("code") == code)
-                code_df.write_parquet(chunk_dir / f"{code}.parquet")
+            # Update tail state using only index-valid trading dates.
+            valid_chunk_5min = chunk_5min.join(
+                index_dates,
+                on=["code", "trade_date"],
+                how="semi",
+            )
+            valid_chunk_adj = chunk_adj.join(
+                index_dates,
+                on=["code", "trade_date"],
+                how="semi",
+            )
+            valid_chunk_limit = chunk_limit.join(
+                index_dates,
+                on=["code", "trade_date"],
+                how="semi",
+            )
 
-            # Update Tail: slice from chunk by code (not reload from files)
-            tail_5min = chunk_5min.sort(["code", "trade_date", "time"]).group_by("code", maintain_order=True).tail(CHUNK_TAIL_BARS)
-            tail_adj = chunk_adj.sort(["code", "trade_date"]).group_by("code", maintain_order=True).tail(CHUNK_TAIL_DAYS)
-            tail_limit = chunk_limit.sort(["code", "trade_date"]).group_by("code", maintain_order=True).tail(CHUNK_TAIL_DAYS)
+            tail_5min = (
+                valid_chunk_5min
+                .sort(["code", "trade_date", "time"])
+                .group_by("code", maintain_order=True)
+                .tail(CHUNK_TAIL_BARS)
+            )
+            tail_adj = (
+                valid_chunk_adj
+                .sort(["code", "trade_date"])
+                .group_by("code", maintain_order=True)
+                .tail(CHUNK_TAIL_DAYS)
+            )
+            tail_limit = (
+                valid_chunk_limit
+                .sort(["code", "trade_date"])
+                .group_by("code", maintain_order=True)
+                .tail(CHUNK_TAIL_DAYS)
+            )
 
             del chunk_5min
             del chunk_adj
             del chunk_limit
+            del valid_chunk_5min
+            del valid_chunk_adj
+            del valid_chunk_limit
             del res
             del final_res
-            gc.collect()
+            if ((i // chunk_days) + 1) % 4 == 0:
+                gc.collect()
 
         # 5. Merge by Code (Low Memory Strategy)
         # Only merge if process action was requested
@@ -298,29 +347,26 @@ class ProcessedPipeline:
             params.path.mkdir(parents=True, exist_ok=True)
 
             # Sort codes to process deterministically
-            sorted_codes = sorted(list(all_codes))
+            sorted_buckets = sorted(bucket_chunk_files)
 
-            for code in tqdm(sorted_codes, desc=f"Merging {desc} by code"):
-                # Find all chunk files for this specific code
-                chunk_files = sorted(cache_path.glob(f"*/{code}.parquet"))
+            for bucket in tqdm(sorted_buckets, desc=f"Merging {desc} by bucket"):
+                chunk_files = bucket_chunk_files[bucket]
+                merged_bucket = pl.read_parquet(chunk_files)
+                code_partitions = merged_bucket.partition_by("code", as_dict=True, maintain_order=True)
 
-                if not chunk_files:
-                    continue
+                for key, code_df in code_partitions.items():
+                    code = key[0] if isinstance(key, tuple) else key
+                    merged = code_df.unique(
+                        subset=["trade_date", "time_index"],
+                        keep="last",
+                        maintain_order=True,
+                    ).sort(["trade_date", "time_index"])
+                    merged.write_parquet(params.path / f"{code}.parquet")
+                    del merged
 
-                # Read and concat only for THIS code (Very small memory footprint)
-                dfs = [pl.read_parquet(f) for f in chunk_files]
-                merged = pl.concat(dfs)
-
-                # Deduplicate
-                merged = merged.unique(
-                    subset=["trade_date", "time_index"], keep="last"
-                ).sort(["trade_date", "time_index"])
-
-                # Write to final destination
-                merged.write_parquet(params.path / f"{code}.parquet")
-
-                del dfs
-                del merged
+                del code_partitions
+                del merged_bucket
+                gc.collect()
 
         # 6. Cleanup cache
         if cache_path.exists():
@@ -375,13 +421,8 @@ class ProcessedPipeline:
 
         return result
 
-
 class AssembledPipeline:
     @staticmethod
     def run():
         assembled_dir.mkdir(parents=True, exist_ok=True)
-        all_codes = [f.stem for f in processed_path.mask_dir.glob("*.parquet")]
-        from tqdm import tqdm
-        for code in tqdm(all_codes, desc="Assembling", disable=debug):
-            process_single_stock(code)
-            gc.collect()
+        assemble_all()

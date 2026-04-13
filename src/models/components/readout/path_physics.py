@@ -30,10 +30,14 @@ class PathPhysicsReadout(nn.Module):
         self,
         eps: float = 1e-6,
         use_effective_horizon_for_S: bool = True,
+        kappa_limit: float = 0.95,
     ) -> None:
         super().__init__()
         self.eps = float(eps)
         self.use_effective_horizon_for_S = bool(use_effective_horizon_for_S)
+        if not (0.0 < kappa_limit < 1.0):
+            raise ValueError(f"kappa_limit must be in (0, 1), got {kappa_limit}")
+        self.kappa_limit = float(kappa_limit)
 
         T = float(LABEL_WINDOW)
         T_eff = float(sum((k + 1) * float(w) for k, w in enumerate(LABEL_WEIGHTS)))
@@ -60,7 +64,7 @@ class PathPhysicsReadout(nn.Module):
         raw_v_jump = c123[:, 2]
 
         sigma_c = F.softplus(raw_sigma_c) + self.eps
-        kappa = torch.tanh(raw_kappa)
+        kappa = self.kappa_limit * torch.tanh(raw_kappa)
         v_jump = F.softplus(raw_v_jump) + self.eps
 
         sigma_total = torch.sqrt(sigma_c.square() + v_jump)

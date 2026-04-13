@@ -1,6 +1,10 @@
 # Backup
 *.bak
 
+# Logs & Output
+/log/
+/out/
+
 # Dataset
 /data/
 /test_data/

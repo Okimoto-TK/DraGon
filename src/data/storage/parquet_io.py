@@ -80,7 +80,7 @@ def read_parquet_by_dates(dir_path: Path, dates: list[str]) -> pl.DataFrame:
     existing = [p for p in paths if p.exists()]
     if not existing:
         return pl.DataFrame()
-    return pl.concat([pl.read_parquet(p) for p in existing])
+    return pl.read_parquet(existing)
 
 
 def write_parquet(df: pl.DataFrame, path: Path, schema: TableSchema, desc: str = "") -> None:

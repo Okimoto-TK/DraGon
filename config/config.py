@@ -17,7 +17,10 @@ DEFAULT_STATUS: Sequence[Status] = ["L", "D"]
 
 # Directory paths
 base_dir = Path(__file__).resolve().parent.parent
-log_dir = base_dir / "logs"
+log_dir = base_dir / "log"
+out_dir = base_dir / "out"
+mlflow_dir = log_dir / "mlruns"
+checkpoint_dir = out_dir / "checkpoints"
 
 data_dir = base_dir / "data"
 cache_dir = base_dir / "cache"
@@ -53,10 +56,47 @@ processed_path = SimpleNamespace(
 assembled_dir = data_dir / "assembled"
 
 # Model defaults
-hidden_dim = 32
-lmf_dim = 16
-lmf_rank = 4
-latent_token = 8
+hidden_dim = 64
+side_hidden_dim = 32
+lmf_dim = 32
+token_dim = 24
+summary_dim = 16
+lmf_rank = 6
+latent_token = 12
 macro_decomp_level = 3
 mezzo_decomp_level = 3
 micro_decomp_level = 3
+wno_num_blocks = 3
+jointnet_23_channels = 24
+jointnet_23_blocks = 4
+
+batch_size = 128
+learning_rate = 1e-3
+weight_decay = 1e-4
+num_epochs = 300
+train_val_split_date: float | None = None
+val_ratio = 0.1
+memory_mode = "lazy_memmap"
+lazy_cache_codes = 32
+train_samples_per_epoch = 100_000
+val_samples_per_epoch = 20_000
+trend_ema_alpha = 0.2
+mlflow_enabled = True
+save_every = 5
+freeze_scale_s0_S = 0.018
+freeze_scale_s0_M = 0.027
+freeze_scale_s0_MDD = 0.045
+freeze_scale_s0_RV = 0.018
+freeze_min_steps = 1000
+freeze_patience_steps = 100
+freeze_ema_beta = 0.98
+grad_clip = 1.0
+early_stopping_patience = 5
+num_workers = 4
+
+scheduler_name = "plateau"
+scheduler_factor = 0.5
+scheduler_patience = 2
+scheduler_min_lr = 1e-6
+
+train_seed = 114514
