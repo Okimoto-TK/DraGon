@@ -4,9 +4,9 @@ from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
 import polars as pl
+from numpy.lib.stride_tricks import sliding_window_view
 
 from config.config import processed_path, assembled_dir, debug
-from src.data.storage.npy_io import write_npy
 
 
 # --- 特征列定义 (保持不变) ---
@@ -15,6 +15,95 @@ SIDECHAIN_FEATURES = ["gap", "gap_rank", "mf_net_ratio", "mf_net_rank", "mf_conc
 LABEL_COLS = ["label_S", "label_M", "label_MDD", "label_RV"]
 MEZZO_FEATURES = [f"mzo_f{i}" for i in range(9)]
 MICRO_FEATURES = [f"mic_f{i}" for i in range(9)]
+MICRO_USED_FEATURES = MICRO_FEATURES[:-2]
+
+MACRO_LOOKBACK = 64
+MEZZO_DAYS = 8
+MICRO_DAYS = 1
+
+
+def _compute_sample_valid(step_valid: np.ndarray) -> np.ndarray:
+    macro_valid = sliding_window_view(step_valid, MACRO_LOOKBACK).all(axis=-1)
+    mezzo_valid = sliding_window_view(step_valid, MEZZO_DAYS).all(axis=-1)
+    micro_valid = sliding_window_view(step_valid, MICRO_DAYS).all(axis=-1)
+    start_idx = max(MACRO_LOOKBACK, MEZZO_DAYS, MICRO_DAYS) - 1
+    return (
+        macro_valid[start_idx - MACRO_LOOKBACK + 1 :]
+        & mezzo_valid[start_idx - MEZZO_DAYS + 1 :]
+        & micro_valid[start_idx - MICRO_DAYS + 1 :]
+    )
+
+
+def _window_samples(values: np.ndarray, lookback: int) -> np.ndarray:
+    windows = sliding_window_view(values, lookback, axis=0)
+    return np.transpose(windows, (0, 2, 1)).astype(np.float32, copy=False)
+
+
+def _build_packed_payload(data: np.ndarray) -> dict[str, np.ndarray]:
+    start_idx = max(MACRO_LOOKBACK, MEZZO_DAYS, MICRO_DAYS) - 1
+    n_rows = data.shape[0]
+    if n_rows <= start_idx:
+        return {
+            "date": np.empty((0,), dtype=np.float32),
+            "label": np.empty((0, len(LABEL_COLS)), dtype=np.float32),
+            "macro": np.empty((0, len(MACRO_FEATURES), MACRO_LOOKBACK), dtype=np.float32),
+            "sidechain": np.empty((0, len(SIDECHAIN_FEATURES), MACRO_LOOKBACK), dtype=np.float32),
+            "mezzo": np.empty((0, len(MEZZO_FEATURES), 64), dtype=np.float32),
+            "micro": np.empty((0, len(MICRO_USED_FEATURES), 48), dtype=np.float32),
+        }
+
+    sample_valid = _compute_sample_valid(data[:, 1] > 0.5)
+
+    macro = _window_samples(data[:, 6:15], MACRO_LOOKBACK).transpose(0, 2, 1)
+    sidechain = _window_samples(data[:, 15:23], MACRO_LOOKBACK).transpose(0, 2, 1)
+
+    mezzo_flat = data[:, 23 : 23 + len(MEZZO_FEATURES) * 8]
+    mezzo_windows = _window_samples(mezzo_flat, MEZZO_DAYS)[start_idx - MEZZO_DAYS + 1 :]
+    mezzo = (
+        mezzo_windows
+        .reshape(-1, MEZZO_DAYS, len(MEZZO_FEATURES), 8)
+        .transpose(0, 2, 1, 3)
+        .reshape(-1, len(MEZZO_FEATURES), MEZZO_DAYS * 8)
+        .astype(np.float32, copy=False)
+    )
+
+    micro_start = 23 + len(MEZZO_FEATURES) * 8
+    micro_flat = data[:, micro_start : micro_start + len(MICRO_USED_FEATURES) * 48]
+    micro_windows = _window_samples(micro_flat, MICRO_DAYS)[start_idx - MICRO_DAYS + 1 :]
+    micro = (
+        micro_windows
+        .reshape(-1, MICRO_DAYS, len(MICRO_USED_FEATURES), 48)
+        .transpose(0, 2, 1, 3)
+        .reshape(-1, len(MICRO_USED_FEATURES), MICRO_DAYS * 48)
+        .astype(np.float32, copy=False)
+    )
+
+    date = np.asarray(data[start_idx:, 0], dtype=np.float32)
+    label = np.asarray(data[start_idx:, 2:6], dtype=np.float32)
+    keep = np.asarray(sample_valid, dtype=bool)
+
+    return {
+        "date": date[keep],
+        "label": label[keep],
+        "macro": macro[keep],
+        "sidechain": sidechain[keep],
+        "mezzo": mezzo[keep],
+        "micro": micro[keep],
+    }
+
+
+def _write_packed_samples(code: str, data: np.ndarray) -> None:
+    payload = _build_packed_payload(data)
+    np.savez(
+        assembled_dir / f"{code}.npz",
+        date=payload["date"],
+        label=payload["label"],
+        macro=payload["macro"],
+        sidechain=payload["sidechain"],
+        mezzo=payload["mezzo"],
+        micro=payload["micro"],
+    )
+
 
 def _scan_parquet(path: str | os.PathLike[str], columns: list[str]) -> pl.LazyFrame:
     return pl.scan_parquet(path).select(columns)
@@ -136,9 +225,8 @@ def process_single_stock(code: str):
         )
         numpy_data = final_df.to_numpy().astype(np.float32, copy=False)
 
-        # 7. 使用 open_memmap 写入标准 NPY (带 Header，方便以后 np.load)
-        target_path = assembled_dir / f"{code}.npy"
-        write_npy(target_path, numpy_data)
+        # 7. 直接写训练就绪的 packed tensor 包，不再落原始 assembled npy
+        _write_packed_samples(code, numpy_data)
 
     except Exception as e:
         print(f" {code} 组装失败: {e}")
@@ -146,10 +234,9 @@ def process_single_stock(code: str):
 
 
 def assemble_all() -> None:
-    """Assemble all processed per-code parquet files into ``.npy`` arrays."""
-    assembled_dir.mkdir(parents=True, exist_ok=True)
+    """Assemble processed per-code parquet files directly into packed tensor ``.npz`` files."""
     all_codes = [f.stem for f in processed_path.mask_dir.glob("*.parquet")]
-    max_workers = min(4, max(1, (os.cpu_count() or 1) // 2))
+    max_workers = min(6, max(1, (os.cpu_count() or 1) // 2))
     if debug or max_workers <= 1:
         for code in all_codes:
             process_single_stock(code)

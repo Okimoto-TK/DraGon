@@ -13,7 +13,10 @@ _TASKS = ("S", "M", "MDD", "RV")
 
 def move_batch_to_device(batch: Mapping[str, Tensor], device: str) -> dict[str, Tensor]:
     """Move tensor values in ``batch`` onto ``device``."""
-    return {key: value.to(device) if isinstance(value, Tensor) else value for key, value in batch.items()}
+    return {
+        key: value.to(device, non_blocking=True) if isinstance(value, Tensor) else value
+        for key, value in batch.items()
+    }
 
 
 def grad_norm(parameters) -> float:
@@ -68,4 +71,9 @@ def batch_prediction_metrics(
     return mean_metrics
 
 
-__all__ = ["MetricTracker", "batch_prediction_metrics", "grad_norm", "move_batch_to_device"]
+__all__ = [
+    "MetricTracker",
+    "batch_prediction_metrics",
+    "grad_norm",
+    "move_batch_to_device",
+]

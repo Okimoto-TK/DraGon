@@ -7,10 +7,12 @@ from typing import Any
 
 import numpy as np
 import torch
+from torch.amp import GradScaler
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader, Subset
 
+from config.config import amp_enabled as DEFAULT_AMP_ENABLED
 from config.config import batch_size as DEFAULT_BATCH_SIZE
 from config.config import checkpoint_dir as DEFAULT_CHECKPOINT_DIR
 from config.config import early_stopping_patience as DEFAULT_EARLY_STOPPING_PATIENCE
@@ -21,6 +23,7 @@ from config.config import learning_rate as DEFAULT_LEARNING_RATE
 from config.config import memory_mode as DEFAULT_MEMORY_MODE
 from config.config import num_epochs as DEFAULT_NUM_EPOCHS
 from config.config import num_workers as DEFAULT_NUM_WORKERS
+from config.config import prefetch_factor as DEFAULT_PREFETCH_FACTOR
 from config.config import scheduler_factor as DEFAULT_SCHEDULER_FACTOR
 from config.config import scheduler_min_lr as DEFAULT_SCHEDULER_MIN_LR
 from config.config import scheduler_name as DEFAULT_SCHEDULER_NAME
@@ -239,6 +242,7 @@ def _build_epoch_loader(
         pin_memory=base_loader.pin_memory,
         drop_last=base_loader.drop_last,
         persistent_workers=base_loader.persistent_workers,
+        prefetch_factor=base_loader.prefetch_factor if base_loader.num_workers > 0 else None,
     )
 
 
@@ -265,6 +269,7 @@ def fit(
     train_samples_per_epoch: int | None = DEFAULT_TRAIN_SAMPLES_PER_EPOCH,
     val_samples_per_epoch: int | None = DEFAULT_VAL_SAMPLES_PER_EPOCH,
     seed: int = DEFAULT_TRAIN_SEED,
+    amp_enabled: bool = DEFAULT_AMP_ENABLED,
 ) -> dict[str, Any]:
     """Run the full training loop."""
     model.to(device)
@@ -288,6 +293,8 @@ def fit(
         if use_mlflow
         else None
     )
+    resolved_amp_enabled = bool(amp_enabled and device.startswith("cuda") and torch.cuda.is_available())
+    scaler = GradScaler("cuda", enabled=resolved_amp_enabled)
 
     try:
         if visualizer is not None:
@@ -298,6 +305,7 @@ def fit(
                     "checkpoint_dir": str(run_dir),
                     "batch_size": train_loader.batch_size,
                     "num_epochs": num_epochs,
+                    "amp_enabled": resolved_amp_enabled,
                     "train_samples_per_epoch": train_samples_per_epoch,
                     "val_samples_per_epoch": val_samples_per_epoch,
                     "grad_clip": grad_clip,
@@ -334,7 +342,7 @@ def fit(
                 samples_per_epoch=train_samples_per_epoch,
                 seed=seed,
                 epoch=epoch * 2,
-                shuffle=True,
+                shuffle=False,
             )
             epoch_val_loader = _build_epoch_loader(
                 val_loader,
@@ -365,6 +373,8 @@ def fit(
                 step_callback=_step_callback if ui is not None else None,
                 visualizer=visualizer,
                 epoch=epoch + 1,
+                scaler=scaler,
+                amp_enabled=resolved_amp_enabled,
             )
             if ui is not None:
                 ui.set_status(f"Epoch {epoch + 1}/{num_epochs} validating")
@@ -374,6 +384,7 @@ def fit(
                 epoch_val_loader,
                 device,
                 visualizer=visualizer,
+                amp_enabled=resolved_amp_enabled,
             )
             if ui is not None:
                 ui.set_val_metrics(val_metrics)
@@ -516,10 +527,22 @@ def run_training(
     mlflow_repo: str | Path = DEFAULT_MLFLOW_DIR,
     train_samples_per_epoch: int | None = DEFAULT_TRAIN_SAMPLES_PER_EPOCH,
     val_samples_per_epoch: int | None = DEFAULT_VAL_SAMPLES_PER_EPOCH,
+    prefetch_factor: int = DEFAULT_PREFETCH_FACTOR,
+    amp_enabled: bool = DEFAULT_AMP_ENABLED,
 ) -> dict[str, Any]:
     """Build datasets, model, loss, optimizer, and run training."""
     torch.manual_seed(seed)
     resolved_device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    loader_uses_cuda = resolved_device.startswith("cuda")
+    persistent_workers = num_workers > 0
+    loader_kwargs: dict[str, Any] = {
+        "batch_size": batch_size,
+        "num_workers": num_workers,
+        "pin_memory": loader_uses_cuda,
+        "persistent_workers": persistent_workers,
+    }
+    if num_workers > 0:
+        loader_kwargs["prefetch_factor"] = prefetch_factor
 
     train_dataset, val_dataset = create_train_val_datasets(
         split_date=split_date,
@@ -529,15 +552,13 @@ def run_training(
     )
     train_loader = DataLoader(
         train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
+        shuffle=False,
+        **loader_kwargs,
     )
     val_loader = DataLoader(
         val_dataset,
-        batch_size=batch_size,
         shuffle=False,
-        num_workers=num_workers,
+        **loader_kwargs,
     )
 
     model = MultiScaleFusionNet()
@@ -573,6 +594,7 @@ def run_training(
         train_samples_per_epoch=train_samples_per_epoch,
         val_samples_per_epoch=val_samples_per_epoch,
         seed=seed,
+        amp_enabled=amp_enabled,
     )
 
 

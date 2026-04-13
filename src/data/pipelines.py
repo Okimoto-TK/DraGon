@@ -11,7 +11,7 @@ from config.api import MairuiConfig, TushareConfig
 from config.config import DEFAULT_EXCHANGE, DEFAULT_STATUS
 from tqdm import tqdm
 
-from config.config import assembled_dir, processed_path, debug
+from config.config import assembled_dir
 from src.data.assembler.assemble import assemble_all
 from src.data.models import Query, TableSchema, ProcessedParams
 from src.data.registry.processed import PROCESSED_PARAM_MAP
