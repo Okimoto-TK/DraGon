@@ -46,6 +46,8 @@ def validate(
         with autocast(device_type="cuda", enabled=amp_enabled):
             loss, loss_metrics = criterion(outputs, batch)
         mean_metrics = batch_prediction_metrics(outputs, batch)
+        if visualizer is not None:
+            visualizer.update_epoch_buffer("val", model, outputs, batch)
         should_collect_diag = (
             visualizer is not None
             and (
@@ -59,6 +61,8 @@ def validate(
             if should_collect_diag
             else {}
         )
+        if visualizer is not None and step_idx == total_steps:
+            visualizer.capture_epoch_snapshot("val", model, outputs, batch)
 
         batch_size = int(batch["macro"].shape[0])
         tracker.update(

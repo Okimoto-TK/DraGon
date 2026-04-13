@@ -17,20 +17,34 @@ class DecoderHead(nn.Module):
 
         self.in_dim = in_dim
         self.out_dim = out_dim
-        self.net = nn.Sequential(
-            nn.Linear(in_dim, hidden_dim1),
-            nn.GELU(),
-            nn.Linear(hidden_dim1, hidden_dim2),
-            nn.GELU(),
-            nn.Linear(hidden_dim2, out_dim),
-        )
+        self.fc1 = nn.Linear(in_dim, hidden_dim1)
+        self.act1 = nn.GELU()
+        self.fc2 = nn.Linear(hidden_dim1, hidden_dim2)
+        self.act2 = nn.GELU()
+        self.fc3 = nn.Linear(hidden_dim2, out_dim)
+        self.last_hidden1: Tensor | None = None
+        self.last_hidden2: Tensor | None = None
+        self.last_out: Tensor | None = None
 
     def forward(self, x: Tensor) -> Tensor:
         if x.ndim != 2:
             raise ValueError(f"Expected input shape [B, D], got {tuple(x.shape)}")
         if x.shape[-1] != self.in_dim:
             raise ValueError(f"Expected input dim {self.in_dim}, got {x.shape[-1]}")
-        return self.net(x)
+        hidden1 = self.act1(self.fc1(x))
+        hidden2 = self.act2(self.fc2(hidden1))
+        out = self.fc3(hidden2)
+        self.last_hidden1 = hidden1.detach()
+        self.last_hidden2 = hidden2.detach()
+        self.last_out = out.detach()
+        return out
+
+    def get_last_debug(self) -> dict[str, Tensor | None]:
+        return {
+            "hidden1": self.last_hidden1,
+            "hidden2": self.last_hidden2,
+            "out": self.last_out,
+        }
 
 
 __all__ = ["DecoderHead"]

@@ -55,6 +55,7 @@ class PerceiverResampler(nn.Module):
             nn.Dropout(dropout) if dropout > 0.0 else nn.Identity(),
             nn.Linear(dim * ff_mult, dim),
         )
+        self.last_cross_attn: Tensor | None = None
 
     def forward(self, x: Tensor) -> Tensor:
         if x.ndim != 3:
@@ -65,9 +66,13 @@ class PerceiverResampler(nn.Module):
         bsz = x.shape[0]
         latents = self.query_norm(self.latents.unsqueeze(0).expand(bsz, -1, -1))
         kv = self.kv_norm(self.kv_proj(x))
-        attended, _ = self.cross_attn(latents, kv, kv, need_weights=False)
+        attended, attn = self.cross_attn(latents, kv, kv, need_weights=True, average_attn_weights=False)
+        self.last_cross_attn = attn.detach()
         tokens = latents + attended
         return tokens + self.ffn(self.post_attn_norm(tokens))
+
+    def get_last_debug(self) -> dict[str, Tensor | None]:
+        return {"cross_attn": self.last_cross_attn}
 
 
 __all__ = ["PerceiverResampler"]

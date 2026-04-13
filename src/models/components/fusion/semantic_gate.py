@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
 from config.config import token_dim as DEFAULT_TOKEN_DIM
 from torch import Tensor, nn
 
@@ -23,16 +24,28 @@ class _SemanticFusionBlock(nn.Module):
         super().__init__()
         hidden_dim = dim * 8
         self.norm = nn.LayerNorm(dim * 4)
-        self.fuse = nn.Sequential(
-            nn.Linear(dim * 4, hidden_dim * 2),
-            _GEGLU(),
-            nn.Dropout(dropout) if dropout > 0.0 else nn.Identity(),
-            nn.Linear(hidden_dim, dim),
-        )
+        self.fc_in = nn.Linear(dim * 4, hidden_dim * 2)
+        self.dropout = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
+        self.fc_out = nn.Linear(hidden_dim, dim)
+        self.last_term_norms: dict[str, float] = {}
+        self.last_gate_activation: Tensor | None = None
 
     def forward(self, x: Tensor, summary: Tensor) -> Tensor:
-        interaction = torch.cat((x, summary, x * summary, x - summary), dim=-1)
-        return x + self.fuse(self.norm(interaction))
+        product = x * summary
+        difference = x - summary
+        interaction = torch.cat((x, summary, product, difference), dim=-1)
+        self.last_term_norms = {
+            "x": float(x.detach().norm(dim=-1).mean().item()),
+            "summary": float(summary.detach().norm(dim=-1).mean().item()),
+            "product": float(product.detach().norm(dim=-1).mean().item()),
+            "difference": float(difference.detach().norm(dim=-1).mean().item()),
+        }
+        hidden = self.fc_in(self.norm(interaction))
+        value, gate = hidden.chunk(2, dim=-1)
+        gate_act = F.gelu(gate)
+        self.last_gate_activation = gate_act.detach()
+        fused = value * gate_act
+        return x + self.fc_out(self.dropout(fused))
 
 
 class SemanticGatedChannelFusion(nn.Module):
@@ -50,6 +63,7 @@ class SemanticGatedChannelFusion(nn.Module):
         self.dim = dim
         self.side_pool = AttentivePool1d(dim=dim)
         self.blocks = nn.ModuleList([_SemanticFusionBlock(dim, dropout=dropout) for _ in range(num_layers)])
+        self.last_side_global: Tensor | None = None
 
     def forward(self, x: Tensor, side_tokens: Tensor) -> Tensor:
         if x.ndim != 3 or side_tokens.ndim != 3:
@@ -62,11 +76,19 @@ class SemanticGatedChannelFusion(nn.Module):
             raise ValueError(f"Expected feature dim {self.dim}, got {x.shape[-1]}")
 
         side_global = self.side_pool(side_tokens)
+        self.last_side_global = side_global.detach()
         side_broadcast = side_global.unsqueeze(1).expand(-1, x.shape[1], -1)
         tokens = x
         for block in self.blocks:
             tokens = block(tokens, side_broadcast)
         return tokens
+
+    def get_last_debug(self) -> dict[str, object]:
+        return {
+            "side_global": self.last_side_global,
+            "term_norms": [block.last_term_norms for block in self.blocks],
+            "gate_activations": [block.last_gate_activation for block in self.blocks],
+        }
 
 
 __all__ = ["SemanticGatedChannelFusion"]

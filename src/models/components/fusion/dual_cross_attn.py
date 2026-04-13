@@ -66,20 +66,26 @@ class _BidirectionalFusionBlock(nn.Module):
         self.y_self = _SelfAttentionRefine(dim, num_heads=num_heads, dropout=dropout)
         self.x_ffn = _FeedForward(dim, ff_mult=ff_mult, dropout=dropout)
         self.y_ffn = _FeedForward(dim, ff_mult=ff_mult, dropout=dropout)
+        self.last_x_to_y_attn: Tensor | None = None
+        self.last_y_to_x_attn: Tensor | None = None
 
     def forward(self, x: Tensor, y: Tensor) -> tuple[Tensor, Tensor]:
-        next_x, _ = self.x_cross(
+        next_x, x_to_y_attn = self.x_cross(
             self.x_q_norm(x),
             self.x_kv_norm(y),
             self.x_kv_norm(y),
-            need_weights=False,
+            need_weights=True,
+            average_attn_weights=False,
         )
-        next_y, _ = self.y_cross(
+        next_y, y_to_x_attn = self.y_cross(
             self.y_q_norm(y),
             self.y_kv_norm(x),
             self.y_kv_norm(x),
-            need_weights=False,
+            need_weights=True,
+            average_attn_weights=False,
         )
+        self.last_x_to_y_attn = x_to_y_attn.detach()
+        self.last_y_to_x_attn = y_to_x_attn.detach()
         x = x + next_x
         y = y + next_y
         x = self.x_self(x)
@@ -152,6 +158,12 @@ class DualCrossAttentionFusion(nn.Module):
         y_aligned = self._match_length(y_tokens, fused_len)
         fused = torch.cat((x_aligned, y_aligned), dim=-1)
         return self.fuse_proj(self.fuse_norm(fused))
+
+    def get_last_debug(self) -> dict[str, list[Tensor | None]]:
+        return {
+            "x_to_y_attn": [layer.last_x_to_y_attn for layer in self.layers],
+            "y_to_x_attn": [layer.last_y_to_x_attn for layer in self.layers],
+        }
 
 
 __all__ = ["DualCrossAttentionFusion"]

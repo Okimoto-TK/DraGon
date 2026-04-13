@@ -27,10 +27,12 @@ class _PreNormSelfAttentionBlock(nn.Module):
             nn.GELU(),
             nn.Linear(dim * ff_mult, dim),
         )
+        self.last_attn: Tensor | None = None
 
     def forward(self, x: Tensor) -> Tensor:
         attn_in = self.norm1(x)
-        attn_out, _ = self.attn(attn_in, attn_in, attn_in, need_weights=False)
+        attn_out, attn = self.attn(attn_in, attn_in, attn_in, need_weights=True, average_attn_weights=False)
+        self.last_attn = attn.detach()
         x = x + attn_out
         x = x + self.ffn(self.norm2(x))
         return x
@@ -86,6 +88,12 @@ class SummaryHead(nn.Module):
             tokens = layer(tokens)
         summary_tokens = tokens[:, : self.num_summary_tokens, :]
         return self.out_proj(summary_tokens.reshape(bsz, self.num_summary_tokens * self.dim))
+
+    def get_last_debug(self) -> dict[str, object]:
+        return {
+            "num_summary_tokens": self.num_summary_tokens,
+            "layer_attn": [layer.last_attn for layer in self.layers],
+        }
 
 
 __all__ = ["SummaryHead"]

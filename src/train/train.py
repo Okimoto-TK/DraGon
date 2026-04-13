@@ -28,6 +28,7 @@ def train_one_epoch(
     step_callback: Callable[[dict[str, object]], None] | None = None,
     visualizer: MLflowVisualizer | None = None,
     epoch: int | None = None,
+    global_step_offset: int = 0,
     diagnostics_every_steps: int = DEFAULT_DIAGNOSTICS_EVERY_STEPS,
     scaler: GradScaler | None = None,
     amp_enabled: bool = False,
@@ -61,11 +62,15 @@ def train_one_epoch(
         with autocast(device_type="cuda", enabled=amp_enabled):
             loss, loss_metrics = criterion(outputs, batch)
         mean_metrics = batch_prediction_metrics(outputs, batch)
+        if visualizer is not None:
+            visualizer.update_epoch_buffer("train", model, outputs, batch)
         diag_metrics = (
             visualizer.collect_batch_metrics(model, outputs, batch, loss_metrics)
             if should_collect_diag
             else {}
         )
+        if visualizer is not None and step_idx == total_steps:
+            visualizer.capture_epoch_snapshot("train", model, outputs, batch)
 
         if amp_enabled and scaler is not None:
             scaler.scale(loss).backward()
@@ -102,7 +107,7 @@ def train_one_epoch(
             visualizer.track(
                 "train",
                 realtime_metrics,
-                step=step_idx,
+                step=global_step_offset + step_idx,
                 epoch=epoch,
                 subset="realtime",
             )

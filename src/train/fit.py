@@ -119,6 +119,7 @@ def _save_checkpoint(
     val_metrics: dict[str, float],
     best_epoch: int,
     best_val_loss: float,
+    global_train_step: int,
     run_name: str,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -135,6 +136,7 @@ def _save_checkpoint(
             "val_metrics": val_metrics,
             "best_epoch": best_epoch,
             "best_val_loss": best_val_loss,
+            "global_train_step": global_train_step,
         },
         path,
     )
@@ -280,6 +282,7 @@ def fit(
     best_epoch = -1
     stale_epochs = 0
     start_epoch = 0
+    global_train_step = 0
     run_dir = _run_checkpoint_dir(checkpoint_dir, run_name)
     checkpoint_paths = _checkpoint_paths(run_dir)
     checkpoint_file = Path(checkpoint_path) if checkpoint_path is not None else checkpoint_paths["latest"]
@@ -332,6 +335,7 @@ def fit(
             history = resume_state.get("history", history)
             best_epoch = int(resume_state.get("best_epoch", best_epoch))
             best_val_loss = float(resume_state.get("best_val_loss", best_val_loss))
+            global_train_step = int(resume_state.get("global_train_step", 0))
 
         if ui is not None:
             ui.start()
@@ -353,6 +357,8 @@ def fit(
             )
             if ui is not None:
                 ui.start_epoch(epoch + 1, num_epochs, len(epoch_train_loader))
+            if visualizer is not None:
+                visualizer.start_epoch_stage("train")
 
             def _step_callback(payload: dict[str, Any]) -> None:
                 if ui is None:
@@ -373,11 +379,17 @@ def fit(
                 step_callback=_step_callback if ui is not None else None,
                 visualizer=visualizer,
                 epoch=epoch + 1,
+                global_step_offset=global_train_step,
                 scaler=scaler,
                 amp_enabled=resolved_amp_enabled,
             )
+            global_train_step += len(epoch_train_loader)
+            if visualizer is not None:
+                visualizer.log_epoch_diagnostics("train", epoch + 1)
             if ui is not None:
                 ui.set_status(f"Epoch {epoch + 1}/{num_epochs} validating")
+            if visualizer is not None:
+                visualizer.start_epoch_stage("val")
             val_metrics = validate(
                 model,
                 criterion,
@@ -386,6 +398,8 @@ def fit(
                 visualizer=visualizer,
                 amp_enabled=resolved_amp_enabled,
             )
+            if visualizer is not None:
+                visualizer.log_epoch_diagnostics("val", epoch + 1)
             if ui is not None:
                 ui.set_val_metrics(val_metrics)
 
@@ -420,6 +434,7 @@ def fit(
                     val_metrics=val_metrics,
                     best_epoch=best_epoch,
                     best_val_loss=best_val_loss,
+                    global_train_step=global_train_step,
                     run_name=run_name,
                 )
                 if checkpoint_file != checkpoint_paths["latest"] and checkpoint_file != checkpoint_paths["best"]:
@@ -435,6 +450,7 @@ def fit(
                         val_metrics=val_metrics,
                         best_epoch=best_epoch,
                         best_val_loss=best_val_loss,
+                        global_train_step=global_train_step,
                         run_name=run_name,
                     )
             else:
@@ -452,6 +468,7 @@ def fit(
                 val_metrics=val_metrics,
                 best_epoch=best_epoch,
                 best_val_loss=best_val_loss,
+                global_train_step=global_train_step,
                 run_name=run_name,
             )
 
@@ -468,6 +485,7 @@ def fit(
                     val_metrics=val_metrics,
                     best_epoch=best_epoch,
                     best_val_loss=best_val_loss,
+                    global_train_step=global_train_step,
                     run_name=run_name,
                 )
 
