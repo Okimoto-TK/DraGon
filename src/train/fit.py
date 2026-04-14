@@ -370,9 +370,15 @@ def fit(
             global_train_step = int(resume_state.get("global_train_step", 0))
 
         if compile_enabled:
-            compile_heavy = getattr(model, "compile_heavy_modules", None)
-            if callable(compile_heavy):
-                compile_heavy(mode=compile_mode)
+            compile_all = getattr(model, "compile_all_modules", None)
+            if callable(compile_all):
+                compile_all(mode=compile_mode)
+            else:
+                compile_heavy = getattr(model, "compile_heavy_modules", None)
+                if callable(compile_heavy):
+                    compile_heavy(mode=compile_mode)
+                else:
+                    train_model = torch.compile(model, mode=compile_mode)
 
         if ui is not None:
             ui.start()

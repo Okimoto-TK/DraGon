@@ -1,8 +1,9 @@
-"""2D joint feature refinement blocks with UniRepLK-style large-kernel trunks."""
+"""EfficientViT-style lightweight 2D trunk with multi-scale local + linear attention."""
 from __future__ import annotations
 
 from config.config import lmf_dim as DEFAULT_LMF_DIM
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
 from torch.utils.checkpoint import checkpoint
 
@@ -23,108 +24,198 @@ class LayerNorm2d(nn.Module):
         return self.norm(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
 
 
-class GRN2d(nn.Module):
-    """Global response normalization for NCHW tensors."""
+class ConvFFN2d(nn.Module):
+    """Depthwise-enhanced Conv-FFN used after fusion."""
 
     def __init__(self, channels: int) -> None:
         super().__init__()
-        self.gamma = nn.Parameter(torch.zeros(1, channels, 1, 1))
-        self.beta = nn.Parameter(torch.zeros(1, channels, 1, 1))
+        if channels <= 0:
+            raise ValueError(f"channels must be positive, got {channels}")
+        self.norm = LayerNorm2d(channels)
+        self.pw_expand = nn.Conv2d(channels, channels * 4, kernel_size=1, stride=1, bias=True)
+        self.dw = nn.Conv2d(
+            channels * 4,
+            channels * 4,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            groups=channels * 4,
+            bias=True,
+        )
+        self.act = nn.SiLU()
+        self.pw_shrink = nn.Conv2d(channels * 4, channels, kernel_size=1, stride=1, bias=True)
 
     def forward(self, x: Tensor) -> Tensor:
-        gx = x.norm(p=2, dim=(2, 3), keepdim=True)
-        nx = gx / (gx.mean(dim=1, keepdim=True) + 1e-6)
-        return self.gamma * (x * nx) + self.beta + x
+        residual = x
+        x = self.norm(x)
+        x = self.pw_expand(x)
+        x = self.dw(x)
+        x = self.act(x)
+        x = self.pw_shrink(x)
+        return residual + x
 
 
-class ResConv2dBlock(nn.Module):
-    """UniRepLK-style residual block with large-kernel depthwise token mixing."""
+class EfficientViTJointBlock(nn.Module):
+    """EfficientViT-style lightweight joint block with local+global fusion."""
 
     def __init__(
         self,
         channels: int = DEFAULT_LMF_DIM,
         *,
-        large_kernel_size: int = 13,
-        small_kernel_size: int = 5,
-        expansion: int = 4,
-        dropout: float = 0.0,
-        bias: bool = True,
-        layer_scale_init: float = 1e-2,
+        num_heads: int = 4,
+        head_dim: int = 6,
+        ffn_mult: int = 4,
+        use_dilated_local: bool = False,
     ) -> None:
         super().__init__()
-
         if channels <= 0:
             raise ValueError(f"channels must be positive, got {channels}")
-        if large_kernel_size <= 0 or large_kernel_size % 2 == 0:
-            raise ValueError(f"large_kernel_size must be a positive odd integer, got {large_kernel_size}")
-        if small_kernel_size <= 0 or small_kernel_size % 2 == 0:
-            raise ValueError(f"small_kernel_size must be a positive odd integer, got {small_kernel_size}")
-        if expansion <= 0:
-            raise ValueError(f"expansion must be positive, got {expansion}")
-        if not 0.0 <= dropout < 1.0:
-            raise ValueError(f"dropout must be in [0, 1), got {dropout}")
-        if layer_scale_init < 0.0:
-            raise ValueError(f"layer_scale_init must be non-negative, got {layer_scale_init}")
+        if num_heads <= 0:
+            raise ValueError(f"num_heads must be positive, got {num_heads}")
+        if head_dim <= 0:
+            raise ValueError(f"head_dim must be positive, got {head_dim}")
+        if ffn_mult <= 0:
+            raise ValueError(f"ffn_mult must be positive, got {ffn_mult}")
 
-        hidden_channels = channels * expansion
-        large_padding = large_kernel_size // 2
-        small_padding = small_kernel_size // 2
-
+        attn_dim = num_heads * head_dim
         self.channels = channels
-        self.token_mixer_norm = nn.BatchNorm2d(channels)
-        self.dw_large = nn.Conv2d(
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        self.attn_dim = attn_dim
+
+        self.pre_norm = LayerNorm2d(channels)
+
+        # Branch A: multi-scale local aggregation
+        self.local_pw = nn.Conv2d(channels, channels, kernel_size=1, stride=1, bias=True)
+        self.local_dw3 = nn.Conv2d(
             channels,
             channels,
-            kernel_size=large_kernel_size,
+            kernel_size=3,
             stride=1,
-            padding=large_padding,
+            padding=1,
             groups=channels,
-            bias=bias,
+            bias=True,
         )
-        self.dw_small = nn.Conv2d(
+        dilation = 2 if use_dilated_local else 1
+        padding = 2 if use_dilated_local else 2
+        self.local_dw5 = nn.Conv2d(
             channels,
             channels,
-            kernel_size=small_kernel_size,
+            kernel_size=5 if not use_dilated_local else 3,
             stride=1,
-            padding=small_padding,
+            padding=padding,
+            dilation=dilation,
             groups=channels,
-            bias=bias,
+            bias=True,
         )
-        self.channel_norm = LayerNorm2d(channels)
-        self.channel_mlp = nn.Sequential(
-            nn.Conv2d(channels, hidden_channels, kernel_size=1, bias=bias),
-            nn.GELU(),
-            GRN2d(hidden_channels),
-            nn.Dropout2d(dropout) if dropout > 0.0 else nn.Identity(),
-            nn.Conv2d(hidden_channels, channels, kernel_size=1, bias=bias),
+
+        # Branch B: lightweight global linear attention
+        self.qkv = nn.Conv2d(channels, attn_dim * 3, kernel_size=1, stride=1, bias=True)
+        self.q_dw = nn.Conv2d(
+            attn_dim,
+            attn_dim,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            groups=attn_dim,
+            bias=True,
         )
-        self.layer_scale = nn.Parameter(layer_scale_init * torch.ones(1, channels, 1, 1))
+        self.k_dw = nn.Conv2d(
+            attn_dim,
+            attn_dim,
+            kernel_size=5,
+            stride=1,
+            padding=2,
+            groups=attn_dim,
+            bias=True,
+        )
+        self.v_dw = nn.Conv2d(
+            attn_dim,
+            attn_dim,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            groups=attn_dim,
+            bias=True,
+        )
+        self.global_proj = nn.Conv2d(attn_dim, channels, kernel_size=1, stride=1, bias=True)
+
+        self.fuse_pw = nn.Conv2d(channels, channels, kernel_size=1, stride=1, bias=True)
+        hidden = channels * ffn_mult
+        self.ffn_norm = LayerNorm2d(channels)
+        self.ffn_expand = nn.Conv2d(channels, hidden, kernel_size=1, stride=1, bias=True)
+        self.ffn_dw = nn.Conv2d(
+            hidden,
+            hidden,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            groups=hidden,
+            bias=True,
+        )
+        self.ffn_act = nn.SiLU()
+        self.ffn_shrink = nn.Conv2d(hidden, channels, kernel_size=1, stride=1, bias=True)
 
     def forward(self, x: Tensor) -> Tensor:
         if x.ndim != 4:
             raise ValueError(f"Expected input shape [B, C, H, W], got {tuple(x.shape)}")
         if x.shape[1] != self.channels:
             raise ValueError(f"Expected {self.channels} channels, got {x.shape[1]}")
+        b, _, h, w = x.shape
 
         residual = x
-        x = self.token_mixer_norm(x)
-        x = self.dw_large(x) + self.dw_small(x)
-        x = self.channel_mlp(self.channel_norm(x))
-        return residual + self.layer_scale * x
+        x = self.pre_norm(x)
+
+        # Local branch
+        local_seed = self.local_pw(x)
+        local = self.local_dw3(local_seed) + self.local_dw5(local_seed)
+
+        # Global branch with ReLU linear attention
+        qkv = self.qkv(x)
+        q, k, v = torch.chunk(qkv, 3, dim=1)
+        q = self.q_dw(q)
+        k = self.k_dw(k)
+        v = self.v_dw(v)
+
+        q = F.relu(q)
+        k = F.relu(k)
+
+        q = q.view(b, self.num_heads, self.head_dim, h * w).transpose(2, 3)  # [B, H, N, Dh]
+        k = k.view(b, self.num_heads, self.head_dim, h * w).transpose(2, 3)  # [B, H, N, Dh]
+        v = v.view(b, self.num_heads, self.head_dim, h * w).transpose(2, 3)  # [B, H, N, Dh]
+
+        kv = torch.matmul(k.transpose(-2, -1), v)  # [B, H, Dh, Dh]
+        out = torch.matmul(q, kv)  # [B, H, N, Dh]
+        denom = torch.matmul(q, k.sum(dim=-2, keepdim=True).transpose(-2, -1)).clamp_min_(1e-6)
+        out = out / denom
+        out = out.transpose(2, 3).contiguous().view(b, self.attn_dim, h, w)
+        global_branch = self.global_proj(out)
+
+        fused = self.fuse_pw(local + global_branch)
+        x = residual + fused
+
+        # Conv-FFN
+        ffn_residual = x
+        x = self.ffn_norm(x)
+        x = self.ffn_expand(x)
+        x = self.ffn_dw(x)
+        x = self.ffn_act(x)
+        x = self.ffn_shrink(x)
+        return ffn_residual + x
 
 
 class JointNet2D(nn.Module):
-    """Large-kernel 2D trunk for refining pairwise interaction maps."""
+    """EfficientViT-style 2D trunk for refining pairwise interaction maps."""
 
     def __init__(
         self,
         channels: int = DEFAULT_LMF_DIM,
         *,
-        num_blocks: int = 3,
-        large_kernel_size: int = 13,
-        small_kernel_size: int = 5,
-        expansion: int = 4,
-        dropout: float = 0.0,
+        num_blocks: int = 2,
+        num_heads: int = 4,
+        head_dim: int = 6,
+        ffn_mult: int = 4,
+        use_dilated_local: bool = False,
         use_gradient_checkpoint: bool = True,
     ) -> None:
         super().__init__()
@@ -136,20 +227,23 @@ class JointNet2D(nn.Module):
 
         self.channels = channels
         self.use_gradient_checkpoint = bool(use_gradient_checkpoint)
-        blocks = [
-            ResConv2dBlock(
-                channels=channels,
-                large_kernel_size=large_kernel_size,
-                small_kernel_size=small_kernel_size,
-                expansion=expansion,
-                dropout=dropout,
-            )
-            for _ in range(num_blocks)
-        ]
-        self.net = nn.Sequential(
+        self.blocks = nn.ModuleList(
+            [
+                EfficientViTJointBlock(
+                    channels=channels,
+                    num_heads=num_heads,
+                    head_dim=head_dim,
+                    ffn_mult=ffn_mult,
+                    use_dilated_local=use_dilated_local,
+                )
+                for _ in range(num_blocks)
+            ]
+        )
+        self.pre = nn.Sequential(
             nn.Conv2d(channels, channels, kernel_size=1, stride=1, bias=True),
-            nn.GELU(),
-            *blocks,
+            nn.SiLU(),
+        )
+        self.post = nn.Sequential(
             LayerNorm2d(channels),
             nn.Conv2d(channels, channels, kernel_size=1, stride=1, bias=True),
         )
@@ -159,11 +253,15 @@ class JointNet2D(nn.Module):
             raise ValueError(f"Expected input shape [B, C, H, W], got {tuple(x.shape)}")
         if x.shape[1] != self.channels:
             raise ValueError(f"Expected {self.channels} channels, got {x.shape[1]}")
+        trunk = self.pre(x)
         if self.use_gradient_checkpoint and self.training and x.requires_grad:
-            trunk = checkpoint(self.net, x, use_reentrant=False)
+            for block in self.blocks:
+                trunk = checkpoint(block, trunk, use_reentrant=False)
         else:
-            trunk = self.net(x)
+            for block in self.blocks:
+                trunk = block(trunk)
+        trunk = self.post(trunk)
         return x + trunk
 
 
-__all__ = ["JointNet2D", "ResConv2dBlock"]
+__all__ = ["EfficientViTJointBlock", "JointNet2D"]

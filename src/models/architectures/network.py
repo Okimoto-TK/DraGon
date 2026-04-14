@@ -3,9 +3,17 @@ from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
+from config.config import jointnet_12_blocks as DEFAULT_JOINTNET_12_BLOCKS
+from config.config import jointnet_12_channels as DEFAULT_JOINTNET_12_CHANNELS
+from config.config import jointnet_12_ffn_mult as DEFAULT_JOINTNET_12_FFN_MULT
+from config.config import jointnet_12_head_dim as DEFAULT_JOINTNET_12_HEAD_DIM
+from config.config import jointnet_12_num_heads as DEFAULT_JOINTNET_12_NUM_HEADS
 from config.config import hidden_dim as DEFAULT_HIDDEN_DIM
 from config.config import jointnet_23_blocks as DEFAULT_JOINTNET_23_BLOCKS
 from config.config import jointnet_23_channels as DEFAULT_JOINTNET_23_CHANNELS
+from config.config import jointnet_23_ffn_mult as DEFAULT_JOINTNET_23_FFN_MULT
+from config.config import jointnet_23_head_dim as DEFAULT_JOINTNET_23_HEAD_DIM
+from config.config import jointnet_23_num_heads as DEFAULT_JOINTNET_23_NUM_HEADS
 from config.config import latent_token as DEFAULT_LATENT_TOKEN
 from config.config import lmf_dim as DEFAULT_LMF_DIM
 from config.config import lmf_rank as DEFAULT_LMF_RANK
@@ -47,8 +55,16 @@ class MultiScaleFusionNet(nn.Module):
         mezzo_decomp_level: int = DEFAULT_MEZZO_DECOMP_LEVEL,
         micro_decomp_level: int = DEFAULT_MICRO_DECOMP_LEVEL,
         wno_num_blocks: int = DEFAULT_WNO_NUM_BLOCKS,
+        jointnet_12_channels: int = DEFAULT_JOINTNET_12_CHANNELS,
+        jointnet_12_blocks: int = DEFAULT_JOINTNET_12_BLOCKS,
+        jointnet_12_num_heads: int = DEFAULT_JOINTNET_12_NUM_HEADS,
+        jointnet_12_head_dim: int = DEFAULT_JOINTNET_12_HEAD_DIM,
+        jointnet_12_ffn_mult: int = DEFAULT_JOINTNET_12_FFN_MULT,
         jointnet_23_channels: int = DEFAULT_JOINTNET_23_CHANNELS,
         jointnet_23_blocks: int = DEFAULT_JOINTNET_23_BLOCKS,
+        jointnet_23_num_heads: int = DEFAULT_JOINTNET_23_NUM_HEADS,
+        jointnet_23_head_dim: int = DEFAULT_JOINTNET_23_HEAD_DIM,
+        jointnet_23_ffn_mult: int = DEFAULT_JOINTNET_23_FFN_MULT,
         min_scale_S: float = 1e-3,
         min_scale_M: float = 1e-2,
         min_scale_MDD: float = 1e-2,
@@ -83,11 +99,35 @@ class MultiScaleFusionNet(nn.Module):
         if wno_num_blocks <= 0:
             msg = f"wno_num_blocks must be positive, got {wno_num_blocks}"
             raise ValueError(msg)
+        if jointnet_12_channels <= 0:
+            msg = f"jointnet_12_channels must be positive, got {jointnet_12_channels}"
+            raise ValueError(msg)
+        if jointnet_12_blocks <= 0:
+            msg = f"jointnet_12_blocks must be positive, got {jointnet_12_blocks}"
+            raise ValueError(msg)
+        if jointnet_12_num_heads <= 0:
+            msg = f"jointnet_12_num_heads must be positive, got {jointnet_12_num_heads}"
+            raise ValueError(msg)
+        if jointnet_12_head_dim <= 0:
+            msg = f"jointnet_12_head_dim must be positive, got {jointnet_12_head_dim}"
+            raise ValueError(msg)
+        if jointnet_12_ffn_mult <= 0:
+            msg = f"jointnet_12_ffn_mult must be positive, got {jointnet_12_ffn_mult}"
+            raise ValueError(msg)
         if jointnet_23_channels <= 0:
             msg = f"jointnet_23_channels must be positive, got {jointnet_23_channels}"
             raise ValueError(msg)
         if jointnet_23_blocks <= 0:
             msg = f"jointnet_23_blocks must be positive, got {jointnet_23_blocks}"
+            raise ValueError(msg)
+        if jointnet_23_num_heads <= 0:
+            msg = f"jointnet_23_num_heads must be positive, got {jointnet_23_num_heads}"
+            raise ValueError(msg)
+        if jointnet_23_head_dim <= 0:
+            msg = f"jointnet_23_head_dim must be positive, got {jointnet_23_head_dim}"
+            raise ValueError(msg)
+        if jointnet_23_ffn_mult <= 0:
+            msg = f"jointnet_23_ffn_mult must be positive, got {jointnet_23_ffn_mult}"
             raise ValueError(msg)
 
         if macro_decomp_level <= 0 or mezzo_decomp_level <= 0 or micro_decomp_level <= 0:
@@ -108,8 +148,16 @@ class MultiScaleFusionNet(nn.Module):
         self.mezzo_decomp_level = mezzo_decomp_level
         self.micro_decomp_level = micro_decomp_level
         self.wno_num_blocks = wno_num_blocks
+        self.jointnet_12_channels = jointnet_12_channels
+        self.jointnet_12_blocks = jointnet_12_blocks
+        self.jointnet_12_num_heads = jointnet_12_num_heads
+        self.jointnet_12_head_dim = jointnet_12_head_dim
+        self.jointnet_12_ffn_mult = jointnet_12_ffn_mult
         self.jointnet_23_channels = jointnet_23_channels
         self.jointnet_23_blocks = jointnet_23_blocks
+        self.jointnet_23_num_heads = jointnet_23_num_heads
+        self.jointnet_23_head_dim = jointnet_23_head_dim
+        self.jointnet_23_ffn_mult = jointnet_23_ffn_mult
         self.min_scale_S = float(min_scale_S)
         self.min_scale_M = float(min_scale_M)
         self.min_scale_MDD = float(min_scale_MDD)
@@ -155,13 +203,26 @@ class MultiScaleFusionNet(nn.Module):
             rank=lmf_rank,
         )
 
-        self.jointnet_12 = JointNet2D(channels=lmf_dim)
+        self.jointnet_12_in_proj = nn.Conv2d(lmf_dim, jointnet_12_channels, kernel_size=1, stride=1)
+        self.jointnet_12 = JointNet2D(
+            channels=jointnet_12_channels,
+            num_blocks=jointnet_12_blocks,
+            num_heads=jointnet_12_num_heads,
+            head_dim=jointnet_12_head_dim,
+            ffn_mult=jointnet_12_ffn_mult,
+        )
         self.jointnet_23_in_proj = nn.Conv2d(lmf_dim, jointnet_23_channels, kernel_size=1, stride=1)
-        self.jointnet_23 = JointNet2D(channels=jointnet_23_channels, num_blocks=jointnet_23_blocks)
+        self.jointnet_23 = JointNet2D(
+            channels=jointnet_23_channels,
+            num_blocks=jointnet_23_blocks,
+            num_heads=jointnet_23_num_heads,
+            head_dim=jointnet_23_head_dim,
+            ffn_mult=jointnet_23_ffn_mult,
+        )
 
         self.map_to_tokens_12 = InteractionMapToTokens(
             latent_token=latent_token,
-            dim=lmf_dim,
+            dim=jointnet_12_channels,
         )
         self.map_to_tokens_23 = InteractionMapToTokens(
             latent_token=latent_token,
@@ -172,7 +233,7 @@ class MultiScaleFusionNet(nn.Module):
             input_dim=lmf_dim,
             dim=token_dim,
         )
-        self.m1_token_proj = nn.Linear(lmf_dim, token_dim)
+        self.m1_token_proj = nn.Linear(jointnet_12_channels, token_dim)
 
         self.drift_fusion = DualCrossAttentionFusion(dim=token_dim, num_layers=2)
         self.diffusion_fusion = SemanticGatedChannelFusion(dim=token_dim)
@@ -182,10 +243,12 @@ class MultiScaleFusionNet(nn.Module):
         self.full_tfn = TensorFusion(dim_x=summary_dim, dim_y=summary_dim)
         self.decoder_head = DecoderHead(in_dim=self.full_tfn.out_dim, out_dim=8)
 
+        self.jointnet_12_in_proj.to(memory_format=torch.channels_last)
         self.jointnet_12.to(memory_format=torch.channels_last)
         self.jointnet_23_in_proj.to(memory_format=torch.channels_last)
         self.jointnet_23.to(memory_format=torch.channels_last)
         self.debug_capture_enabled = False
+        self._all_modules_compiled = False
         self._heavy_modules_compiled = False
 
     def set_debug_capture(self, enabled: bool) -> None:
@@ -202,15 +265,40 @@ class MultiScaleFusionNet(nn.Module):
             if callable(set_debug):
                 set_debug(self.debug_capture_enabled)
 
-    def compile_heavy_modules(self, *, mode: str) -> None:
-        if self._heavy_modules_compiled:
+    def compile_all_modules(self, *, mode: str) -> None:
+        if self._all_modules_compiled:
             return
-        self.jointnet_12 = torch.compile(self.jointnet_12, mode=mode)
-        self.jointnet_23 = torch.compile(self.jointnet_23, mode=mode)
-        self.side_resampler = torch.compile(self.side_resampler, mode=mode)
-        self.drift_fusion = torch.compile(self.drift_fusion, mode=mode)
-        self.diffusion_fusion = torch.compile(self.diffusion_fusion, mode=mode)
+        module_names = (
+            "macro_encoder",
+            "mezzo_encoder",
+            "micro_encoder",
+            "side_encoder",
+            "pairwise_lmf_12",
+            "pairwise_lmf_23",
+            "jointnet_12_in_proj",
+            "jointnet_12",
+            "jointnet_23_in_proj",
+            "jointnet_23",
+            "map_to_tokens_12",
+            "map_to_tokens_23",
+            "side_resampler",
+            "m1_token_proj",
+            "drift_fusion",
+            "diffusion_fusion",
+            "drift_summary_head",
+            "diffusion_summary_head",
+            "full_tfn",
+            "decoder_head",
+        )
+        for name in module_names:
+            module = getattr(self, name, None)
+            if isinstance(module, nn.Module):
+                setattr(self, name, torch.compile(module, mode=mode))
+        self._all_modules_compiled = True
         self._heavy_modules_compiled = True
+
+    def compile_heavy_modules(self, *, mode: str) -> None:
+        self.compile_all_modules(mode=mode)
 
     def forward(
         self,
@@ -229,9 +317,10 @@ class MultiScaleFusionNet(nn.Module):
         u3 = e3.transpose(1, 2)
 
         t12 = self.pairwise_lmf_12(u1, u2).contiguous(memory_format=torch.channels_last)
-        h12 = self.jointnet_12(t12)
+        t12_proj = self.jointnet_12_in_proj(t12).contiguous(memory_format=torch.channels_last)
+        h12 = self.jointnet_12(t12_proj)
         m1 = self.m1_token_proj(self.map_to_tokens_12(h12))
-        del t12, h12
+        del t12, t12_proj, h12
 
         t23 = self.pairwise_lmf_23(u2, u3).contiguous(memory_format=torch.channels_last)
         t23_proj = self.jointnet_23_in_proj(t23).contiguous(memory_format=torch.channels_last)

@@ -13,19 +13,19 @@ from src.models.components.fusion import (
 )
 from src.models.components.heads import DecoderHead, SummaryHead, UnifiedHead
 from src.models.components.pooling import AttentivePool1d, InteractionMapToTokens
-from src.models.components.trunks import JointNet2D, ResConv2dBlock
+from src.models.components.trunks import EfficientViTJointBlock, JointNet2D
 
 __all__ = [
     "AttentivePool1d",
     "DecoderHead",
     "DualCrossAttentionFusion",
+    "EfficientViTJointBlock",
     "GatedFiLM",
     "InteractionMapToTokens",
     "JointNet2D",
     "LowRankFusion",
     "PairwiseLMFMap",
     "ResConv1dBlock",
-    "ResConv2dBlock",
     "SemanticGatedChannelFusion",
     "SidechainEncoder",
     "SummaryHead",
