@@ -32,6 +32,7 @@ def train_one_epoch(
     diagnostics_every_steps: int = DEFAULT_DIAGNOSTICS_EVERY_STEPS,
     scaler: GradScaler | None = None,
     amp_enabled: bool = False,
+    amp_dtype: torch.dtype | None = None,
 ) -> dict[str, float]:
     """Run one training epoch and return averaged metrics."""
     model.train()
@@ -41,6 +42,7 @@ def train_one_epoch(
 
     for step_idx, batch in enumerate(dataloader, start=1):
         batch = move_batch_to_device(batch, device)
+        should_capture_snapshot = visualizer is not None and step_idx == total_steps
         should_collect_diag = (
             visualizer is not None
             and (
@@ -49,9 +51,12 @@ def train_one_epoch(
                 or (diagnostics_every_steps > 0 and step_idx % diagnostics_every_steps == 0)
             )
         )
+        set_debug_capture = getattr(model, "set_debug_capture", None)
+        if callable(set_debug_capture):
+            set_debug_capture(should_capture_snapshot)
 
         optimizer.zero_grad(set_to_none=True)
-        with autocast(device_type="cuda", enabled=amp_enabled):
+        with autocast(device_type="cuda", enabled=amp_enabled, dtype=amp_dtype):
             outputs = model(
                 batch["macro"],
                 batch["mezzo"],
@@ -59,7 +64,7 @@ def train_one_epoch(
                 batch["sidechain"],
             )
 
-        with autocast(device_type="cuda", enabled=amp_enabled):
+        with autocast(device_type="cuda", enabled=amp_enabled, dtype=amp_dtype):
             loss, loss_metrics = criterion(outputs, batch)
         mean_metrics = batch_prediction_metrics(outputs, batch)
         if visualizer is not None:
@@ -71,6 +76,8 @@ def train_one_epoch(
         )
         if visualizer is not None and step_idx == total_steps:
             visualizer.capture_epoch_snapshot("train", model, outputs, batch)
+        if callable(set_debug_capture):
+            set_debug_capture(False)
 
         if amp_enabled and scaler is not None:
             scaler.scale(loss).backward()

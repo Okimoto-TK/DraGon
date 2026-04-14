@@ -27,12 +27,19 @@ class _PreNormSelfAttentionBlock(nn.Module):
             nn.GELU(),
             nn.Linear(dim * ff_mult, dim),
         )
+        self.debug_enabled = False
         self.last_attn: Tensor | None = None
 
     def forward(self, x: Tensor) -> Tensor:
         attn_in = self.norm1(x)
-        attn_out, attn = self.attn(attn_in, attn_in, attn_in, need_weights=True, average_attn_weights=False)
-        self.last_attn = attn.detach()
+        attn_out, attn = self.attn(
+            attn_in,
+            attn_in,
+            attn_in,
+            need_weights=self.debug_enabled,
+            average_attn_weights=False,
+        )
+        self.last_attn = attn.detach() if self.debug_enabled and attn is not None else None
         x = x + attn_out
         x = x + self.ffn(self.norm2(x))
         return x
@@ -74,6 +81,7 @@ class SummaryHead(nn.Module):
             [_PreNormSelfAttentionBlock(dim, num_heads=num_heads, ff_mult=ff_mult) for _ in range(num_layers)]
         )
         self.out_proj = nn.Linear(num_summary_tokens * dim, resolved_summary_dim)
+        self.debug_enabled = False
 
     def forward(self, x: Tensor) -> Tensor:
         if x.ndim != 3:
@@ -85,6 +93,7 @@ class SummaryHead(nn.Module):
         summary = self.summary_tokens.unsqueeze(0).expand(bsz, -1, -1)
         tokens = F.layer_norm(torch.cat((summary, x), dim=1), (self.dim,))
         for layer in self.layers:
+            layer.debug_enabled = self.debug_enabled
             tokens = layer(tokens)
         summary_tokens = tokens[:, : self.num_summary_tokens, :]
         return self.out_proj(summary_tokens.reshape(bsz, self.num_summary_tokens * self.dim))
@@ -94,6 +103,11 @@ class SummaryHead(nn.Module):
             "num_summary_tokens": self.num_summary_tokens,
             "layer_attn": [layer.last_attn for layer in self.layers],
         }
+
+    def set_debug_capture(self, enabled: bool) -> None:
+        self.debug_enabled = bool(enabled)
+        for layer in self.layers:
+            layer.debug_enabled = self.debug_enabled
 
 
 __all__ = ["SummaryHead"]

@@ -66,6 +66,7 @@ class _BidirectionalFusionBlock(nn.Module):
         self.y_self = _SelfAttentionRefine(dim, num_heads=num_heads, dropout=dropout)
         self.x_ffn = _FeedForward(dim, ff_mult=ff_mult, dropout=dropout)
         self.y_ffn = _FeedForward(dim, ff_mult=ff_mult, dropout=dropout)
+        self.debug_enabled = False
         self.last_x_to_y_attn: Tensor | None = None
         self.last_y_to_x_attn: Tensor | None = None
 
@@ -74,18 +75,22 @@ class _BidirectionalFusionBlock(nn.Module):
             self.x_q_norm(x),
             self.x_kv_norm(y),
             self.x_kv_norm(y),
-            need_weights=True,
+            need_weights=self.debug_enabled,
             average_attn_weights=False,
         )
         next_y, y_to_x_attn = self.y_cross(
             self.y_q_norm(y),
             self.y_kv_norm(x),
             self.y_kv_norm(x),
-            need_weights=True,
+            need_weights=self.debug_enabled,
             average_attn_weights=False,
         )
-        self.last_x_to_y_attn = x_to_y_attn.detach()
-        self.last_y_to_x_attn = y_to_x_attn.detach()
+        if self.debug_enabled and x_to_y_attn is not None and y_to_x_attn is not None:
+            self.last_x_to_y_attn = x_to_y_attn.detach()
+            self.last_y_to_x_attn = y_to_x_attn.detach()
+        else:
+            self.last_x_to_y_attn = None
+            self.last_y_to_x_attn = None
         x = x + next_x
         y = y + next_y
         x = self.x_self(x)
@@ -132,6 +137,7 @@ class DualCrossAttentionFusion(nn.Module):
             nn.GELU(),
             nn.Linear(dim * 2, dim),
         )
+        self.debug_enabled = False
 
     @staticmethod
     def _match_length(tokens: Tensor, target_len: int) -> Tensor:
@@ -151,6 +157,7 @@ class DualCrossAttentionFusion(nn.Module):
         x_tokens = x
         y_tokens = y
         for layer in self.layers:
+            layer.debug_enabled = self.debug_enabled
             x_tokens, y_tokens = layer(x_tokens, y_tokens)
 
         fused_len = max(x_tokens.shape[1], y_tokens.shape[1])
@@ -164,6 +171,11 @@ class DualCrossAttentionFusion(nn.Module):
             "x_to_y_attn": [layer.last_x_to_y_attn for layer in self.layers],
             "y_to_x_attn": [layer.last_y_to_x_attn for layer in self.layers],
         }
+
+    def set_debug_capture(self, enabled: bool) -> None:
+        self.debug_enabled = bool(enabled)
+        for layer in self.layers:
+            layer.debug_enabled = self.debug_enabled
 
 
 __all__ = ["DualCrossAttentionFusion"]

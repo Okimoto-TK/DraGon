@@ -25,6 +25,7 @@ def validate(
     visualizer: MLflowVisualizer | None = None,
     diagnostics_every_steps: int = DEFAULT_DIAGNOSTICS_EVERY_STEPS,
     amp_enabled: bool = False,
+    amp_dtype: torch.dtype | None = None,
 ) -> dict[str, float]:
     """Run one validation epoch and return averaged metrics."""
     model.eval()
@@ -34,8 +35,12 @@ def validate(
     total_steps = max(len(dataloader), 1)
     for step_idx, batch in enumerate(dataloader, start=1):
         batch = move_batch_to_device(batch, device)
+        should_capture_snapshot = visualizer is not None and step_idx == total_steps
+        set_debug_capture = getattr(model, "set_debug_capture", None)
+        if callable(set_debug_capture):
+            set_debug_capture(should_capture_snapshot)
 
-        with autocast(device_type="cuda", enabled=amp_enabled):
+        with autocast(device_type="cuda", enabled=amp_enabled, dtype=amp_dtype):
             outputs = model(
                 batch["macro"],
                 batch["mezzo"],
@@ -43,7 +48,7 @@ def validate(
                 batch["sidechain"],
             )
 
-        with autocast(device_type="cuda", enabled=amp_enabled):
+        with autocast(device_type="cuda", enabled=amp_enabled, dtype=amp_dtype):
             loss, loss_metrics = criterion(outputs, batch)
         mean_metrics = batch_prediction_metrics(outputs, batch)
         if visualizer is not None:
@@ -63,6 +68,8 @@ def validate(
         )
         if visualizer is not None and step_idx == total_steps:
             visualizer.capture_epoch_snapshot("val", model, outputs, batch)
+        if callable(set_debug_capture):
+            set_debug_capture(False)
 
         batch_size = int(batch["macro"].shape[0])
         tracker.update(

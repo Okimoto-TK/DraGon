@@ -15,6 +15,9 @@ from torch.utils.data import DataLoader, Subset
 from config.config import amp_enabled as DEFAULT_AMP_ENABLED
 from config.config import batch_size as DEFAULT_BATCH_SIZE
 from config.config import checkpoint_dir as DEFAULT_CHECKPOINT_DIR
+from config.config import compile_enabled as DEFAULT_COMPILE_ENABLED
+from config.config import compile_mode as DEFAULT_COMPILE_MODE
+from config.config import cudnn_benchmark as DEFAULT_CUDNN_BENCHMARK
 from config.config import early_stopping_patience as DEFAULT_EARLY_STOPPING_PATIENCE
 from config.config import mlflow_dir as DEFAULT_MLFLOW_DIR
 from config.config import mlflow_enabled as DEFAULT_MLFLOW_ENABLED
@@ -35,6 +38,7 @@ from config.config import train_val_split_date as DEFAULT_TRAIN_VAL_SPLIT_DATE
 from config.config import val_ratio as DEFAULT_VAL_RATIO
 from config.config import val_samples_per_epoch as DEFAULT_VAL_SAMPLES_PER_EPOCH
 from config.config import weight_decay as DEFAULT_WEIGHT_DECAY
+from config.config import amp_dtype as DEFAULT_AMP_DTYPE
 from src.models import MultiScaleFusionNet
 from src.models.losses import LaplaceLSELoss
 from src.train.dataset import create_train_val_datasets
@@ -42,6 +46,18 @@ from src.train.train import train_one_epoch
 from src.train.ui import TrainingUI
 from src.train.validate import validate
 from src.train.visualize import MLflowVisualizer
+
+
+def _resolve_amp_dtype(amp_enabled: bool, device: str, requested: str) -> torch.dtype | None:
+    if not amp_enabled or not device.startswith("cuda") or not torch.cuda.is_available():
+        return None
+
+    normalized = requested.strip().lower()
+    if normalized in {"bfloat16", "bf16"}:
+        return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    if normalized in {"float16", "fp16", "half"}:
+        return torch.float16
+    raise ValueError(f"Unsupported amp_dtype: {requested}")
 
 
 def _step_scheduler(scheduler: Any, monitored_value: float) -> None:
@@ -275,6 +291,10 @@ def fit(
     val_samples_per_epoch: int | None = DEFAULT_VAL_SAMPLES_PER_EPOCH,
     seed: int = DEFAULT_TRAIN_SEED,
     amp_enabled: bool = DEFAULT_AMP_ENABLED,
+    amp_dtype: str = DEFAULT_AMP_DTYPE,
+    compile_enabled: bool = DEFAULT_COMPILE_ENABLED,
+    compile_mode: str = DEFAULT_COMPILE_MODE,
+    cudnn_benchmark: bool = DEFAULT_CUDNN_BENCHMARK,
 ) -> dict[str, Any]:
     """Run the full training loop."""
     model.to(device)
@@ -300,7 +320,12 @@ def fit(
         else None
     )
     resolved_amp_enabled = bool(amp_enabled and device.startswith("cuda") and torch.cuda.is_available())
-    scaler = GradScaler("cuda", enabled=resolved_amp_enabled)
+    resolved_amp_dtype = _resolve_amp_dtype(resolved_amp_enabled, device, amp_dtype)
+    resolved_scaler_enabled = bool(resolved_amp_enabled and resolved_amp_dtype == torch.float16)
+    if device.startswith("cuda") and torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = bool(cudnn_benchmark)
+    scaler = GradScaler("cuda", enabled=resolved_scaler_enabled)
+    train_model: torch.nn.Module = model
 
     try:
         if visualizer is not None:
@@ -312,6 +337,10 @@ def fit(
                     "batch_size": train_loader.batch_size,
                     "num_epochs": num_epochs,
                     "amp_enabled": resolved_amp_enabled,
+                    "amp_dtype": None if resolved_amp_dtype is None else str(resolved_amp_dtype).replace("torch.", ""),
+                    "compile_enabled": compile_enabled,
+                    "compile_mode": compile_mode,
+                    "cudnn_benchmark": cudnn_benchmark,
                     "train_samples_per_epoch": train_samples_per_epoch,
                     "val_samples_per_epoch": val_samples_per_epoch,
                     "grad_clip": grad_clip,
@@ -339,6 +368,11 @@ def fit(
             best_epoch = int(resume_state.get("best_epoch", best_epoch))
             best_val_loss = float(resume_state.get("best_val_loss", best_val_loss))
             global_train_step = int(resume_state.get("global_train_step", 0))
+
+        if compile_enabled:
+            compile_heavy = getattr(model, "compile_heavy_modules", None)
+            if callable(compile_heavy):
+                compile_heavy(mode=compile_mode)
 
         if ui is not None:
             ui.start()
@@ -373,7 +407,7 @@ def fit(
                 )
 
             train_metrics = train_one_epoch(
-                model,
+                train_model,
                 criterion,
                 optimizer,
                 epoch_train_loader,
@@ -385,6 +419,7 @@ def fit(
                 global_step_offset=global_train_step,
                 scaler=scaler,
                 amp_enabled=resolved_amp_enabled,
+                amp_dtype=resolved_amp_dtype,
             )
             global_train_step += len(epoch_train_loader)
             if visualizer is not None:
@@ -394,12 +429,13 @@ def fit(
             if visualizer is not None:
                 visualizer.start_epoch_stage("val")
             val_metrics = validate(
-                model,
+                train_model,
                 criterion,
                 epoch_val_loader,
                 device,
                 visualizer=visualizer,
                 amp_enabled=resolved_amp_enabled,
+                amp_dtype=resolved_amp_dtype,
             )
             if visualizer is not None:
                 visualizer.log_epoch_diagnostics("val", epoch + 1)
@@ -550,6 +586,10 @@ def run_training(
     val_samples_per_epoch: int | None = DEFAULT_VAL_SAMPLES_PER_EPOCH,
     prefetch_factor: int = DEFAULT_PREFETCH_FACTOR,
     amp_enabled: bool = DEFAULT_AMP_ENABLED,
+    amp_dtype: str = DEFAULT_AMP_DTYPE,
+    compile_enabled: bool = DEFAULT_COMPILE_ENABLED,
+    compile_mode: str = DEFAULT_COMPILE_MODE,
+    cudnn_benchmark: bool = DEFAULT_CUDNN_BENCHMARK,
 ) -> dict[str, Any]:
     """Build datasets, model, loss, optimizer, and run training."""
     torch.manual_seed(seed)
@@ -616,6 +656,10 @@ def run_training(
         val_samples_per_epoch=val_samples_per_epoch,
         seed=seed,
         amp_enabled=amp_enabled,
+        amp_dtype=amp_dtype,
+        compile_enabled=compile_enabled,
+        compile_mode=compile_mode,
+        cudnn_benchmark=cudnn_benchmark,
     )
 
 

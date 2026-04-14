@@ -22,6 +22,7 @@ class DecoderHead(nn.Module):
         self.fc2 = nn.Linear(hidden_dim1, hidden_dim2)
         self.act2 = nn.GELU()
         self.fc3 = nn.Linear(hidden_dim2, out_dim)
+        self.debug_enabled = False
         self.last_hidden1: Tensor | None = None
         self.last_hidden2: Tensor | None = None
         self.last_out: Tensor | None = None
@@ -34,9 +35,14 @@ class DecoderHead(nn.Module):
         hidden1 = self.act1(self.fc1(x))
         hidden2 = self.act2(self.fc2(hidden1))
         out = self.fc3(hidden2)
-        self.last_hidden1 = hidden1.detach()
-        self.last_hidden2 = hidden2.detach()
-        self.last_out = out.detach()
+        if self.debug_enabled:
+            self.last_hidden1 = hidden1.detach()
+            self.last_hidden2 = hidden2.detach()
+            self.last_out = out.detach()
+        else:
+            self.last_hidden1 = None
+            self.last_hidden2 = None
+            self.last_out = None
         return out
 
     def get_last_debug(self) -> dict[str, Tensor | None]:
@@ -45,6 +51,9 @@ class DecoderHead(nn.Module):
             "hidden2": self.last_hidden2,
             "out": self.last_out,
         }
+
+    def set_debug_capture(self, enabled: bool) -> None:
+        self.debug_enabled = bool(enabled)
 
 
 __all__ = ["DecoderHead"]

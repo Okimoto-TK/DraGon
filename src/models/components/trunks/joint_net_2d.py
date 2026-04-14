@@ -4,6 +4,7 @@ from __future__ import annotations
 from config.config import lmf_dim as DEFAULT_LMF_DIM
 import torch
 from torch import Tensor, nn
+from torch.utils.checkpoint import checkpoint
 
 
 class LayerNorm2d(nn.Module):
@@ -124,6 +125,7 @@ class JointNet2D(nn.Module):
         small_kernel_size: int = 5,
         expansion: int = 4,
         dropout: float = 0.0,
+        use_gradient_checkpoint: bool = True,
     ) -> None:
         super().__init__()
 
@@ -133,6 +135,7 @@ class JointNet2D(nn.Module):
             raise ValueError(f"num_blocks must be positive, got {num_blocks}")
 
         self.channels = channels
+        self.use_gradient_checkpoint = bool(use_gradient_checkpoint)
         blocks = [
             ResConv2dBlock(
                 channels=channels,
@@ -156,7 +159,11 @@ class JointNet2D(nn.Module):
             raise ValueError(f"Expected input shape [B, C, H, W], got {tuple(x.shape)}")
         if x.shape[1] != self.channels:
             raise ValueError(f"Expected {self.channels} channels, got {x.shape[1]}")
-        return x + self.net(x)
+        if self.use_gradient_checkpoint and self.training and x.requires_grad:
+            trunk = checkpoint(self.net, x, use_reentrant=False)
+        else:
+            trunk = self.net(x)
+        return x + trunk
 
 
 __all__ = ["JointNet2D", "ResConv2dBlock"]

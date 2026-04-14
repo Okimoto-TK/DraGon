@@ -96,6 +96,10 @@ early_stopping_patience = 5
 num_workers = 4
 prefetch_factor = 4
 amp_enabled = True
+amp_dtype = "bfloat16"
+compile_enabled = True
+compile_mode = "max-autotune"
+cudnn_benchmark = True
 
 scheduler_name = "plateau"
 scheduler_factor = 0.5

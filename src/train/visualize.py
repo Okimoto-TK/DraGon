@@ -442,7 +442,12 @@ class MLflowVisualizer:
         layers = range(1, len(term_norms) + 1)
         fig, axes = plt.subplots(1, 2, figsize=(14, 4))
         for key in ("x", "summary", "product", "difference"):
-            axes[0].plot(layers, [float(layer.get(key, 0.0)) for layer in term_norms], marker="o", label=key)
+            axes[0].plot(
+                layers,
+                [_to_float(layer.get(key, 0.0)) for layer in term_norms],
+                marker="o",
+                label=key,
+            )
         axes[0].set_title("Interaction Term Norms")
         axes[0].set_xlabel("Layer")
         axes[0].legend()

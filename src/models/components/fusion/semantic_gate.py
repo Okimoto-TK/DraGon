@@ -27,23 +27,27 @@ class _SemanticFusionBlock(nn.Module):
         self.fc_in = nn.Linear(dim * 4, hidden_dim * 2)
         self.dropout = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
         self.fc_out = nn.Linear(hidden_dim, dim)
-        self.last_term_norms: dict[str, float] = {}
+        self.debug_enabled = False
+        self.last_term_norms: dict[str, Tensor] = {}
         self.last_gate_activation: Tensor | None = None
 
     def forward(self, x: Tensor, summary: Tensor) -> Tensor:
         product = x * summary
         difference = x - summary
         interaction = torch.cat((x, summary, product, difference), dim=-1)
-        self.last_term_norms = {
-            "x": float(x.detach().norm(dim=-1).mean().item()),
-            "summary": float(summary.detach().norm(dim=-1).mean().item()),
-            "product": float(product.detach().norm(dim=-1).mean().item()),
-            "difference": float(difference.detach().norm(dim=-1).mean().item()),
-        }
+        if self.debug_enabled:
+            self.last_term_norms = {
+                "x": x.detach().norm(dim=-1).mean(),
+                "summary": summary.detach().norm(dim=-1).mean(),
+                "product": product.detach().norm(dim=-1).mean(),
+                "difference": difference.detach().norm(dim=-1).mean(),
+            }
+        else:
+            self.last_term_norms = {}
         hidden = self.fc_in(self.norm(interaction))
         value, gate = hidden.chunk(2, dim=-1)
         gate_act = F.gelu(gate)
-        self.last_gate_activation = gate_act.detach()
+        self.last_gate_activation = gate_act.detach() if self.debug_enabled else None
         fused = value * gate_act
         return x + self.fc_out(self.dropout(fused))
 
@@ -63,6 +67,7 @@ class SemanticGatedChannelFusion(nn.Module):
         self.dim = dim
         self.side_pool = AttentivePool1d(dim=dim)
         self.blocks = nn.ModuleList([_SemanticFusionBlock(dim, dropout=dropout) for _ in range(num_layers)])
+        self.debug_enabled = False
         self.last_side_global: Tensor | None = None
 
     def forward(self, x: Tensor, side_tokens: Tensor) -> Tensor:
@@ -76,10 +81,11 @@ class SemanticGatedChannelFusion(nn.Module):
             raise ValueError(f"Expected feature dim {self.dim}, got {x.shape[-1]}")
 
         side_global = self.side_pool(side_tokens)
-        self.last_side_global = side_global.detach()
+        self.last_side_global = side_global.detach() if self.debug_enabled else None
         side_broadcast = side_global.unsqueeze(1).expand(-1, x.shape[1], -1)
         tokens = x
         for block in self.blocks:
+            block.debug_enabled = self.debug_enabled
             tokens = block(tokens, side_broadcast)
         return tokens
 
@@ -89,6 +95,11 @@ class SemanticGatedChannelFusion(nn.Module):
             "term_norms": [block.last_term_norms for block in self.blocks],
             "gate_activations": [block.last_gate_activation for block in self.blocks],
         }
+
+    def set_debug_capture(self, enabled: bool) -> None:
+        self.debug_enabled = bool(enabled)
+        for block in self.blocks:
+            block.debug_enabled = self.debug_enabled
 
 
 __all__ = ["SemanticGatedChannelFusion"]

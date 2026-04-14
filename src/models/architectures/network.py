@@ -182,6 +182,36 @@ class MultiScaleFusionNet(nn.Module):
         self.full_tfn = TensorFusion(dim_x=summary_dim, dim_y=summary_dim)
         self.decoder_head = DecoderHead(in_dim=self.full_tfn.out_dim, out_dim=8)
 
+        self.jointnet_12.to(memory_format=torch.channels_last)
+        self.jointnet_23_in_proj.to(memory_format=torch.channels_last)
+        self.jointnet_23.to(memory_format=torch.channels_last)
+        self.debug_capture_enabled = False
+        self._heavy_modules_compiled = False
+
+    def set_debug_capture(self, enabled: bool) -> None:
+        self.debug_capture_enabled = bool(enabled)
+        for module in (
+            self.drift_fusion,
+            self.diffusion_fusion,
+            self.side_resampler,
+            self.drift_summary_head,
+            self.diffusion_summary_head,
+            self.decoder_head,
+        ):
+            set_debug = getattr(module, "set_debug_capture", None)
+            if callable(set_debug):
+                set_debug(self.debug_capture_enabled)
+
+    def compile_heavy_modules(self, *, mode: str) -> None:
+        if self._heavy_modules_compiled:
+            return
+        self.jointnet_12 = torch.compile(self.jointnet_12, mode=mode)
+        self.jointnet_23 = torch.compile(self.jointnet_23, mode=mode)
+        self.side_resampler = torch.compile(self.side_resampler, mode=mode)
+        self.drift_fusion = torch.compile(self.drift_fusion, mode=mode)
+        self.diffusion_fusion = torch.compile(self.diffusion_fusion, mode=mode)
+        self._heavy_modules_compiled = True
+
     def forward(
         self,
         macro: Tensor,
@@ -198,14 +228,16 @@ class MultiScaleFusionNet(nn.Module):
         u2 = e2.transpose(1, 2)
         u3 = e3.transpose(1, 2)
 
-        t12 = self.pairwise_lmf_12(u1, u2)
-        t23 = self.pairwise_lmf_23(u2, u3)
-
+        t12 = self.pairwise_lmf_12(u1, u2).contiguous(memory_format=torch.channels_last)
         h12 = self.jointnet_12(t12)
-        h23 = self.jointnet_23(self.jointnet_23_in_proj(t23))
-
         m1 = self.m1_token_proj(self.map_to_tokens_12(h12))
+        del t12, h12
+
+        t23 = self.pairwise_lmf_23(u2, u3).contiguous(memory_format=torch.channels_last)
+        t23_proj = self.jointnet_23_in_proj(t23).contiguous(memory_format=torch.channels_last)
+        h23 = self.jointnet_23(t23_proj)
         m2 = self.map_to_tokens_23(h23)
+        del t23, t23_proj, h23
 
         s = self.side_resampler(e4.transpose(1, 2))
 
