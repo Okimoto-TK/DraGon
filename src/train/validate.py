@@ -7,6 +7,7 @@ from config.config import diagnostics_every_steps as DEFAULT_DIAGNOSTICS_EVERY_S
 from torch import nn
 from torch.utils.data import DataLoader
 
+from src.train.train import _cuda_amp_autocast_kwargs
 from src.train.utils import (
     MetricTracker,
     batch_prediction_metrics,
@@ -36,7 +37,7 @@ def validate(
     for step_idx, batch in enumerate(dataloader, start=1):
         batch = move_batch_to_device(batch, device)
 
-        with autocast(device_type="cuda", enabled=amp_enabled):
+        with autocast(**_cuda_amp_autocast_kwargs(amp_enabled)):
             outputs = model(
                 batch["macro"],
                 batch["mezzo"],
@@ -44,7 +45,7 @@ def validate(
                 batch["sidechain"],
             )
 
-        with autocast(device_type="cuda", enabled=amp_enabled):
+        with autocast(**_cuda_amp_autocast_kwargs(amp_enabled)):
             loss, loss_metrics = criterion(outputs, batch)
         mean_metrics = batch_prediction_metrics(outputs, batch)
         diag_metrics: dict[str, torch.Tensor | float] = {}
@@ -55,10 +56,18 @@ def validate(
             visualizer.capture_epoch_snapshot("val", model, outputs, batch)
 
         batch_size = int(batch["macro"].shape[0])
-        tracker.update(
-            {"loss": loss.detach(), **loss_metrics, **mean_metrics, **diag_metrics},
-            weight=batch_size,
-        )
+        step_metrics = {"loss": loss.detach(), **loss_metrics, **mean_metrics, **diag_metrics}
+        bad_keys = []
+        for key, value in step_metrics.items():
+            scalar = value.detach().reshape(()) if isinstance(value, torch.Tensor) else torch.tensor(float(value))
+            if not torch.isfinite(scalar).item():
+                bad_keys.append(key)
+        if bad_keys:
+            raise RuntimeError(
+                "Validation produced non-finite metrics. "
+                f"step={step_idx}, bad_keys={bad_keys[:8]}"
+            )
+        tracker.update(step_metrics, weight=batch_size)
 
     return tracker.compute()
 

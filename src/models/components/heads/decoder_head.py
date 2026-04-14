@@ -1,7 +1,12 @@
 """Decoder head for direct multi-target prediction."""
 from __future__ import annotations
 
+import torch
 from torch import Tensor, nn
+
+
+def _should_record_debug() -> bool:
+    return not (torch.cuda.is_available() and torch.cuda.is_current_stream_capturing())
 
 
 class DecoderHead(nn.Module):
@@ -34,9 +39,10 @@ class DecoderHead(nn.Module):
         hidden1 = self.act1(self.fc1(x))
         hidden2 = self.act2(self.fc2(hidden1))
         out = self.fc3(hidden2)
-        self.last_hidden1 = hidden1.detach()
-        self.last_hidden2 = hidden2.detach()
-        self.last_out = out.detach()
+        if _should_record_debug():
+            self.last_hidden1 = hidden1.detach()
+            self.last_hidden2 = hidden2.detach()
+            self.last_out = out.detach()
         return out
 
     def get_last_debug(self) -> dict[str, Tensor | None]:

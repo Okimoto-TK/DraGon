@@ -7,6 +7,10 @@ from torch import Tensor, nn
 import torch.nn.functional as F
 
 
+def _should_record_debug() -> bool:
+    return not (torch.cuda.is_available() and torch.cuda.is_current_stream_capturing())
+
+
 class _PreNormSelfAttentionBlock(nn.Module):
     """A small pre-norm transformer encoder block."""
 
@@ -31,8 +35,16 @@ class _PreNormSelfAttentionBlock(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         attn_in = self.norm1(x)
-        attn_out, attn = self.attn(attn_in, attn_in, attn_in, need_weights=True, average_attn_weights=False)
-        self.last_attn = attn.detach()
+        record_debug = _should_record_debug()
+        attn_out, attn = self.attn(
+            attn_in,
+            attn_in,
+            attn_in,
+            need_weights=record_debug,
+            average_attn_weights=False,
+        )
+        if record_debug:
+            self.last_attn = attn.detach()
         x = x + attn_out
         x = x + self.ffn(self.norm2(x))
         return x

@@ -9,6 +9,10 @@ from torch import Tensor, nn
 from src.models.components.pooling.attentive_pool_1d import AttentivePool1d
 
 
+def _should_record_debug() -> bool:
+    return not (torch.cuda.is_available() and torch.cuda.is_current_stream_capturing())
+
+
 class _GEGLU(nn.Module):
     """GEGLU activation for token MLPs."""
 
@@ -34,16 +38,19 @@ class _SemanticFusionBlock(nn.Module):
         product = x * summary
         difference = x - summary
         interaction = torch.cat((x, summary, product, difference), dim=-1)
-        self.last_term_norms = {
-            "x": x.detach().norm(dim=-1).mean(),
-            "summary": summary.detach().norm(dim=-1).mean(),
-            "product": product.detach().norm(dim=-1).mean(),
-            "difference": difference.detach().norm(dim=-1).mean(),
-        }
+        record_debug = _should_record_debug()
+        if record_debug:
+            self.last_term_norms = {
+                "x": x.detach().norm(dim=-1).mean(),
+                "summary": summary.detach().norm(dim=-1).mean(),
+                "product": product.detach().norm(dim=-1).mean(),
+                "difference": difference.detach().norm(dim=-1).mean(),
+            }
         hidden = self.fc_in(self.norm(interaction))
         value, gate = hidden.chunk(2, dim=-1)
         gate_act = F.gelu(gate)
-        self.last_gate_activation = gate_act.detach()
+        if record_debug:
+            self.last_gate_activation = gate_act.detach()
         fused = value * gate_act
         return x + self.fc_out(self.dropout(fused))
 
@@ -76,7 +83,8 @@ class SemanticGatedChannelFusion(nn.Module):
             raise ValueError(f"Expected feature dim {self.dim}, got {x.shape[-1]}")
 
         side_global = self.side_pool(side_tokens)
-        self.last_side_global = side_global.detach()
+        if _should_record_debug():
+            self.last_side_global = side_global.detach()
         side_broadcast = side_global.unsqueeze(1).expand(-1, x.shape[1], -1)
         tokens = x
         for block in self.blocks:

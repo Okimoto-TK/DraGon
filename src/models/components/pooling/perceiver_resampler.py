@@ -8,6 +8,10 @@ from config.config import token_dim as DEFAULT_TOKEN_DIM
 from torch import Tensor, nn
 
 
+def _should_record_debug() -> bool:
+    return not (torch.cuda.is_available() and torch.cuda.is_current_stream_capturing())
+
+
 class PerceiverResampler(nn.Module):
     """Resample [B, L, D] into fixed latent tokens [B, K, D]."""
 
@@ -66,8 +70,16 @@ class PerceiverResampler(nn.Module):
         bsz = x.shape[0]
         latents = self.query_norm(self.latents.unsqueeze(0).expand(bsz, -1, -1))
         kv = self.kv_norm(self.kv_proj(x))
-        attended, attn = self.cross_attn(latents, kv, kv, need_weights=True, average_attn_weights=False)
-        self.last_cross_attn = attn.detach()
+        record_debug = _should_record_debug()
+        attended, attn = self.cross_attn(
+            latents,
+            kv,
+            kv,
+            need_weights=record_debug,
+            average_attn_weights=False,
+        )
+        if record_debug:
+            self.last_cross_attn = attn.detach()
         tokens = latents + attended
         return tokens + self.ffn(self.post_attn_norm(tokens))
 
