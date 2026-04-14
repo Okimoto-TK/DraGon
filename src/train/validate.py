@@ -12,7 +12,7 @@ from src.train.utils import (
     batch_prediction_metrics,
     move_batch_to_device,
 )
-from src.train.visualize import MLflowVisualizer
+from src.train.visualize_strict import MLflowVisualizer
 
 
 @torch.no_grad()
@@ -27,9 +27,10 @@ def validate(
     amp_enabled: bool = False,
 ) -> dict[str, float]:
     """Run one validation epoch and return averaged metrics."""
+    del diagnostics_every_steps
     model.eval()
     criterion.eval()
-    tracker = MetricTracker()
+    tracker = MetricTracker(device=device)
 
     total_steps = max(len(dataloader), 1)
     for step_idx, batch in enumerate(dataloader, start=1):
@@ -46,21 +47,10 @@ def validate(
         with autocast(device_type="cuda", enabled=amp_enabled):
             loss, loss_metrics = criterion(outputs, batch)
         mean_metrics = batch_prediction_metrics(outputs, batch)
+        diag_metrics: dict[str, torch.Tensor | float] = {}
         if visualizer is not None:
-            visualizer.update_epoch_buffer("val", model, outputs, batch)
-        should_collect_diag = (
-            visualizer is not None
-            and (
-                step_idx == 1
-                or step_idx == total_steps
-                or (diagnostics_every_steps > 0 and step_idx % diagnostics_every_steps == 0)
-            )
-        )
-        diag_metrics = (
-            visualizer.collect_batch_metrics(model, outputs, batch, loss_metrics)
-            if should_collect_diag
-            else {}
-        )
+            diag_metrics = visualizer.collect_batch_metrics(model, outputs, batch, loss_metrics)
+            visualizer.update_epoch_buffer("val", model, outputs, batch, metrics=diag_metrics)
         if visualizer is not None and step_idx == total_steps:
             visualizer.capture_epoch_snapshot("val", model, outputs, batch)
 

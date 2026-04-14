@@ -27,7 +27,7 @@ class _SemanticFusionBlock(nn.Module):
         self.fc_in = nn.Linear(dim * 4, hidden_dim * 2)
         self.dropout = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
         self.fc_out = nn.Linear(hidden_dim, dim)
-        self.last_term_norms: dict[str, float] = {}
+        self.last_term_norms: dict[str, Tensor] = {}
         self.last_gate_activation: Tensor | None = None
 
     def forward(self, x: Tensor, summary: Tensor) -> Tensor:
@@ -35,10 +35,10 @@ class _SemanticFusionBlock(nn.Module):
         difference = x - summary
         interaction = torch.cat((x, summary, product, difference), dim=-1)
         self.last_term_norms = {
-            "x": float(x.detach().norm(dim=-1).mean().item()),
-            "summary": float(summary.detach().norm(dim=-1).mean().item()),
-            "product": float(product.detach().norm(dim=-1).mean().item()),
-            "difference": float(difference.detach().norm(dim=-1).mean().item()),
+            "x": x.detach().norm(dim=-1).mean(),
+            "summary": summary.detach().norm(dim=-1).mean(),
+            "product": product.detach().norm(dim=-1).mean(),
+            "difference": difference.detach().norm(dim=-1).mean(),
         }
         hidden = self.fc_in(self.norm(interaction))
         value, gate = hidden.chunk(2, dim=-1)

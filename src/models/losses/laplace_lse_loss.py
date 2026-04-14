@@ -71,6 +71,8 @@ class LaplaceLSELoss(nn.Module):
         self.register_buffer("train_step_count", torch.tensor(0, dtype=torch.long))
         self.register_buffer("freeze_good_steps", torch.tensor(0, dtype=torch.long))
         self.register_buffer("scale_unfrozen", torch.tensor(False, dtype=torch.bool))
+        self.register_buffer("min_freeze_steps_tensor", torch.tensor(float(self.min_freeze_steps), dtype=torch.float32))
+        self.register_buffer("patience_steps_tensor", torch.tensor(float(self.patience_steps), dtype=torch.float32))
 
     @torch.no_grad()
     def set_target_stats(self, stats: dict[str, tuple[float, float]]) -> None:
@@ -122,14 +124,13 @@ class LaplaceLSELoss(nn.Module):
         return torch.abs(target - pred) / scale + torch.log(scale)
 
     def _fixed_scale(self, pred: Tensor, task: str) -> Tensor:
-        return torch.full_like(pred, float(getattr(self, f"s0_{task}").item()))
+        s0 = getattr(self, f"s0_{task}").to(device=pred.device, dtype=pred.dtype)
+        return torch.ones_like(pred) * s0
 
     @torch.no_grad()
     def _update_freeze_state(self, preds: dict[str, Tensor], targets: dict[str, Tensor]) -> None:
-        if self.scale_unfrozen.item():
-            return
-
-        good = True
+        active_mask = (~self.scale_unfrozen).to(dtype=torch.bool)
+        all_good = torch.ones((), device=self.scale_unfrozen.device, dtype=torch.bool)
         for task in self.TASKS:
             pred = preds[f"pred_{task}"].detach()
             target = self._get_target(targets, task).detach().to(device=pred.device, dtype=pred.dtype)
@@ -142,69 +143,93 @@ class LaplaceLSELoss(nn.Module):
             mae = torch.mean(torch.abs(pred - target)).float().to(device=ema_buffer.device)
             ema_buffer.mul_(self.ema_beta).add_(mae * (1.0 - self.ema_beta))
 
-            threshold = 0.9 * getattr(self, f"s0_{task}")
-            if bool((ema_buffer > threshold).item()):
-                good = False
+            threshold = (0.9 * getattr(self, f"s0_{task}")).to(device=ema_buffer.device)
+            all_good = all_good & (ema_buffer <= threshold)
 
-        self.train_step_count.add_(1)
-        if int(self.train_step_count.item()) >= self.min_freeze_steps and good:
-            self.freeze_good_steps.add_(1)
-        else:
-            self.freeze_good_steps.zero_()
+        self.train_step_count.add_(active_mask.to(dtype=self.train_step_count.dtype))
+        meets_min_steps = self.train_step_count >= self.min_freeze_steps
+        eligible = active_mask & meets_min_steps & all_good
 
-        if int(self.freeze_good_steps.item()) >= self.patience_steps:
-            self.scale_unfrozen.fill_(True)
+        next_good_steps = torch.where(
+            eligible,
+            self.freeze_good_steps + 1,
+            torch.zeros_like(self.freeze_good_steps),
+        )
+        self.freeze_good_steps.copy_(
+            torch.where(
+                active_mask,
+                next_good_steps,
+                self.freeze_good_steps,
+            )
+        )
+
+        should_unfreeze = self.scale_unfrozen | (self.freeze_good_steps >= self.patience_steps)
+        self.scale_unfrozen.copy_(should_unfreeze)
 
     def forward(
         self,
         preds: dict[str, Tensor],
         targets: dict[str, Tensor],
+        *,
+        return_metrics: bool = True,
+        update_state: bool = True,
     ) -> tuple[Tensor, dict[str, Tensor]]:
         losses = []
+        scale_unfrozen = self.scale_unfrozen.to(dtype=preds["pred_S"].dtype, device=preds["pred_S"].device)
+        scale_frozen = 1.0 - scale_unfrozen
         metrics: dict[str, Tensor] = {}
 
         for task in self.TASKS:
             pred = preds[f"pred_{task}"]
-            scale = preds[f"scale_{task}"] if self.scale_unfrozen.item() else self._fixed_scale(pred, task)
+            learned_scale = preds[f"scale_{task}"]
+            fixed_scale = self._fixed_scale(pred, task)
+            scale = learned_scale * scale_unfrozen + fixed_scale * scale_frozen
             target = self._get_target(targets, task)
 
             per_sample = self._laplace_nll(pred, scale, target, task)
             task_loss = per_sample.mean()
 
             losses.append(task_loss)
-            metrics[f"loss_{task}"] = task_loss.detach()
+            if return_metrics:
+                metrics[f"loss_{task}"] = task_loss.detach()
 
         loss_vec = torch.stack(losses, dim=0)  # [4]
         loss_avg = loss_vec.mean()
         loss_lse = torch.logsumexp(self.tau * loss_vec, dim=0) / self.tau
         loss_total = (1.0 - self.lse_mix) * loss_avg + self.lse_mix * loss_lse
 
-        metrics["loss_avg"] = loss_avg.detach()
-        metrics["loss_lse"] = loss_lse.detach()
-        metrics["loss_total"] = loss_total.detach()
-        metrics["freeze/fixed_scale_active"] = torch.tensor(
-            0.0 if self.scale_unfrozen.item() else 1.0,
-            device=loss_total.device,
-        )
-        metrics["freeze/scale_unfrozen"] = torch.tensor(
-            1.0 if self.scale_unfrozen.item() else 0.0,
-            device=loss_total.device,
-        )
-        metrics["freeze/train_step_count"] = self.train_step_count.detach().to(device=loss_total.device, dtype=torch.float32)
-        metrics["freeze/good_steps"] = self.freeze_good_steps.detach().to(device=loss_total.device, dtype=torch.float32)
-        metrics["freeze/min_freeze_steps"] = torch.tensor(float(self.min_freeze_steps), device=loss_total.device)
-        metrics["freeze/patience_steps"] = torch.tensor(float(self.patience_steps), device=loss_total.device)
-        for task in self.TASKS:
-            metrics[f"freeze/ema_mae/{task}"] = getattr(self, f"ema_mae_{task}").detach().to(
-                device=loss_total.device,
-                dtype=torch.float32,
-            )
-            metrics[f"freeze/s0/{task}"] = getattr(self, f"s0_{task}").detach().to(
-                device=loss_total.device,
-                dtype=torch.float32,
-            )
-
-        if self.training:
+        if update_state and self.training:
             self._update_freeze_state(preds, targets)
+
+        if return_metrics:
+            metrics["loss_avg"] = loss_avg.detach()
+            metrics["loss_lse"] = loss_lse.detach()
+            metrics["loss_total"] = loss_total.detach()
+            metrics["freeze/fixed_scale_active"] = (1.0 - self.scale_unfrozen.to(dtype=loss_total.dtype)).to(
+                device=loss_total.device,
+            )
+            metrics["freeze/scale_unfrozen"] = self.scale_unfrozen.to(dtype=loss_total.dtype, device=loss_total.device)
+            metrics["freeze/train_step_count"] = self.train_step_count.detach().to(
+                device=loss_total.device,
+                dtype=torch.float32,
+            )
+            metrics["freeze/good_steps"] = self.freeze_good_steps.detach().to(device=loss_total.device, dtype=torch.float32)
+            metrics["freeze/min_freeze_steps"] = self.min_freeze_steps_tensor.detach().to(
+                device=loss_total.device,
+                dtype=torch.float32,
+            )
+            metrics["freeze/patience_steps"] = self.patience_steps_tensor.detach().to(
+                device=loss_total.device,
+                dtype=torch.float32,
+            )
+            for task in self.TASKS:
+                metrics[f"freeze/ema_mae/{task}"] = getattr(self, f"ema_mae_{task}").detach().to(
+                    device=loss_total.device,
+                    dtype=torch.float32,
+                )
+                metrics[f"freeze/s0/{task}"] = getattr(self, f"s0_{task}").detach().to(
+                    device=loss_total.device,
+                    dtype=torch.float32,
+                )
 
         return loss_total, metrics

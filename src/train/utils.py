@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import math
-from collections import defaultdict
 from collections.abc import Mapping
 
 import torch
@@ -31,26 +30,83 @@ def grad_norm(parameters) -> float:
 
 
 class MetricTracker:
-    """Accumulate weighted scalar metrics."""
+    """GPU-resident weighted scalar metric accumulator."""
 
-    def __init__(self) -> None:
-        self._sums: dict[str, float] = defaultdict(float)
-        self._count = 0
+    def __init__(
+        self,
+        *,
+        device: torch.device | str | None = None,
+        dtype: torch.dtype = torch.float32,
+    ) -> None:
+        self._device: torch.device | None = None if device is None else torch.device(device)
+        self._dtype = dtype
+        self._sums: dict[str, Tensor] = {}
+        self._count: Tensor | None = None
+        if self._device is not None:
+            self._count = torch.zeros((), device=self._device, dtype=torch.int64)
+
+    def _ensure_device(self, value: Tensor | float | int) -> torch.device:
+        if self._device is not None:
+            return self._device
+        if isinstance(value, Tensor):
+            self._device = value.device
+        else:
+            self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self._count = torch.zeros((), device=self._device, dtype=torch.int64)
+        return self._device
+
+    def _as_scalar_tensor(self, value: Tensor | float | int, device: torch.device) -> Tensor:
+        if isinstance(value, Tensor):
+            tensor = value.detach()
+            if tensor.ndim != 0:
+                tensor = tensor.mean()
+            return tensor.to(device=device, dtype=self._dtype)
+        return torch.tensor(float(value), device=device, dtype=self._dtype)
 
     def update(
         self,
         metrics: Mapping[str, Tensor | float],
         weight: int,
     ) -> None:
-        self._count += int(weight)
+        if not metrics:
+            return
+        first_value = next(iter(metrics.values()))
+        device = self._ensure_device(first_value)
+        if self._count is None:
+            self._count = torch.zeros((), device=device, dtype=torch.int64)
+        weight_i64 = torch.tensor(int(weight), device=device, dtype=torch.int64)
+        weight_fp = weight_i64.to(dtype=self._dtype)
+        self._count.add_(weight_i64)
         for key, value in metrics.items():
-            scalar = float(value.detach().item()) if isinstance(value, Tensor) else float(value)
-            self._sums[key] += scalar * weight
+            scalar = self._as_scalar_tensor(value, device)
+            if key not in self._sums:
+                self._sums[key] = torch.zeros((), device=device, dtype=self._dtype)
+            self._sums[key].add_(scalar * weight_fp)
+
+    def reset(self) -> None:
+        for total in self._sums.values():
+            total.zero_()
+        if self._count is not None:
+            self._count.zero_()
+
+    def _mean_tensor_by_key(self, key: str) -> Tensor:
+        assert self._count is not None
+        denom = self._count.clamp_min(1).to(dtype=self._dtype)
+        return self._sums[key] / denom
 
     def compute(self) -> dict[str, float]:
-        if self._count == 0:
-            return {key: 0.0 for key in self._sums}
-        return {key: total / self._count for key, total in self._sums.items()}
+        return self.compute_and_reset(reset=False)
+
+    def compute_and_reset(self, *, reset: bool = True) -> dict[str, float]:
+        if self._count is None or not self._sums:
+            return {}
+        keys = sorted(self._sums.keys())
+        packed = torch.stack([self._mean_tensor_by_key(key) for key in keys], dim=0)
+        values = packed.detach().cpu().tolist()
+        result = {key: float(value) for key, value in zip(keys, values)}
+        if reset:
+            self.reset()
+        return result
 
 
 def batch_prediction_metrics(

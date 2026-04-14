@@ -15,11 +15,13 @@ from torch.utils.data import DataLoader, Subset
 from config.config import amp_enabled as DEFAULT_AMP_ENABLED
 from config.config import batch_size as DEFAULT_BATCH_SIZE
 from config.config import checkpoint_dir as DEFAULT_CHECKPOINT_DIR
+from config.config import cuda_graph_warmup_steps as DEFAULT_CUDA_GRAPH_WARMUP_STEPS
 from config.config import early_stopping_patience as DEFAULT_EARLY_STOPPING_PATIENCE
 from config.config import mlflow_dir as DEFAULT_MLFLOW_DIR
 from config.config import mlflow_enabled as DEFAULT_MLFLOW_ENABLED
 from config.config import grad_clip as DEFAULT_GRAD_CLIP
 from config.config import learning_rate as DEFAULT_LEARNING_RATE
+from config.config import log_every as DEFAULT_LOG_EVERY
 from config.config import memory_mode as DEFAULT_MEMORY_MODE
 from config.config import num_epochs as DEFAULT_NUM_EPOCHS
 from config.config import num_workers as DEFAULT_NUM_WORKERS
@@ -32,6 +34,7 @@ from config.config import save_every as DEFAULT_SAVE_EVERY
 from config.config import train_seed as DEFAULT_TRAIN_SEED
 from config.config import train_samples_per_epoch as DEFAULT_TRAIN_SAMPLES_PER_EPOCH
 from config.config import train_val_split_date as DEFAULT_TRAIN_VAL_SPLIT_DATE
+from config.config import use_cuda_graph as DEFAULT_USE_CUDA_GRAPH
 from config.config import val_ratio as DEFAULT_VAL_RATIO
 from config.config import val_samples_per_epoch as DEFAULT_VAL_SAMPLES_PER_EPOCH
 from config.config import weight_decay as DEFAULT_WEIGHT_DECAY
@@ -41,7 +44,7 @@ from src.train.dataset import create_train_val_datasets
 from src.train.train import train_one_epoch
 from src.train.ui import TrainingUI
 from src.train.validate import validate
-from src.train.visualize import MLflowVisualizer
+from src.train.visualize_strict import MLflowVisualizer
 
 
 def _step_scheduler(scheduler: Any, monitored_value: float) -> None:
@@ -273,10 +276,18 @@ def fit(
     mlflow_repo: str | Path = DEFAULT_MLFLOW_DIR,
     train_samples_per_epoch: int | None = DEFAULT_TRAIN_SAMPLES_PER_EPOCH,
     val_samples_per_epoch: int | None = DEFAULT_VAL_SAMPLES_PER_EPOCH,
+    log_every: int = DEFAULT_LOG_EVERY,
     seed: int = DEFAULT_TRAIN_SEED,
     amp_enabled: bool = DEFAULT_AMP_ENABLED,
+    use_cuda_graph: bool = DEFAULT_USE_CUDA_GRAPH,
+    cuda_graph_warmup_steps: int = DEFAULT_CUDA_GRAPH_WARMUP_STEPS,
 ) -> dict[str, Any]:
     """Run the full training loop."""
+    if not bool(use_cuda_graph):
+        raise RuntimeError("Non-CUDA-Graph training is disabled. Set use_cuda_graph=True.")
+    if not (device.startswith("cuda") and torch.cuda.is_available()):
+        raise RuntimeError("CUDA Graph training requires a CUDA device.")
+
     model.to(device)
     criterion.to(device)
 
@@ -300,7 +311,8 @@ def fit(
         else None
     )
     resolved_amp_enabled = bool(amp_enabled and device.startswith("cuda") and torch.cuda.is_available())
-    scaler = GradScaler("cuda", enabled=resolved_amp_enabled)
+    resolved_cuda_graph = True
+    scaler = None
 
     try:
         if visualizer is not None:
@@ -312,8 +324,11 @@ def fit(
                     "batch_size": train_loader.batch_size,
                     "num_epochs": num_epochs,
                     "amp_enabled": resolved_amp_enabled,
+                    "use_cuda_graph": resolved_cuda_graph,
+                    "cuda_graph_warmup_steps": cuda_graph_warmup_steps,
                     "train_samples_per_epoch": train_samples_per_epoch,
                     "val_samples_per_epoch": val_samples_per_epoch,
+                    "log_every": log_every,
                     "grad_clip": grad_clip,
                     "freeze_min_steps": getattr(criterion, "min_freeze_steps", None),
                     "freeze_patience_steps": getattr(criterion, "patience_steps", None),
@@ -383,8 +398,11 @@ def fit(
                 visualizer=visualizer,
                 epoch=epoch + 1,
                 global_step_offset=global_train_step,
+                log_every=log_every,
                 scaler=scaler,
                 amp_enabled=resolved_amp_enabled,
+                use_cuda_graph=resolved_cuda_graph,
+                cuda_graph_warmup_steps=cuda_graph_warmup_steps,
             )
             global_train_step += len(epoch_train_loader)
             if visualizer is not None:
@@ -548,13 +566,21 @@ def run_training(
     mlflow_repo: str | Path = DEFAULT_MLFLOW_DIR,
     train_samples_per_epoch: int | None = DEFAULT_TRAIN_SAMPLES_PER_EPOCH,
     val_samples_per_epoch: int | None = DEFAULT_VAL_SAMPLES_PER_EPOCH,
+    log_every: int = DEFAULT_LOG_EVERY,
     prefetch_factor: int = DEFAULT_PREFETCH_FACTOR,
     amp_enabled: bool = DEFAULT_AMP_ENABLED,
+    use_cuda_graph: bool = DEFAULT_USE_CUDA_GRAPH,
+    cuda_graph_warmup_steps: int = DEFAULT_CUDA_GRAPH_WARMUP_STEPS,
 ) -> dict[str, Any]:
     """Build datasets, model, loss, optimizer, and run training."""
     torch.manual_seed(seed)
+    if not bool(use_cuda_graph):
+        raise RuntimeError("Non-CUDA-Graph training is disabled. Set use_cuda_graph=True.")
     resolved_device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     loader_uses_cuda = resolved_device.startswith("cuda")
+    if not (loader_uses_cuda and torch.cuda.is_available()):
+        raise RuntimeError("CUDA Graph training requires a CUDA device.")
+    resolved_cuda_graph = True
     persistent_workers = num_workers > 0
     loader_kwargs: dict[str, Any] = {
         "batch_size": batch_size,
@@ -574,6 +600,7 @@ def run_training(
     train_loader = DataLoader(
         train_dataset,
         shuffle=False,
+        drop_last=resolved_cuda_graph,
         **loader_kwargs,
     )
     val_loader = DataLoader(
@@ -584,7 +611,12 @@ def run_training(
 
     model = MultiScaleFusionNet()
     criterion = LaplaceLSELoss().to(resolved_device)
-    optimizer = AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    optimizer = AdamW(
+        model.parameters(),
+        lr=learning_rate,
+        weight_decay=weight_decay,
+        capturable=resolved_cuda_graph,
+    )
     scheduler = _build_scheduler(
         optimizer,
         scheduler_name=scheduler_name,
@@ -614,8 +646,11 @@ def run_training(
         mlflow_repo=mlflow_repo,
         train_samples_per_epoch=train_samples_per_epoch,
         val_samples_per_epoch=val_samples_per_epoch,
+        log_every=log_every,
         seed=seed,
         amp_enabled=amp_enabled,
+        use_cuda_graph=resolved_cuda_graph,
+        cuda_graph_warmup_steps=cuda_graph_warmup_steps,
     )
 
 

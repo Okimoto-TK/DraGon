@@ -82,6 +82,7 @@ train_samples_per_epoch = 2_000_000
 val_samples_per_epoch = None
 trend_ema_alpha = 0.2
 diagnostics_every_steps = 10
+log_every = 50
 mlflow_enabled = True
 save_every = 5
 freeze_scale_s0_S = 0.018
@@ -96,6 +97,8 @@ early_stopping_patience = 5
 num_workers = 4
 prefetch_factor = 4
 amp_enabled = True
+use_cuda_graph = True
+cuda_graph_warmup_steps = 8
 
 scheduler_name = "plateau"
 scheduler_factor = 0.5
