@@ -180,12 +180,13 @@ class TrainingUI:
     ) -> None:
         if self._task_id is None:
             self.start_epoch(1, 1, total_steps)
-        self._train_metrics = dict(metrics)
-        self._update_trends(
-            metrics=self._train_metrics,
-            ema_store=self._train_ema,
-            trend_store=self._train_trends,
-        )
+        if metrics:
+            self._train_metrics = dict(metrics)
+            self._update_trends(
+                metrics=self._train_metrics,
+                ema_store=self._train_ema,
+                trend_store=self._train_trends,
+            )
         self._progress.update(
             self._task_id,
             completed=min(step, max(total_steps, 1)),

@@ -6,6 +6,7 @@ from collections.abc import Callable
 import torch
 from torch.amp import GradScaler, autocast
 from config.config import diagnostics_every_steps as DEFAULT_DIAGNOSTICS_EVERY_STEPS
+from config.config import log_every_steps as DEFAULT_LOG_EVERY_STEPS
 from torch import nn
 from torch.utils.data import DataLoader
 
@@ -33,6 +34,7 @@ def train_one_epoch(
     scaler: GradScaler | None = None,
     amp_enabled: bool = False,
     profiler: object | None = None,
+    log_every_steps: int = DEFAULT_LOG_EVERY_STEPS,
 ) -> dict[str, float]:
     """Run one training epoch and return averaged metrics."""
     model.train()
@@ -113,19 +115,25 @@ def train_one_epoch(
                 subset="realtime",
             )
 
+        should_log_metrics = (
+            step_idx == 1
+            or step_idx == total_steps
+            or (log_every_steps > 0 and step_idx % log_every_steps == 0)
+        )
         if step_callback is not None:
+            metrics_payload = tracker.compute(as_python=True) if should_log_metrics else {}
             step_callback(
                 {
                     "step": float(step_idx),
                     "total_steps": float(total_steps),
-                    "metrics": tracker.compute(),
+                    "metrics": metrics_payload,
                 }
             )
 
         if profiler is not None:
             profiler.step()
 
-    return tracker.compute()
+    return tracker.compute(as_python=True)  # type: ignore[return-value]
 
 
 __all__ = ["train_one_epoch"]

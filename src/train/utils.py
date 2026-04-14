@@ -34,8 +34,21 @@ class MetricTracker:
     """Accumulate weighted scalar metrics."""
 
     def __init__(self) -> None:
-        self._sums: dict[str, float] = defaultdict(float)
+        self._sums: dict[str, Tensor] = {}
         self._count = 0
+        self._device: torch.device | None = None
+
+    def _as_scalar_tensor(self, value: Tensor | float) -> Tensor:
+        if isinstance(value, Tensor):
+            detached = value.detach()
+            if detached.ndim != 0:
+                detached = detached.mean()
+            if self._device is None:
+                self._device = detached.device
+            return detached
+
+        device = self._device or torch.device("cpu")
+        return torch.tensor(float(value), device=device)
 
     def update(
         self,
@@ -44,13 +57,26 @@ class MetricTracker:
     ) -> None:
         self._count += int(weight)
         for key, value in metrics.items():
-            scalar = float(value.detach().item()) if isinstance(value, Tensor) else float(value)
-            self._sums[key] += scalar * weight
+            scalar = self._as_scalar_tensor(value)
+            weighted = scalar * float(weight)
+            if key in self._sums:
+                self._sums[key] = self._sums[key] + weighted
+            else:
+                self._sums[key] = weighted
 
-    def compute(self) -> dict[str, float]:
+    def compute(self, *, as_python: bool = True) -> dict[str, Tensor | float]:
         if self._count == 0:
-            return {key: 0.0 for key in self._sums}
-        return {key: total / self._count for key, total in self._sums.items()}
+            if as_python:
+                return {key: 0.0 for key in self._sums}
+            return {
+                key: torch.zeros((), device=value.device, dtype=value.dtype)
+                for key, value in self._sums.items()
+            }
+
+        averaged = {key: total / float(self._count) for key, total in self._sums.items()}
+        if not as_python:
+            return {key: value.detach() for key, value in averaged.items()}
+        return {key: float(value.detach().cpu().item()) for key, value in averaged.items()}
 
 
 def batch_prediction_metrics(

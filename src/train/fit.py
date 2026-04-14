@@ -21,6 +21,7 @@ from config.config import mlflow_dir as DEFAULT_MLFLOW_DIR
 from config.config import mlflow_enabled as DEFAULT_MLFLOW_ENABLED
 from config.config import grad_clip as DEFAULT_GRAD_CLIP
 from config.config import learning_rate as DEFAULT_LEARNING_RATE
+from config.config import log_every_steps as DEFAULT_LOG_EVERY_STEPS
 from config.config import memory_mode as DEFAULT_MEMORY_MODE
 from config.config import num_epochs as DEFAULT_NUM_EPOCHS
 from config.config import num_workers as DEFAULT_NUM_WORKERS
@@ -289,6 +290,7 @@ def fit(
     val_samples_per_epoch: int | None = DEFAULT_VAL_SAMPLES_PER_EPOCH,
     seed: int = DEFAULT_TRAIN_SEED,
     amp_enabled: bool = DEFAULT_AMP_ENABLED,
+    log_every_steps: int = DEFAULT_LOG_EVERY_STEPS,
     profile_enabled: bool = DEFAULT_PROFILE_ENABLED,
     profile_epoch: int = DEFAULT_PROFILE_EPOCH,
     profile_wait_steps: int = DEFAULT_PROFILE_WAIT_STEPS,
@@ -341,6 +343,7 @@ def fit(
                     "train_samples_per_epoch": train_samples_per_epoch,
                     "val_samples_per_epoch": val_samples_per_epoch,
                     "grad_clip": grad_clip,
+                    "log_every_steps": log_every_steps,
                     "profile_enabled": profile_enabled,
                     "profile_epoch": profile_epoch,
                     "profile_wait_steps": profile_wait_steps,
@@ -436,6 +439,7 @@ def fit(
                     scaler=scaler,
                     amp_enabled=resolved_amp_enabled,
                     profiler=profiler_session.profiler,
+                    log_every_steps=log_every_steps,
                 )
             if profiler_session.enabled:
                 write_profiler_reports(profiler_session, row_limit=profile_row_limit)
@@ -603,6 +607,7 @@ def run_training(
     val_samples_per_epoch: int | None = DEFAULT_VAL_SAMPLES_PER_EPOCH,
     prefetch_factor: int = DEFAULT_PREFETCH_FACTOR,
     amp_enabled: bool = DEFAULT_AMP_ENABLED,
+    log_every_steps: int = DEFAULT_LOG_EVERY_STEPS,
     profile_enabled: bool = DEFAULT_PROFILE_ENABLED,
     profile_epoch: int = DEFAULT_PROFILE_EPOCH,
     profile_wait_steps: int = DEFAULT_PROFILE_WAIT_STEPS,
@@ -681,6 +686,7 @@ def run_training(
         val_samples_per_epoch=val_samples_per_epoch,
         seed=seed,
         amp_enabled=amp_enabled,
+        log_every_steps=log_every_steps,
         profile_enabled=profile_enabled,
         profile_epoch=profile_epoch,
         profile_wait_steps=profile_wait_steps,
