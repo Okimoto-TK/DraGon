@@ -32,6 +32,13 @@ def _copy_batch_to_static(
         static_batch[key].copy_(value, non_blocking=True)
 
 
+def _cuda_graph_autocast_kwargs(amp_enabled: bool) -> dict[str, object]:
+    kwargs: dict[str, object] = {"device_type": "cuda", "enabled": amp_enabled}
+    if amp_enabled:
+        kwargs["dtype"] = torch.bfloat16
+    return kwargs
+
+
 def _run_eager_epoch(
     model: nn.Module,
     criterion: nn.Module,
@@ -193,7 +200,7 @@ def _run_cuda_graph_epoch(
 
     def _run_eager_step(batch: dict[str, torch.Tensor], current_step: int) -> None:
         optimizer.zero_grad(set_to_none=True)
-        with autocast(device_type="cuda", enabled=amp_enabled):
+        with autocast(**_cuda_graph_autocast_kwargs(amp_enabled)):
             outputs = model(
                 batch["macro"],
                 batch["mezzo"],
@@ -240,7 +247,7 @@ def _run_cuda_graph_epoch(
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
                 optimizer.zero_grad(set_to_none=True)
-                with autocast(device_type="cuda", enabled=amp_enabled):
+                with autocast(**_cuda_graph_autocast_kwargs(amp_enabled)):
                     static_outputs = model(
                         static_batch["macro"],
                         static_batch["mezzo"],
@@ -335,6 +342,8 @@ def train_one_epoch(
         and torch.cuda.is_available()
         and scaler is None
     )
+    if can_use_cuda_graph and amp_enabled and not torch.cuda.is_bf16_supported():
+        raise RuntimeError("CUDA Graph AMP requires bfloat16 autocast support on the active CUDA device.")
     if can_use_cuda_graph:
         return _run_cuda_graph_epoch(
             model,
