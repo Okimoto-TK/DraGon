@@ -17,30 +17,17 @@ from torch import Tensor, nn
 from src.train.utils import grad_norm
 
 try:
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt
+except Exception:  # pragma: no cover - optional dependency
+    plt = None  # type: ignore[assignment]
+
+try:
     import mlflow
 except Exception:  # pragma: no cover - optional dependency
     mlflow = None  # type: ignore[assignment]
-
-_PYPLOT: Any | None = None
-_PYPLOT_IMPORT_ATTEMPTED = False
-
-
-def _get_pyplot() -> Any | None:
-    global _PYPLOT, _PYPLOT_IMPORT_ATTEMPTED
-    if _PYPLOT_IMPORT_ATTEMPTED:
-        return _PYPLOT
-
-    _PYPLOT_IMPORT_ATTEMPTED = True
-    try:
-        import matplotlib
-
-        matplotlib.use("Agg", force=True)
-        import matplotlib.pyplot as pyplot
-
-        _PYPLOT = pyplot
-    except Exception:
-        _PYPLOT = None
-    return _PYPLOT
 
 _TASKS = ("S", "M", "MDD", "RV")
 _HOOK_TARGETS = {
@@ -397,7 +384,6 @@ class MLflowVisualizer:
     def _log_figure(self, stage: str, epoch: int, name: str, fig: Any) -> None:
         if fig is None:
             return
-        plt = _get_pyplot()
         try:
             if self.run is not None and mlflow is not None and plt is not None:
                 mlflow.log_figure(fig, f"{stage}/epoch_{epoch:03d}/{name}.png")
@@ -406,7 +392,6 @@ class MLflowVisualizer:
                 plt.close(fig)
 
     def _plot_drift_fusion(self, snapshot: Mapping[str, Any]) -> Any:
-        plt = _get_pyplot()
         if plt is None:
             return None
         debug = snapshot.get("drift_fusion")
@@ -444,7 +429,6 @@ class MLflowVisualizer:
         return fig
 
     def _plot_diffusion_fusion(self, snapshot: Mapping[str, Any]) -> Any:
-        plt = _get_pyplot()
         if plt is None:
             return None
         debug = snapshot.get("diffusion_fusion")
@@ -470,7 +454,6 @@ class MLflowVisualizer:
         return fig
 
     def _plot_side_resampler(self, snapshot: Mapping[str, Any]) -> Any:
-        plt = _get_pyplot()
         if plt is None:
             return None
         debug = snapshot.get("side_resampler")
@@ -490,7 +473,6 @@ class MLflowVisualizer:
         return fig
 
     def _plot_joint_maps(self, stage_buffer: EpochStageBuffer) -> Any:
-        plt = _get_pyplot()
         if plt is None:
             return None
         if "H12" not in stage_buffer.joint_heat_sum or "H23" not in stage_buffer.joint_heat_sum:
@@ -508,7 +490,6 @@ class MLflowVisualizer:
         return fig
 
     def _plot_summary(self, snapshot: Mapping[str, Any], stage_buffer: EpochStageBuffer) -> Any:
-        plt = _get_pyplot()
         if plt is None:
             return None
         drift = snapshot.get("drift_summary")
@@ -539,7 +520,6 @@ class MLflowVisualizer:
         return fig
 
     def _plot_tfn_decoder(self, stage_buffer: EpochStageBuffer, snapshot: Mapping[str, Any]) -> Any:
-        plt = _get_pyplot()
         if plt is None:
             return None
         if stage_buffer.tfn_count <= 0:
@@ -562,7 +542,6 @@ class MLflowVisualizer:
         return fig
 
     def _plot_scale_calibration(self, stage_buffer: EpochStageBuffer) -> Any:
-        plt = _get_pyplot()
         if plt is None:
             return None
         fig, axes = plt.subplots(2, 4, figsize=(18, 8))

@@ -216,6 +216,9 @@ def _build_epoch_loader(
     shuffle: bool,
 ) -> DataLoader:
     """Create one epoch loader with optional code-grouped sampling."""
+    if samples_per_epoch is None and not shuffle:
+        return base_loader
+
     dataset = base_loader.dataset
     grouped_indices = _grouped_epoch_indices(
         dataset,
