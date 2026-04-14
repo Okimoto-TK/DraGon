@@ -32,6 +32,7 @@ def train_one_epoch(
     diagnostics_every_steps: int = DEFAULT_DIAGNOSTICS_EVERY_STEPS,
     scaler: GradScaler | None = None,
     amp_enabled: bool = False,
+    profiler: object | None = None,
 ) -> dict[str, float]:
     """Run one training epoch and return averaged metrics."""
     model.train()
@@ -120,6 +121,9 @@ def train_one_epoch(
                     "metrics": tracker.compute(),
                 }
             )
+
+        if profiler is not None:
+            profiler.step()
 
     return tracker.compute()
 

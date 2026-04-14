@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import gc
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,18 @@ from config.config import memory_mode as DEFAULT_MEMORY_MODE
 from config.config import num_epochs as DEFAULT_NUM_EPOCHS
 from config.config import num_workers as DEFAULT_NUM_WORKERS
 from config.config import prefetch_factor as DEFAULT_PREFETCH_FACTOR
+from config.config import profile_active_steps as DEFAULT_PROFILE_ACTIVE_STEPS
+from config.config import profile_dir as DEFAULT_PROFILE_DIR
+from config.config import profile_enabled as DEFAULT_PROFILE_ENABLED
+from config.config import profile_epoch as DEFAULT_PROFILE_EPOCH
+from config.config import profile_memory as DEFAULT_PROFILE_MEMORY
+from config.config import profile_record_shapes as DEFAULT_PROFILE_RECORD_SHAPES
+from config.config import profile_repeat as DEFAULT_PROFILE_REPEAT
+from config.config import profile_row_limit as DEFAULT_PROFILE_ROW_LIMIT
+from config.config import profile_wait_steps as DEFAULT_PROFILE_WAIT_STEPS
+from config.config import profile_warmup_steps as DEFAULT_PROFILE_WARMUP_STEPS
+from config.config import profile_with_flops as DEFAULT_PROFILE_WITH_FLOPS
+from config.config import profile_with_stack as DEFAULT_PROFILE_WITH_STACK
 from config.config import scheduler_factor as DEFAULT_SCHEDULER_FACTOR
 from config.config import scheduler_min_lr as DEFAULT_SCHEDULER_MIN_LR
 from config.config import scheduler_name as DEFAULT_SCHEDULER_NAME
@@ -39,6 +52,7 @@ from src.models import MultiScaleFusionNet
 from src.models.losses import LaplaceLSELoss
 from src.train.dataset import create_train_val_datasets
 from src.train.train import train_one_epoch
+from src.train.profiler import create_epoch_profiler, write_profiler_reports
 from src.train.ui import TrainingUI
 from src.train.validate import validate
 from src.train.visualize import MLflowVisualizer
@@ -275,6 +289,18 @@ def fit(
     val_samples_per_epoch: int | None = DEFAULT_VAL_SAMPLES_PER_EPOCH,
     seed: int = DEFAULT_TRAIN_SEED,
     amp_enabled: bool = DEFAULT_AMP_ENABLED,
+    profile_enabled: bool = DEFAULT_PROFILE_ENABLED,
+    profile_epoch: int = DEFAULT_PROFILE_EPOCH,
+    profile_wait_steps: int = DEFAULT_PROFILE_WAIT_STEPS,
+    profile_warmup_steps: int = DEFAULT_PROFILE_WARMUP_STEPS,
+    profile_active_steps: int = DEFAULT_PROFILE_ACTIVE_STEPS,
+    profile_repeat: int = DEFAULT_PROFILE_REPEAT,
+    profile_record_shapes: bool = DEFAULT_PROFILE_RECORD_SHAPES,
+    profile_memory: bool = DEFAULT_PROFILE_MEMORY,
+    profile_with_stack: bool = DEFAULT_PROFILE_WITH_STACK,
+    profile_with_flops: bool = DEFAULT_PROFILE_WITH_FLOPS,
+    profile_row_limit: int = DEFAULT_PROFILE_ROW_LIMIT,
+    profile_dir: str | Path = DEFAULT_PROFILE_DIR,
 ) -> dict[str, Any]:
     """Run the full training loop."""
     model.to(device)
@@ -315,6 +341,12 @@ def fit(
                     "train_samples_per_epoch": train_samples_per_epoch,
                     "val_samples_per_epoch": val_samples_per_epoch,
                     "grad_clip": grad_clip,
+                    "profile_enabled": profile_enabled,
+                    "profile_epoch": profile_epoch,
+                    "profile_wait_steps": profile_wait_steps,
+                    "profile_warmup_steps": profile_warmup_steps,
+                    "profile_active_steps": profile_active_steps,
+                    "profile_repeat": profile_repeat,
                     "freeze_min_steps": getattr(criterion, "min_freeze_steps", None),
                     "freeze_patience_steps": getattr(criterion, "patience_steps", None),
                     "freeze_ema_beta": getattr(criterion, "ema_beta", None),
@@ -372,20 +404,41 @@ def fit(
                     metrics=payload["metrics"],
                 )
 
-            train_metrics = train_one_epoch(
-                model,
-                criterion,
-                optimizer,
-                epoch_train_loader,
-                device,
-                grad_clip=grad_clip,
-                step_callback=_step_callback if ui is not None else None,
-                visualizer=visualizer,
+            profiler_session = create_epoch_profiler(
+                enabled=profile_enabled,
                 epoch=epoch + 1,
-                global_step_offset=global_train_step,
-                scaler=scaler,
-                amp_enabled=resolved_amp_enabled,
+                target_epoch=profile_epoch,
+                run_name=run_name,
+                output_root=profile_dir,
+                device=device,
+                wait=profile_wait_steps,
+                warmup=profile_warmup_steps,
+                active=profile_active_steps,
+                repeat=profile_repeat,
+                record_shapes=profile_record_shapes,
+                profile_memory=profile_memory,
+                with_stack=profile_with_stack,
+                with_flops=profile_with_flops,
             )
+            train_context = profiler_session.profiler if profiler_session.enabled else nullcontext()
+            with train_context:
+                train_metrics = train_one_epoch(
+                    model,
+                    criterion,
+                    optimizer,
+                    epoch_train_loader,
+                    device,
+                    grad_clip=grad_clip,
+                    step_callback=_step_callback if ui is not None else None,
+                    visualizer=visualizer,
+                    epoch=epoch + 1,
+                    global_step_offset=global_train_step,
+                    scaler=scaler,
+                    amp_enabled=resolved_amp_enabled,
+                    profiler=profiler_session.profiler,
+                )
+            if profiler_session.enabled:
+                write_profiler_reports(profiler_session, row_limit=profile_row_limit)
             global_train_step += len(epoch_train_loader)
             if visualizer is not None:
                 visualizer.log_epoch_diagnostics("train", epoch + 1)
@@ -550,6 +603,18 @@ def run_training(
     val_samples_per_epoch: int | None = DEFAULT_VAL_SAMPLES_PER_EPOCH,
     prefetch_factor: int = DEFAULT_PREFETCH_FACTOR,
     amp_enabled: bool = DEFAULT_AMP_ENABLED,
+    profile_enabled: bool = DEFAULT_PROFILE_ENABLED,
+    profile_epoch: int = DEFAULT_PROFILE_EPOCH,
+    profile_wait_steps: int = DEFAULT_PROFILE_WAIT_STEPS,
+    profile_warmup_steps: int = DEFAULT_PROFILE_WARMUP_STEPS,
+    profile_active_steps: int = DEFAULT_PROFILE_ACTIVE_STEPS,
+    profile_repeat: int = DEFAULT_PROFILE_REPEAT,
+    profile_record_shapes: bool = DEFAULT_PROFILE_RECORD_SHAPES,
+    profile_memory: bool = DEFAULT_PROFILE_MEMORY,
+    profile_with_stack: bool = DEFAULT_PROFILE_WITH_STACK,
+    profile_with_flops: bool = DEFAULT_PROFILE_WITH_FLOPS,
+    profile_row_limit: int = DEFAULT_PROFILE_ROW_LIMIT,
+    profile_dir: str | Path = DEFAULT_PROFILE_DIR,
 ) -> dict[str, Any]:
     """Build datasets, model, loss, optimizer, and run training."""
     torch.manual_seed(seed)
@@ -616,6 +681,18 @@ def run_training(
         val_samples_per_epoch=val_samples_per_epoch,
         seed=seed,
         amp_enabled=amp_enabled,
+        profile_enabled=profile_enabled,
+        profile_epoch=profile_epoch,
+        profile_wait_steps=profile_wait_steps,
+        profile_warmup_steps=profile_warmup_steps,
+        profile_active_steps=profile_active_steps,
+        profile_repeat=profile_repeat,
+        profile_record_shapes=profile_record_shapes,
+        profile_memory=profile_memory,
+        profile_with_stack=profile_with_stack,
+        profile_with_flops=profile_with_flops,
+        profile_row_limit=profile_row_limit,
+        profile_dir=profile_dir,
     )
 
 
