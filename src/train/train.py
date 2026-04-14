@@ -1,13 +1,15 @@
 """Training loop for one epoch."""
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 import torch
 from torch.amp import GradScaler, autocast
 from config.config import diagnostics_every_steps as DEFAULT_DIAGNOSTICS_EVERY_STEPS
 from config.config import cuda_graph_warmup_steps as DEFAULT_CUDA_GRAPH_WARMUP_STEPS
 from config.config import log_every as DEFAULT_LOG_EVERY
+from config.config import nan_debug_enabled as DEFAULT_NAN_DEBUG_ENABLED
+from config.config import nan_debug_max_param_reports as DEFAULT_NAN_DEBUG_MAX_PARAM_REPORTS
 from config.config import use_cuda_graph as DEFAULT_USE_CUDA_GRAPH
 from torch import nn
 from torch.utils.data import DataLoader
@@ -18,6 +20,78 @@ from src.train.utils import (
     batch_prediction_metrics,
     move_batch_to_device,
 )
+
+
+def _tensor_nonfinite_summary(name: str, tensor: torch.Tensor) -> str | None:
+    det = tensor.detach()
+    if det.numel() == 0:
+        return None
+    nan_count = int(torch.isnan(det).sum().item())
+    inf_count = int(torch.isinf(det).sum().item())
+    if nan_count == 0 and inf_count == 0:
+        return None
+    finite = torch.isfinite(det)
+    finite_count = int(finite.sum().item())
+    total = int(det.numel())
+    finite_ratio = float(finite_count / max(total, 1))
+    if finite_count > 0:
+        finite_values = det[finite]
+        f_min = float(finite_values.min().item())
+        f_max = float(finite_values.max().item())
+        f_mean = float(finite_values.mean().item())
+    else:
+        f_min = float("nan")
+        f_max = float("nan")
+        f_mean = float("nan")
+    return (
+        f"{name}: shape={tuple(det.shape)} dtype={det.dtype} "
+        f"finite_ratio={finite_ratio:.6f} nan={nan_count} inf={inf_count} "
+        f"finite_min={f_min:.6e} finite_max={f_max:.6e} finite_mean={f_mean:.6e}"
+    )
+
+
+def _collect_nonfinite_lines(
+    mapping: Mapping[str, torch.Tensor],
+    prefix: str,
+) -> list[str]:
+    lines: list[str] = []
+    for key, value in mapping.items():
+        line = _tensor_nonfinite_summary(f"{prefix}.{key}", value)
+        if line is not None:
+            lines.append(line)
+    return lines
+
+
+def _collect_nonfinite_grad_lines(
+    model: nn.Module,
+    *,
+    max_reports: int,
+) -> list[str]:
+    lines: list[str] = []
+    for name, param in model.named_parameters():
+        grad = param.grad
+        if grad is None:
+            continue
+        line = _tensor_nonfinite_summary(f"grad.{name}", grad)
+        if line is None:
+            continue
+        lines.append(line)
+        if len(lines) >= max_reports:
+            break
+    return lines
+
+
+def _raise_nonfinite(
+    *,
+    phase: str,
+    step: int,
+    lines: list[str],
+) -> None:
+    if not lines:
+        return
+    message = "\n".join([f"[NaNDebug] phase={phase} step={step}", *lines])
+    print(message)
+    raise RuntimeError(message)
 
 
 def _make_static_batch(batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -47,7 +121,10 @@ def _run_eager_epoch(
     log_every: int,
     scaler: GradScaler | None,
     amp_enabled: bool,
+    nan_debug_enabled: bool,
+    nan_debug_max_param_reports: int,
 ) -> dict[str, float]:
+    autocast_dtype = torch.bfloat16 if amp_enabled and torch.cuda.is_bf16_supported() else torch.float16
     tracker = MetricTracker(device=device)
     window_tracker = MetricTracker(device=device)
     total_steps = max(len(dataloader), 1)
@@ -56,7 +133,7 @@ def _run_eager_epoch(
         batch = move_batch_to_device(batch, device)
 
         optimizer.zero_grad(set_to_none=True)
-        with autocast(device_type="cuda", enabled=amp_enabled):
+        with autocast(device_type="cuda", enabled=amp_enabled, dtype=autocast_dtype):
             outputs = model(
                 batch["macro"],
                 batch["mezzo"],
@@ -64,7 +141,7 @@ def _run_eager_epoch(
                 batch["sidechain"],
             )
 
-        with autocast(device_type="cuda", enabled=amp_enabled):
+        with autocast(device_type="cuda", enabled=amp_enabled, dtype=autocast_dtype):
             loss, loss_metrics = criterion(outputs, batch)
         mean_metrics = batch_prediction_metrics(outputs, batch)
         diag_metrics: dict[str, torch.Tensor | float] = {}
@@ -78,6 +155,21 @@ def _run_eager_epoch(
             scaler.scale(loss).backward()
         else:
             loss.backward()
+
+        if nan_debug_enabled:
+            debug_lines = _collect_nonfinite_lines(batch, "batch")
+            debug_lines.extend(_collect_nonfinite_lines(outputs, "outputs"))
+            debug_lines.extend(_collect_nonfinite_lines(loss_metrics, "loss_metrics"))
+            loss_line = _tensor_nonfinite_summary("loss", loss)
+            if loss_line is not None:
+                debug_lines.append(loss_line)
+            debug_lines.extend(
+                _collect_nonfinite_grad_lines(
+                    model,
+                    max_reports=nan_debug_max_param_reports,
+                )
+            )
+            _raise_nonfinite(phase="eager", step=step_idx, lines=debug_lines)
 
         if grad_clip is not None:
             if amp_enabled and scaler is not None:
@@ -146,7 +238,10 @@ def _run_cuda_graph_epoch(
     log_every: int,
     amp_enabled: bool,
     cuda_graph_warmup_steps: int,
+    nan_debug_enabled: bool,
+    nan_debug_max_param_reports: int,
 ) -> dict[str, float]:
+    autocast_dtype = torch.bfloat16 if amp_enabled and torch.cuda.is_bf16_supported() else torch.float16
     hooks_suspended = visualizer is not None
     if hooks_suspended:
         visualizer.detach()
@@ -193,7 +288,7 @@ def _run_cuda_graph_epoch(
 
     def _run_eager_step(batch: dict[str, torch.Tensor], current_step: int) -> None:
         optimizer.zero_grad(set_to_none=True)
-        with autocast(device_type="cuda", enabled=amp_enabled):
+        with autocast(device_type="cuda", enabled=amp_enabled, dtype=autocast_dtype):
             outputs = model(
                 batch["macro"],
                 batch["mezzo"],
@@ -213,6 +308,21 @@ def _run_cuda_graph_epoch(
         if grad_clip is not None:
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         optimizer.step()
+
+        if nan_debug_enabled:
+            debug_lines = _collect_nonfinite_lines(batch, "batch")
+            debug_lines.extend(_collect_nonfinite_lines(outputs, "outputs"))
+            debug_lines.extend(_collect_nonfinite_lines(loss_metrics, "loss_metrics"))
+            loss_line = _tensor_nonfinite_summary("loss", loss)
+            if loss_line is not None:
+                debug_lines.append(loss_line)
+            debug_lines.extend(
+                _collect_nonfinite_grad_lines(
+                    model,
+                    max_reports=nan_debug_max_param_reports,
+                )
+            )
+            _raise_nonfinite(phase="cuda_graph_warmup", step=current_step, lines=debug_lines)
 
         batch_size = int(batch["macro"].shape[0])
         step_metrics = {"loss": loss.detach(), **loss_metrics, **mean_metrics, **diag_metrics}
@@ -240,7 +350,7 @@ def _run_cuda_graph_epoch(
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
                 optimizer.zero_grad(set_to_none=True)
-                with autocast(device_type="cuda", enabled=amp_enabled):
+                with autocast(device_type="cuda", enabled=amp_enabled, dtype=autocast_dtype):
                     static_outputs = model(
                         static_batch["macro"],
                         static_batch["mezzo"],
@@ -279,6 +389,21 @@ def _run_cuda_graph_epoch(
                     update_state=True,
                 )
             static_mean_metrics = batch_prediction_metrics(static_outputs, static_batch)
+
+            if nan_debug_enabled:
+                debug_lines = _collect_nonfinite_lines(static_batch, "batch")
+                debug_lines.extend(_collect_nonfinite_lines(static_outputs, "outputs"))
+                debug_lines.extend(_collect_nonfinite_lines(static_loss_metrics, "loss_metrics"))
+                loss_line = _tensor_nonfinite_summary("loss", static_loss)
+                if loss_line is not None:
+                    debug_lines.append(loss_line)
+                debug_lines.extend(
+                    _collect_nonfinite_grad_lines(
+                        model,
+                        max_reports=nan_debug_max_param_reports,
+                    )
+                )
+                _raise_nonfinite(phase="cuda_graph_replay", step=step_idx, lines=debug_lines)
 
             diag_metrics: dict[str, torch.Tensor | float] = {}
             if visualizer is not None:
@@ -322,6 +447,8 @@ def train_one_epoch(
     amp_enabled: bool = False,
     use_cuda_graph: bool = DEFAULT_USE_CUDA_GRAPH,
     cuda_graph_warmup_steps: int = DEFAULT_CUDA_GRAPH_WARMUP_STEPS,
+    nan_debug_enabled: bool = DEFAULT_NAN_DEBUG_ENABLED,
+    nan_debug_max_param_reports: int = DEFAULT_NAN_DEBUG_MAX_PARAM_REPORTS,
 ) -> dict[str, float]:
     """Run one training epoch and return averaged metrics."""
     del diagnostics_every_steps
@@ -350,6 +477,8 @@ def train_one_epoch(
             log_every=log_every,
             amp_enabled=amp_enabled,
             cuda_graph_warmup_steps=cuda_graph_warmup_steps,
+            nan_debug_enabled=nan_debug_enabled,
+            nan_debug_max_param_reports=nan_debug_max_param_reports,
         )
     raise RuntimeError(
         "CUDA Graph prerequisites not met. "

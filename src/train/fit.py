@@ -23,6 +23,8 @@ from config.config import grad_clip as DEFAULT_GRAD_CLIP
 from config.config import learning_rate as DEFAULT_LEARNING_RATE
 from config.config import log_every as DEFAULT_LOG_EVERY
 from config.config import memory_mode as DEFAULT_MEMORY_MODE
+from config.config import nan_debug_enabled as DEFAULT_NAN_DEBUG_ENABLED
+from config.config import nan_debug_max_param_reports as DEFAULT_NAN_DEBUG_MAX_PARAM_REPORTS
 from config.config import num_epochs as DEFAULT_NUM_EPOCHS
 from config.config import num_workers as DEFAULT_NUM_WORKERS
 from config.config import prefetch_factor as DEFAULT_PREFETCH_FACTOR
@@ -281,6 +283,8 @@ def fit(
     amp_enabled: bool = DEFAULT_AMP_ENABLED,
     use_cuda_graph: bool = DEFAULT_USE_CUDA_GRAPH,
     cuda_graph_warmup_steps: int = DEFAULT_CUDA_GRAPH_WARMUP_STEPS,
+    nan_debug_enabled: bool = DEFAULT_NAN_DEBUG_ENABLED,
+    nan_debug_max_param_reports: int = DEFAULT_NAN_DEBUG_MAX_PARAM_REPORTS,
 ) -> dict[str, Any]:
     """Run the full training loop."""
     if not bool(use_cuda_graph):
@@ -312,6 +316,11 @@ def fit(
     )
     resolved_amp_enabled = bool(amp_enabled and device.startswith("cuda") and torch.cuda.is_available())
     resolved_cuda_graph = True
+    if resolved_cuda_graph and resolved_amp_enabled and not torch.cuda.is_bf16_supported():
+        raise RuntimeError(
+            "CUDA Graph mode requires bf16 autocast for stable no-scaler training on this path. "
+            "Current GPU does not report bf16 support. Set amp_enabled=False or use bf16-capable GPU."
+        )
     scaler = None
 
     try:
@@ -326,6 +335,8 @@ def fit(
                     "amp_enabled": resolved_amp_enabled,
                     "use_cuda_graph": resolved_cuda_graph,
                     "cuda_graph_warmup_steps": cuda_graph_warmup_steps,
+                    "nan_debug_enabled": nan_debug_enabled,
+                    "nan_debug_max_param_reports": nan_debug_max_param_reports,
                     "train_samples_per_epoch": train_samples_per_epoch,
                     "val_samples_per_epoch": val_samples_per_epoch,
                     "log_every": log_every,
@@ -403,6 +414,8 @@ def fit(
                 amp_enabled=resolved_amp_enabled,
                 use_cuda_graph=resolved_cuda_graph,
                 cuda_graph_warmup_steps=cuda_graph_warmup_steps,
+                nan_debug_enabled=nan_debug_enabled,
+                nan_debug_max_param_reports=nan_debug_max_param_reports,
             )
             global_train_step += len(epoch_train_loader)
             if visualizer is not None:
@@ -571,6 +584,8 @@ def run_training(
     amp_enabled: bool = DEFAULT_AMP_ENABLED,
     use_cuda_graph: bool = DEFAULT_USE_CUDA_GRAPH,
     cuda_graph_warmup_steps: int = DEFAULT_CUDA_GRAPH_WARMUP_STEPS,
+    nan_debug_enabled: bool = DEFAULT_NAN_DEBUG_ENABLED,
+    nan_debug_max_param_reports: int = DEFAULT_NAN_DEBUG_MAX_PARAM_REPORTS,
 ) -> dict[str, Any]:
     """Build datasets, model, loss, optimizer, and run training."""
     torch.manual_seed(seed)
@@ -651,6 +666,8 @@ def run_training(
         amp_enabled=amp_enabled,
         use_cuda_graph=resolved_cuda_graph,
         cuda_graph_warmup_steps=cuda_graph_warmup_steps,
+        nan_debug_enabled=nan_debug_enabled,
+        nan_debug_max_param_reports=nan_debug_max_param_reports,
     )
 
 

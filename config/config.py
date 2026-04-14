@@ -99,6 +99,8 @@ prefetch_factor = 4
 amp_enabled = True
 use_cuda_graph = True
 cuda_graph_warmup_steps = 8
+nan_debug_enabled = True
+nan_debug_max_param_reports = 12
 
 scheduler_name = "plateau"
 scheduler_factor = 0.5
