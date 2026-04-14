@@ -81,7 +81,6 @@ lazy_cache_codes = 16
 train_samples_per_epoch = 2_000_000
 val_samples_per_epoch = None
 trend_ema_alpha = 0.2
-diagnostics_every_steps = 10
 log_every_steps = 50
 mlflow_enabled = True
 save_every = 5

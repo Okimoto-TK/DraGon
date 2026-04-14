@@ -5,7 +5,6 @@ from collections.abc import Callable
 
 import torch
 from torch.amp import GradScaler, autocast
-from config.config import diagnostics_every_steps as DEFAULT_DIAGNOSTICS_EVERY_STEPS
 from config.config import log_every_steps as DEFAULT_LOG_EVERY_STEPS
 from torch import nn
 from torch.utils.data import DataLoader
@@ -30,7 +29,6 @@ def train_one_epoch(
     visualizer: MLflowVisualizer | None = None,
     epoch: int | None = None,
     global_step_offset: int = 0,
-    diagnostics_every_steps: int = DEFAULT_DIAGNOSTICS_EVERY_STEPS,
     scaler: GradScaler | None = None,
     amp_enabled: bool = False,
     profiler: object | None = None,
@@ -44,14 +42,11 @@ def train_one_epoch(
 
     for step_idx, batch in enumerate(dataloader, start=1):
         batch = move_batch_to_device(batch, device)
-        should_collect_diag = (
-            visualizer is not None
-            and (
-                step_idx == 1
-                or step_idx == total_steps
-                or (diagnostics_every_steps > 0 and step_idx % diagnostics_every_steps == 0)
-            )
+        should_log_metrics = (
+            step_idx == total_steps
+            or (log_every_steps > 0 and step_idx % log_every_steps == 0)
         )
+        should_collect_diag = visualizer is not None and should_log_metrics
 
         optimizer.zero_grad(set_to_none=True)
         with autocast(device_type="cuda", enabled=amp_enabled):
@@ -115,11 +110,6 @@ def train_one_epoch(
                 subset="realtime",
             )
 
-        should_log_metrics = (
-            step_idx == 1
-            or step_idx == total_steps
-            or (log_every_steps > 0 and step_idx % log_every_steps == 0)
-        )
         if step_callback is not None:
             metrics_payload = tracker.compute(as_python=True) if should_log_metrics else {}
             step_callback(

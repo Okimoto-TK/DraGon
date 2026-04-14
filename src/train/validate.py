@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import torch
 from torch.amp import autocast
-from config.config import diagnostics_every_steps as DEFAULT_DIAGNOSTICS_EVERY_STEPS
+from config.config import log_every_steps as DEFAULT_LOG_EVERY_STEPS
 from torch import nn
 from torch.utils.data import DataLoader
 
@@ -23,7 +23,7 @@ def validate(
     device: str,
     *,
     visualizer: MLflowVisualizer | None = None,
-    diagnostics_every_steps: int = DEFAULT_DIAGNOSTICS_EVERY_STEPS,
+    log_every_steps: int = DEFAULT_LOG_EVERY_STEPS,
     amp_enabled: bool = False,
 ) -> dict[str, float]:
     """Run one validation epoch and return averaged metrics."""
@@ -51,9 +51,8 @@ def validate(
         should_collect_diag = (
             visualizer is not None
             and (
-                step_idx == 1
-                or step_idx == total_steps
-                or (diagnostics_every_steps > 0 and step_idx % diagnostics_every_steps == 0)
+                step_idx == total_steps
+                or (log_every_steps > 0 and step_idx % log_every_steps == 0)
             )
         )
         diag_metrics = (

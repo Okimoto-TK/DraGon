@@ -456,6 +456,7 @@ def fit(
                 epoch_val_loader,
                 device,
                 visualizer=visualizer,
+                log_every_steps=log_every_steps,
                 amp_enabled=resolved_amp_enabled,
             )
             if visualizer is not None:
