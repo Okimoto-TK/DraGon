@@ -7,7 +7,7 @@ from collections.abc import Mapping
 import torch
 from torch import Tensor
 
-_TASKS = ("S", "M", "MDD", "RV")
+from src.task_labels import detect_task_from_outputs
 
 
 def move_batch_to_device(batch: Mapping[str, Tensor], device: str) -> dict[str, Tensor]:
@@ -113,18 +113,23 @@ def batch_prediction_metrics(
     outputs: Mapping[str, Tensor],
     batch: Mapping[str, Tensor],
 ) -> dict[str, Tensor]:
-    """Compute MAE and scale statistics for one batch."""
-    mean_metrics: dict[str, Tensor] = {}
+    """Compute single-task prediction diagnostics for one batch."""
+    task = detect_task_from_outputs(outputs)
+    target = batch[f"label_{task}"]
+    metrics: dict[str, Tensor] = {}
 
-    for task in _TASKS:
-        pred = outputs[f"pred_{task}"]
-        target = batch[f"label_{task}"]
-        scale = outputs[f"scale_{task}"]
+    if task == "Persist":
+        pred = outputs["pred_Persist"]
+        metrics["mae_Persist"] = torch.mean(torch.abs(pred - target)).detach()
+        metrics["brier_Persist"] = torch.mean((pred - target) * (pred - target)).detach()
+        metrics["prob_Persist_mean"] = pred.mean().detach()
+        metrics["unc_Persist_mean"] = outputs["Persist_unc"].mean().detach()
+        return metrics
 
-        mean_metrics[f"mae_{task}"] = torch.mean(torch.abs(pred - target)).detach()
-        mean_metrics[f"scale_{task}_mean"] = scale.mean().detach()
-
-    return mean_metrics
+    pred = outputs[f"pred_{task}"]
+    metrics[f"mae_{task}"] = torch.mean(torch.abs(pred - target)).detach()
+    metrics[f"unc_{task}_mean"] = outputs[f"unc_{task}"].mean().detach()
+    return metrics
 
 
 __all__ = [

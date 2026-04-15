@@ -38,7 +38,6 @@ _HOOK_TARGETS = {
     "T12": "pairwise_lmf_12",
     "T23": "pairwise_lmf_23",
     "H12": "jointnet_12",
-    "T23_proj": "jointnet_23_in_proj",
     "H23": "jointnet_23",
 }
 _REALTIME_KEYS = (
@@ -354,7 +353,7 @@ class MLflowVisualizer:
         snapshot: dict[str, Any] = {
             "features": {
                 name: _to_cpu_tree(self._features.get(name))
-                for name in ("T12", "T23", "T23_proj", "H12", "H23")
+                for name in ("T12", "T23", "H12", "H23")
             },
             "outputs": {
                 name: _to_cpu_tree(outputs[name])
@@ -689,9 +688,6 @@ class MLflowVisualizer:
 
         if "H12" in self._features and "T12" in self._features:
             metrics["map/H12_delta"] = _mean_abs_delta(self._features["H12"], self._features["T12"])
-        if "H23" in self._features and "T23_proj" in self._features:
-            metrics["map/H23_delta"] = _mean_abs_delta(self._features["H23"], self._features["T23_proj"])
-
         for name in ("M1", "M2", "S", "Z0", "Z1"):
             tensor = outputs[name]
             metrics[f"token/{name}_norm" if name in {"M1", "M2", "S"} else f"fusion/{name}_norm"] = (

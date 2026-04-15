@@ -13,6 +13,7 @@ import torch.nn.functional as F
 from config.config import trend_ema_alpha as DEFAULT_EMA_ALPHA
 from torch import Tensor, nn
 
+from src.task_labels import detect_task_from_outputs
 from src.train.utils import grad_norm
 
 try:
@@ -20,7 +21,11 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     mlflow = None  # type: ignore[assignment]
 
-_TASKS = ("S", "M", "MDD", "RV")
+try:
+    import matplotlib.pyplot as plt
+except Exception:  # pragma: no cover - optional dependency
+    plt = None  # type: ignore[assignment]
+
 _HOOK_TARGETS = {
     "E1": "macro_encoder",
     "E2": "mezzo_encoder",
@@ -29,29 +34,24 @@ _HOOK_TARGETS = {
     "T12": "pairwise_lmf_12",
     "T23": "pairwise_lmf_23",
     "H12": "jointnet_12",
-    "T23_proj": "jointnet_23_in_proj",
     "H23": "jointnet_23",
 }
 _REALTIME_KEYS = (
     "loss_total",
-    "loss_lse",
-    "loss_avg",
-    "mae/S",
-    "mae/M",
-    "mae/MDD",
-    "mae/RV",
-    "loss_task/S",
-    "loss_task/M",
-    "loss_task/MDD",
-    "loss_task/RV",
-    "scale_mean/S",
-    "scale_mean/M",
-    "scale_mean/MDD",
-    "scale_mean/RV",
-    "scale_floor_hit_rate/S",
-    "scale_floor_hit_rate/M",
-    "scale_floor_hit_rate/MDD",
-    "scale_floor_hit_rate/RV",
+    "loss_task",
+    "loss_task/Edge",
+    "loss_task/Persist",
+    "loss_task/DownRisk",
+    "mae/Edge",
+    "mae/Persist",
+    "mae/DownRisk",
+    "brier/Persist",
+    "prob_mean/Persist",
+    "unc_mean/Edge",
+    "unc_mean/Persist",
+    "unc_mean/DownRisk",
+    "nu/Edge",
+    "nu/DownRisk",
     "token/M1_norm",
     "token/M2_norm",
     "token/S_norm",
@@ -128,6 +128,11 @@ def _sync_scalar_metrics(metrics: Mapping[str, Tensor]) -> dict[str, float]:
     packed = torch.stack([metrics[key].reshape(()) for key in keys], dim=0)
     values = packed.detach().cpu().tolist()
     return {key: float(value) for key, value in zip(keys, values)}
+
+
+def _mlflow_metric_key(stage: str, subset: str, key: str) -> str:
+    """Flatten metric names so MLflow file-store never mixes files and directories."""
+    return ".".join((stage, subset, key)).replace("/", ".")
 
 
 @dataclass
@@ -246,7 +251,9 @@ class MLflowVisualizer:
         lightweight = dict(metrics) if metrics is not None else self.collect_batch_metrics(model, outputs, batch, {})
         buffer.update(lightweight, weight=int(batch["macro"].shape[0]))
         for name in ("H12", "H23"):
-            feature = self._features.get(name)
+            feature = outputs.get(name)
+            if not isinstance(feature, Tensor):
+                feature = self._features.get(name)
             if feature is None:
                 continue
             heat = feature.detach().float().mean(dim=(0, 1))
@@ -265,6 +272,38 @@ class MLflowVisualizer:
     ) -> None:
         del stage, model, outputs, batch
 
+    def _log_figure(self, stage: str, epoch: int, name: str, fig: Any) -> None:
+        if fig is None:
+            return
+        try:
+            if self.run is not None and mlflow is not None and plt is not None:
+                mlflow.log_figure(fig, f"{stage}/epoch_{epoch:03d}/{name}.png")
+        finally:
+            if plt is not None:
+                plt.close(fig)
+
+    def _plot_joint_maps(self, stage_buffer: EpochStageBuffer) -> Any:
+        if plt is None or not stage_buffer.heatmap_sum:
+            return None
+
+        names = [name for name in ("H12", "H23") if name in stage_buffer.heatmap_sum]
+        if not names:
+            return None
+
+        fig, axes = plt.subplots(1, len(names), figsize=(5 * len(names), 4))
+        if len(names) == 1:
+            axes = [axes]
+        for ax, name in zip(axes, names):
+            count = stage_buffer.heatmap_count[name].clamp_min(1).to(dtype=torch.float32)
+            mean_map = (stage_buffer.heatmap_sum[name] / count).detach().float().cpu().numpy()
+            image = ax.imshow(mean_map, aspect="auto", cmap="magma")
+            ax.set_title(f"{name} Epoch Mean Activation")
+            ax.set_xlabel("Width")
+            ax.set_ylabel("Height")
+            fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
+        fig.tight_layout()
+        return fig
+
     def log_epoch_diagnostics(self, stage: str, epoch: int) -> None:
         buffer = self._epoch_buffers.get(stage)
         if buffer is None:
@@ -280,6 +319,7 @@ class MLflowVisualizer:
             metrics.update(_sync_scalar_metrics(heatmap_metrics))
         if metrics:
             self.track(stage, metrics, epoch=epoch, subset="epoch_diag")
+        self._log_figure(stage, epoch, "jointnet_activation_maps", self._plot_joint_maps(buffer))
 
     def collect_batch_metrics(
         self,
@@ -288,21 +328,31 @@ class MLflowVisualizer:
         batch: Mapping[str, Tensor],
         loss_metrics: Mapping[str, Tensor | float],
     ) -> dict[str, Tensor]:
-        device = outputs["pred_S"].device
+        del model
+        task = detect_task_from_outputs(outputs)
+        device = next(value.device for value in outputs.values() if isinstance(value, Tensor))
         metrics: dict[str, Tensor] = {}
-        for key in ("loss_total", "loss_lse", "loss_avg"):
+        for key in ("loss_total", "loss_task"):
             if key in loss_metrics:
                 metrics[key] = _as_scalar_tensor(loss_metrics[key], device)
-        for task in _TASKS:
+        if task == "Persist":
+            pred = outputs["pred_Persist"]
+            target = batch["label_Persist"]
+            metrics["mae/Persist"] = torch.mean(torch.abs(pred - target)).detach().float()
+            metrics["brier/Persist"] = torch.mean((pred - target).float() ** 2).detach()
+            metrics["prob_mean/Persist"] = pred.detach().float().mean()
+            metrics["unc_mean/Persist"] = outputs["Persist_unc"].detach().float().mean()
+        else:
             pred = outputs[f"pred_{task}"]
             target = batch[f"label_{task}"]
-            scale = outputs[f"scale_{task}"]
-            min_scale = torch.tensor(float(getattr(model, f"min_scale_{task}")), device=device, dtype=torch.float32)
             metrics[f"mae/{task}"] = torch.mean(torch.abs(pred - target)).detach().float()
-            if f"loss_{task}" in loss_metrics:
-                metrics[f"loss_task/{task}"] = _as_scalar_tensor(loss_metrics[f"loss_{task}"], device)
-            metrics[f"scale_mean/{task}"] = scale.detach().float().mean()
-            metrics[f"scale_floor_hit_rate/{task}"] = (scale.detach().float() <= min_scale * 1.2).float().mean()
+            metrics[f"unc_mean/{task}"] = outputs[f"unc_{task}"].detach().float().mean()
+        loss_key = f"loss_{task}"
+        if loss_key in loss_metrics:
+            metrics[f"loss_task/{task}"] = _as_scalar_tensor(loss_metrics[loss_key], device)
+        nu_key = f"nu_{task}"
+        if nu_key in loss_metrics:
+            metrics[f"nu/{task}"] = _as_scalar_tensor(loss_metrics[nu_key], device)
         metrics["token/M1_norm"] = _channelwise_l2_mean(outputs["M1"], channel_dim=2)
         metrics["token/M2_norm"] = _channelwise_l2_mean(outputs["M2"], channel_dim=2)
         metrics["token/S_norm"] = _channelwise_l2_mean(outputs["S"], channel_dim=2)
@@ -371,7 +421,10 @@ class MLflowVisualizer:
         if self.run is None or mlflow is None or not metrics:
             return
         metric_step = int(step if step is not None else (epoch if epoch is not None else 0))
-        payload = {f"{stage}/{subset}/{key}": float(value) for key, value in metrics.items()}
+        payload = {
+            _mlflow_metric_key(stage, subset, key): float(value)
+            for key, value in metrics.items()
+        }
         mlflow.log_metrics(payload, step=metric_step)
 
     def log_params(self, params: Mapping[str, Any]) -> None:

@@ -5,7 +5,7 @@ import torch
 import torch.nn.functional as F
 from config.config import hidden_dim as DEFAULT_HIDDEN_DIM
 from config.config import lmf_dim as DEFAULT_LMF_DIM
-from config.config import wno_num_blocks as DEFAULT_WNO_NUM_BLOCKS
+from config.config import macro_wno_num_blocks as DEFAULT_WNO_NUM_BLOCKS
 from torch import Tensor, nn
 
 from src.models.components.encoders.res_conv_1d import ResConv1dBlock

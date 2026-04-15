@@ -292,7 +292,7 @@ PROCESSED_SIDECHAIN_SCHEMA = TableSchema(
 PROCESSED_LABEL_SCHEMA = TableSchema(
     name="processed_label",
     layer="processed",
-    description="Dense orthogonal physical labels for Path-Dependent Risk-Adjusted Return (PDRAR) modeling.",
+    description="Processed labels for Edge / Persist / DownRisk single-task modeling.",
     primary_key=("code", "trade_date"),
     partition_by=("code",),
     columns=(
@@ -313,32 +313,25 @@ PROCESSED_LABEL_SCHEMA = TableSchema(
             description="As-of date.",
         ),
         ColumnSchema(
-            name="label_S",
+            name="label_Edge",
             dtype=pl.Float64,
             required=True,
             nullable=True,
-            description="Weighted cumulative log return (Trend/Location).",
+            description="Weighted robust-z future opportunity score over the next 5 trading days.",
         ),
         ColumnSchema(
-            name="label_M",
+            name="label_Persist",
             dtype=pl.Float64,
             required=True,
             nullable=True,
-            description="Maximum cumulative log return (Right-tail/Peak) over the path.",
+            description="Soft persistence probability derived from future robust-z opportunity scores.",
         ),
         ColumnSchema(
-            name="label_MDD",
+            name="label_DownRisk",
             dtype=pl.Float64,
             required=True,
             nullable=True,
-            description="Maximum drawdown (Left-tail/Risk) over the path.",
-        ),
-        ColumnSchema(
-            name="label_RV",
-            dtype=pl.Float64,
-            required=True,
-            nullable=True,
-            description="Realized volatility (Root sum of squared daily returns / Scale).",
+            description="Future 5-day maximum drawdown using adjusted low path.",
         ),
     ),
 )

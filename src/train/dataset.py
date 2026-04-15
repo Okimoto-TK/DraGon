@@ -239,18 +239,17 @@ class PackedTensorDataset(Dataset[dict[str, Tensor]]):
 
     def _item_from_payload(self, payload: dict[str, Tensor], sample_idx: int) -> dict[str, Tensor]:
         label = payload["label"][sample_idx]
-        return {
+        item = {
             "date": payload["date"][sample_idx],
             "macro": payload["macro"][sample_idx],
             "mezzo": payload["mezzo"][sample_idx],
             "micro": payload["micro"][sample_idx],
             "sidechain": payload["sidechain"][sample_idx],
             "label": label,
-            "label_S": label[_LABEL_INDEX["label_S"]],
-            "label_M": label[_LABEL_INDEX["label_M"]],
-            "label_MDD": label[_LABEL_INDEX["label_MDD"]],
-            "label_RV": label[_LABEL_INDEX["label_RV"]],
         }
+        for name, idx in _LABEL_INDEX.items():
+            item[name] = label[idx]
+        return item
 
     def __getitem__(self, index: int) -> dict[str, Tensor]:
         code = self.sample_index.code_at(index)

@@ -66,8 +66,9 @@ latent_token = 12
 macro_decomp_level = 3
 mezzo_decomp_level = 3
 micro_decomp_level = 3
-wno_num_blocks = 3
-jointnet_23_channels = 24
+macro_wno_num_blocks = 2
+mezzo_wno_num_blocks = 2
+micro_wno_num_blocks = 3
 jointnet_23_blocks = 4
 
 batch_size = 128

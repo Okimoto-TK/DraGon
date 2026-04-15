@@ -10,7 +10,7 @@ def _should_record_debug() -> bool:
 
 
 class DecoderHead(nn.Module):
-    """Map fused TFN features into 8 direct outputs."""
+    """Map fused TFN features into a task-specific output vector."""
 
     def __init__(self, in_dim: int = 289, hidden_dim1: int = 128, hidden_dim2: int = 64, out_dim: int = 8) -> None:
         super().__init__()

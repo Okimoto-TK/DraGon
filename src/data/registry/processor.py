@@ -4,19 +4,15 @@ from __future__ import annotations
 # === Processing Window Constants ===
 
 FEAT_WINDOW = 5
-LABEL_WINDOW = 10
+LABEL_WINDOW = 5
 LABEL_WEIGHTS = [
-    0.070,
-    0.075,
-    0.080,
-    0.085,
-    0.090,
-    0.100,
-    0.105,
-    0.120,
-    0.130,
-    0.145,
+    0.30,
+    0.25,
+    0.20,
+    0.15,
+    0.10,
 ]
+PERSIST_TAU = 0.5
 
 # === Chunking Configuration ===
 

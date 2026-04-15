@@ -12,7 +12,7 @@ from config.config import processed_path, assembled_dir, debug
 # --- 特征列定义 (保持不变) ---
 MACRO_FEATURES = [f"mcr_f{i}" for i in range(9)]
 SIDECHAIN_FEATURES = ["gap", "gap_rank", "mf_net_ratio", "mf_net_rank", "mf_concentration", "amt_surge_rank", "velocity_rank", "amihud_impact"]
-LABEL_COLS = ["label_S", "label_M", "label_MDD", "label_RV"]
+LABEL_COLS = ["label_Edge", "label_Persist", "label_DownRisk"]
 MEZZO_FEATURES = [f"mzo_f{i}" for i in range(9)]
 MICRO_FEATURES = [f"mic_f{i}" for i in range(9)]
 MICRO_USED_FEATURES = MICRO_FEATURES[:-2]
@@ -53,11 +53,20 @@ def _build_packed_payload(data: np.ndarray) -> dict[str, np.ndarray]:
         }
 
     sample_valid = _compute_sample_valid(data[:, 1] > 0.5)
+    label_end = 2 + len(LABEL_COLS)
+    macro_start = label_end
+    macro_end = macro_start + len(MACRO_FEATURES)
+    sidechain_start = macro_end
+    sidechain_end = sidechain_start + len(SIDECHAIN_FEATURES)
+    mezzo_start = sidechain_end
+    mezzo_end = mezzo_start + len(MEZZO_FEATURES) * 8
+    micro_start = mezzo_end
+    micro_end = micro_start + len(MICRO_USED_FEATURES) * 48
 
-    macro = _window_samples(data[:, 6:15], MACRO_LOOKBACK).transpose(0, 2, 1)
-    sidechain = _window_samples(data[:, 15:23], MACRO_LOOKBACK).transpose(0, 2, 1)
+    macro = _window_samples(data[:, macro_start:macro_end], MACRO_LOOKBACK).transpose(0, 2, 1)
+    sidechain = _window_samples(data[:, sidechain_start:sidechain_end], MACRO_LOOKBACK).transpose(0, 2, 1)
 
-    mezzo_flat = data[:, 23 : 23 + len(MEZZO_FEATURES) * 8]
+    mezzo_flat = data[:, mezzo_start:mezzo_end]
     mezzo_windows = _window_samples(mezzo_flat, MEZZO_DAYS)[start_idx - MEZZO_DAYS + 1 :]
     mezzo = (
         mezzo_windows
@@ -67,8 +76,7 @@ def _build_packed_payload(data: np.ndarray) -> dict[str, np.ndarray]:
         .astype(np.float32, copy=False)
     )
 
-    micro_start = 23 + len(MEZZO_FEATURES) * 8
-    micro_flat = data[:, micro_start : micro_start + len(MICRO_USED_FEATURES) * 48]
+    micro_flat = data[:, micro_start:micro_end]
     micro_windows = _window_samples(micro_flat, MICRO_DAYS)[start_idx - MICRO_DAYS + 1 :]
     micro = (
         micro_windows
@@ -79,7 +87,7 @@ def _build_packed_payload(data: np.ndarray) -> dict[str, np.ndarray]:
     )
 
     date = np.asarray(data[start_idx:, 0], dtype=np.float32)
-    label = np.asarray(data[start_idx:, 2:6], dtype=np.float32)
+    label = np.asarray(data[start_idx:, 2:label_end], dtype=np.float32)
     keep = np.asarray(sample_valid, dtype=bool)
 
     return {

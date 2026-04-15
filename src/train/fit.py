@@ -39,7 +39,8 @@ from config.config import val_ratio as DEFAULT_VAL_RATIO
 from config.config import val_samples_per_epoch as DEFAULT_VAL_SAMPLES_PER_EPOCH
 from config.config import weight_decay as DEFAULT_WEIGHT_DECAY
 from src.models import MultiScaleFusionNet
-from src.models.losses import LaplaceLSELoss
+from src.models.losses import SingleTaskLoss
+from src.task_labels import TASK_LABELS, canonical_task_label
 from src.train.dataset import create_train_val_datasets
 from src.train.train import train_one_epoch
 from src.train.ui import TrainingUI
@@ -112,6 +113,7 @@ def _checkpoint_paths(run_dir: Path) -> dict[str, Path]:
 def _save_checkpoint(
     path: Path,
     *,
+    label: str,
     epoch: int,
     model: torch.nn.Module,
     criterion: torch.nn.Module,
@@ -128,6 +130,7 @@ def _save_checkpoint(
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
+            "label": label,
             "epoch": epoch,
             "run_name": run_name,
             "model_state_dict": model.state_dict(),
@@ -158,6 +161,7 @@ def _resolve_checkpoint_path(load_checkpoint: str | Path) -> Path:
 def _load_checkpoint_state(
     load_checkpoint: str | Path,
     *,
+    expected_label: str,
     model: torch.nn.Module,
     criterion: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
@@ -166,6 +170,12 @@ def _load_checkpoint_state(
 ) -> dict[str, Any]:
     checkpoint_path = _resolve_checkpoint_path(load_checkpoint)
     state = torch.load(checkpoint_path, map_location=device)
+    checkpoint_label = state.get("label")
+    if checkpoint_label != expected_label:
+        raise ValueError(
+            "Checkpoint label mismatch. "
+            f"Expected {expected_label!r}, found {checkpoint_label!r} in {checkpoint_path}."
+        )
     model.load_state_dict(state["model_state_dict"])
     if state.get("criterion_state_dict") is not None:
         criterion.load_state_dict(state["criterion_state_dict"])
@@ -173,6 +183,13 @@ def _load_checkpoint_state(
     if scheduler is not None and state.get("scheduler_state_dict") is not None:
         scheduler.load_state_dict(state["scheduler_state_dict"])
     return state
+
+
+def _run_name_from_checkpoint(load_checkpoint: str | Path) -> str:
+    checkpoint_path = Path(load_checkpoint)
+    if checkpoint_path.is_dir():
+        return checkpoint_path.name
+    return checkpoint_path.parent.name if checkpoint_path.parent.name else checkpoint_path.stem
 
 
 def _grouped_epoch_indices(
@@ -267,6 +284,7 @@ def fit(
     grad_clip: float | None = DEFAULT_GRAD_CLIP,
     checkpoint_path: str | Path | None = None,
     checkpoint_dir: str | Path = DEFAULT_CHECKPOINT_DIR,
+    label: str = "Edge",
     run_name: str = "default",
     load_checkpoint: str | Path | None = None,
     save_every: int = DEFAULT_SAVE_EVERY,
@@ -283,6 +301,7 @@ def fit(
     cuda_graph_warmup_steps: int = DEFAULT_CUDA_GRAPH_WARMUP_STEPS,
 ) -> dict[str, Any]:
     """Run the full training loop."""
+    resolved_label = canonical_task_label(label)
     if not bool(use_cuda_graph):
         raise RuntimeError("Non-CUDA-Graph training is disabled. Set use_cuda_graph=True.")
     if not (device.startswith("cuda") and torch.cuda.is_available()):
@@ -319,6 +338,7 @@ def fit(
             visualizer.attach(model)
             visualizer.log_params(
                 {
+                    "label": resolved_label,
                     "run_name": run_name,
                     "checkpoint_dir": str(run_dir),
                     "batch_size": train_loader.batch_size,
@@ -330,19 +350,13 @@ def fit(
                     "val_samples_per_epoch": val_samples_per_epoch,
                     "log_every": log_every,
                     "grad_clip": grad_clip,
-                    "freeze_min_steps": getattr(criterion, "min_freeze_steps", None),
-                    "freeze_patience_steps": getattr(criterion, "patience_steps", None),
-                    "freeze_ema_beta": getattr(criterion, "ema_beta", None),
-                    "freeze_s0_S": float(getattr(criterion, "s0_S").item()) if hasattr(criterion, "s0_S") else None,
-                    "freeze_s0_M": float(getattr(criterion, "s0_M").item()) if hasattr(criterion, "s0_M") else None,
-                    "freeze_s0_MDD": float(getattr(criterion, "s0_MDD").item()) if hasattr(criterion, "s0_MDD") else None,
-                    "freeze_s0_RV": float(getattr(criterion, "s0_RV").item()) if hasattr(criterion, "s0_RV") else None,
                 }
             )
 
         if load_checkpoint is not None:
             resume_state = _load_checkpoint_state(
                 load_checkpoint,
+                expected_label=resolved_label,
                 model=model,
                 criterion=criterion,
                 optimizer=optimizer,
@@ -445,6 +459,7 @@ def fit(
 
                 _save_checkpoint(
                     checkpoint_paths["best"],
+                    label=resolved_label,
                     epoch=epoch,
                     model=model,
                     criterion=criterion,
@@ -461,6 +476,7 @@ def fit(
                 if checkpoint_file != checkpoint_paths["latest"] and checkpoint_file != checkpoint_paths["best"]:
                     _save_checkpoint(
                         checkpoint_file,
+                        label=resolved_label,
                         epoch=epoch,
                         model=model,
                         criterion=criterion,
@@ -479,6 +495,7 @@ def fit(
 
             _save_checkpoint(
                 checkpoint_paths["latest"],
+                label=resolved_label,
                 epoch=epoch,
                 model=model,
                 criterion=criterion,
@@ -496,6 +513,7 @@ def fit(
             if save_every > 0 and (epoch + 1) % save_every == 0:
                 _save_checkpoint(
                     run_dir / f"epoch_{epoch + 1:03d}.pt",
+                    label=resolved_label,
                     epoch=epoch,
                     model=model,
                     criterion=criterion,
@@ -539,6 +557,7 @@ def fit(
 
 def run_training(
     *,
+    label: str,
     device: str | None = None,
     batch_size: int = DEFAULT_BATCH_SIZE,
     learning_rate: float = DEFAULT_LEARNING_RATE,
@@ -553,7 +572,7 @@ def run_training(
     max_codes: int | None = None,
     checkpoint_path: str | Path | None = None,
     checkpoint_dir: str | Path = DEFAULT_CHECKPOINT_DIR,
-    run_name: str = "default",
+    run_name: str | None = None,
     load_checkpoint: str | Path | None = None,
     save_every: int = DEFAULT_SAVE_EVERY,
     patience: int | None = DEFAULT_EARLY_STOPPING_PATIENCE,
@@ -573,6 +592,10 @@ def run_training(
     cuda_graph_warmup_steps: int = DEFAULT_CUDA_GRAPH_WARMUP_STEPS,
 ) -> dict[str, Any]:
     """Build datasets, model, loss, optimizer, and run training."""
+    resolved_label = canonical_task_label(label)
+    if (run_name is None) == (load_checkpoint is None):
+        raise ValueError("Exactly one of run_name or load_checkpoint must be provided.")
+    resolved_run_name = str(run_name) if run_name is not None else _run_name_from_checkpoint(load_checkpoint)
     torch.manual_seed(seed)
     if not bool(use_cuda_graph):
         raise RuntimeError("Non-CUDA-Graph training is disabled. Set use_cuda_graph=True.")
@@ -609,8 +632,8 @@ def run_training(
         **loader_kwargs,
     )
 
-    model = MultiScaleFusionNet()
-    criterion = LaplaceLSELoss().to(resolved_device)
+    model = MultiScaleFusionNet(task_label=resolved_label)
+    criterion = SingleTaskLoss(task_label=resolved_label).to(resolved_device)
     optimizer = AdamW(
         model.parameters(),
         lr=learning_rate,
@@ -637,7 +660,8 @@ def run_training(
         grad_clip=grad_clip,
         checkpoint_path=checkpoint_path,
         checkpoint_dir=checkpoint_dir,
-        run_name=run_name,
+        label=resolved_label,
+        run_name=resolved_run_name,
         load_checkpoint=load_checkpoint,
         save_every=save_every,
         patience=patience,
@@ -656,11 +680,13 @@ def run_training(
 
 def smoke_test(
     *,
+    label: str = "Edge",
     device: str | None = None,
     max_codes: int = 1,
     memory_mode: str = DEFAULT_MEMORY_MODE,
 ) -> dict[str, Any]:
     """Run one batch through model and loss for shape verification."""
+    resolved_label = canonical_task_label(label)
     resolved_device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     train_dataset, _ = create_train_val_datasets(
         val_ratio=0.0,
@@ -682,8 +708,8 @@ def smoke_test(
     )
     batch = {key: value.to(resolved_device) for key, value in batch.items()}
 
-    model = MultiScaleFusionNet().to(resolved_device)
-    criterion = LaplaceLSELoss().to(resolved_device)
+    model = MultiScaleFusionNet(task_label=resolved_label).to(resolved_device)
+    criterion = SingleTaskLoss(task_label=resolved_label).to(resolved_device)
     outputs = model(
         batch["macro"],
         batch["mezzo"],
@@ -693,6 +719,7 @@ def smoke_test(
     loss, metrics = criterion(outputs, batch)
 
     return {
+        "label": resolved_label,
         "macro_shape": tuple(batch["macro"].shape),
         "mezzo_shape": tuple(batch["mezzo"].shape),
         "micro_shape": tuple(batch["micro"].shape),
@@ -702,17 +729,14 @@ def smoke_test(
         "S_shape": tuple(outputs["S"].shape),
         "z_d_shape": tuple(outputs["z_d"].shape),
         "z_v_shape": tuple(outputs["z_v"].shape),
-        "pred_S_shape": tuple(outputs["pred_S"].shape),
-        "pred_M_shape": tuple(outputs["pred_M"].shape),
-        "pred_MDD_shape": tuple(outputs["pred_MDD"].shape),
-        "pred_RV_shape": tuple(outputs["pred_RV"].shape),
+        "head_out_shape": tuple(outputs["head_out"].shape),
         "loss": float(loss.detach().item()),
         "metrics": {key: float(value.detach().item()) for key, value in metrics.items()},
     }
 
 
 def main() -> None:
-    print(run_training())
+    print(run_training(label=TASK_LABELS[0], run_name="default"))
 
 
 if __name__ == "__main__":
