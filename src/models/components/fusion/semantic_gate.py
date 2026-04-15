@@ -13,6 +13,10 @@ def _should_record_debug() -> bool:
     return not (torch.cuda.is_available() and torch.cuda.is_current_stream_capturing())
 
 
+def _token_l2_mean(x: Tensor) -> Tensor:
+    return x.detach().float().norm(dim=-1).mean()
+
+
 class _GEGLU(nn.Module):
     """GEGLU activation for token MLPs."""
 
@@ -34,7 +38,7 @@ class _SemanticFusionBlock(nn.Module):
         self.last_term_norms: dict[str, Tensor] = {}
         self.last_gate_activation: Tensor | None = None
 
-    def forward(self, x: Tensor, summary: Tensor) -> Tensor:
+    def forward(self, x: Tensor, summary: Tensor, *, return_debug: bool = False) -> Tensor | tuple[Tensor, dict[str, Tensor]]:
         product = x * summary
         difference = x - summary
         interaction = torch.cat((x, summary, product, difference), dim=-1)
@@ -52,7 +56,17 @@ class _SemanticFusionBlock(nn.Module):
         if record_debug:
             self.last_gate_activation = gate_act.detach()
         fused = value * gate_act
-        return x + self.fc_out(self.dropout(fused))
+        next_x = x + self.fc_out(self.dropout(fused))
+        if not return_debug:
+            return next_x
+        return next_x, {
+            "x_norm": _token_l2_mean(x),
+            "summary_norm": _token_l2_mean(summary),
+            "product_norm": _token_l2_mean(product),
+            "difference_norm": _token_l2_mean(difference),
+            "gate_norm": _token_l2_mean(gate_act),
+            "out_norm": _token_l2_mean(next_x),
+        }
 
 
 class SemanticGatedChannelFusion(nn.Module):
@@ -72,7 +86,13 @@ class SemanticGatedChannelFusion(nn.Module):
         self.blocks = nn.ModuleList([_SemanticFusionBlock(dim, dropout=dropout) for _ in range(num_layers)])
         self.last_side_global: Tensor | None = None
 
-    def forward(self, x: Tensor, side_tokens: Tensor) -> Tensor:
+    def forward(
+        self,
+        x: Tensor,
+        side_tokens: Tensor,
+        *,
+        return_debug: bool = False,
+    ) -> Tensor | tuple[Tensor, dict[str, Tensor]]:
         if x.ndim != 3 or side_tokens.ndim != 3:
             raise ValueError(
                 f"Expected x and side_tokens to be [B, K, D], got {tuple(x.shape)} and {tuple(side_tokens.shape)}"
@@ -87,9 +107,19 @@ class SemanticGatedChannelFusion(nn.Module):
             self.last_side_global = side_global.detach()
         side_broadcast = side_global.unsqueeze(1).expand(-1, x.shape[1], -1)
         tokens = x
-        for block in self.blocks:
-            tokens = block(tokens, side_broadcast)
-        return tokens
+        if not return_debug:
+            for block in self.blocks:
+                tokens = block(tokens, side_broadcast)
+            return tokens
+
+        debug: dict[str, Tensor] = {
+            "fusion/side_global_norm": _token_l2_mean(side_global),
+        }
+        for block_idx, block in enumerate(self.blocks, start=1):
+            tokens, block_debug = block(tokens, side_broadcast, return_debug=True)
+            for name, value in block_debug.items():
+                debug[f"fusion/diffusion_block{block_idx}_{name}"] = value
+        return tokens, debug
 
     def get_last_debug(self) -> dict[str, object]:
         return {

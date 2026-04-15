@@ -65,6 +65,14 @@ _REALTIME_KEYS = (
     "tfn/feat_norm",
     "decoder/head_out_std",
 )
+_DYNAMIC_REALTIME_PREFIXES = (
+    "encoder/",
+    "map/",
+    "fusion/diffusion_block",
+)
+_DYNAMIC_REALTIME_EXACT = {
+    "fusion/side_global_norm",
+}
 
 
 def _tracking_uri(repo: str | Path) -> str:
@@ -332,41 +340,45 @@ class MLflowVisualizer:
         task = detect_task_from_outputs(outputs)
         device = next(value.device for value in outputs.values() if isinstance(value, Tensor))
         metrics: dict[str, Tensor] = {}
+        for key, value in outputs.items():
+            if not isinstance(value, Tensor) or not key.startswith("diag/"):
+                continue
+            metrics[key.removeprefix("diag/")] = _as_scalar_tensor(value, device)
         for key in ("loss_total", "loss_task"):
             if key in loss_metrics:
                 metrics[key] = _as_scalar_tensor(loss_metrics[key], device)
         if task == "Persist":
             pred = outputs["pred_Persist"]
             target = batch["label_Persist"]
-            metrics["mae/Persist"] = torch.mean(torch.abs(pred - target)).detach().float()
-            metrics["brier/Persist"] = torch.mean((pred - target).float() ** 2).detach()
-            metrics["prob_mean/Persist"] = pred.detach().float().mean()
-            metrics["unc_mean/Persist"] = outputs["Persist_unc"].detach().float().mean()
+            metrics.setdefault("mae/Persist", torch.mean(torch.abs(pred - target)).detach().float())
+            metrics.setdefault("brier/Persist", torch.mean((pred - target).float() ** 2).detach())
+            metrics.setdefault("prob_mean/Persist", pred.detach().float().mean())
+            metrics.setdefault("unc_mean/Persist", outputs["Persist_unc"].detach().float().mean())
         else:
             pred = outputs[f"pred_{task}"]
             target = batch[f"label_{task}"]
-            metrics[f"mae/{task}"] = torch.mean(torch.abs(pred - target)).detach().float()
-            metrics[f"unc_mean/{task}"] = outputs[f"unc_{task}"].detach().float().mean()
+            metrics.setdefault(f"mae/{task}", torch.mean(torch.abs(pred - target)).detach().float())
+            metrics.setdefault(f"unc_mean/{task}", outputs[f"unc_{task}"].detach().float().mean())
         loss_key = f"loss_{task}"
         if loss_key in loss_metrics:
             metrics[f"loss_task/{task}"] = _as_scalar_tensor(loss_metrics[loss_key], device)
         nu_key = f"nu_{task}"
         if nu_key in loss_metrics:
             metrics[f"nu/{task}"] = _as_scalar_tensor(loss_metrics[nu_key], device)
-        metrics["token/M1_norm"] = _channelwise_l2_mean(outputs["M1"], channel_dim=2)
-        metrics["token/M2_norm"] = _channelwise_l2_mean(outputs["M2"], channel_dim=2)
-        metrics["token/S_norm"] = _channelwise_l2_mean(outputs["S"], channel_dim=2)
-        metrics["fusion/Z0_norm"] = _channelwise_l2_mean(outputs["Z0"], channel_dim=2)
-        metrics["fusion/Z1_norm"] = _channelwise_l2_mean(outputs["Z1"], channel_dim=2)
-        metrics["fusion/drift_delta"] = _mean_abs_delta(outputs["Z0"], outputs["M1"])
-        metrics["fusion/diffusion_delta"] = _mean_abs_delta(outputs["Z1"], outputs["M2"])
-        metrics["summary/z_d_norm"] = _channelwise_l2_mean(outputs["z_d"], channel_dim=1)
-        metrics["summary/z_v_norm"] = _channelwise_l2_mean(outputs["z_v"], channel_dim=1)
-        metrics["summary/cos_zd_zv"] = _vector_cosine(outputs["z_d"], outputs["z_v"])
-        metrics["tfn/feat_norm"] = _channelwise_l2_mean(outputs["tfn_feat"], channel_dim=1)
-        metrics["decoder/head_out_std"] = _tensor_std(outputs["head_out"])
-        metrics["token/cos_M1_S"] = _pooled_cosine(outputs["M1"], outputs["S"])
-        metrics["token/cos_M2_S"] = _pooled_cosine(outputs["M2"], outputs["S"])
+        metrics.setdefault("token/M1_norm", _channelwise_l2_mean(outputs["M1"], channel_dim=2))
+        metrics.setdefault("token/M2_norm", _channelwise_l2_mean(outputs["M2"], channel_dim=2))
+        metrics.setdefault("token/S_norm", _channelwise_l2_mean(outputs["S"], channel_dim=2))
+        metrics.setdefault("fusion/Z0_norm", _channelwise_l2_mean(outputs["Z0"], channel_dim=2))
+        metrics.setdefault("fusion/Z1_norm", _channelwise_l2_mean(outputs["Z1"], channel_dim=2))
+        metrics.setdefault("fusion/drift_delta", _mean_abs_delta(outputs["Z0"], outputs["M1"]))
+        metrics.setdefault("fusion/diffusion_delta", _mean_abs_delta(outputs["Z1"], outputs["M2"]))
+        metrics.setdefault("summary/z_d_norm", _channelwise_l2_mean(outputs["z_d"], channel_dim=1))
+        metrics.setdefault("summary/z_v_norm", _channelwise_l2_mean(outputs["z_v"], channel_dim=1))
+        metrics.setdefault("summary/cos_zd_zv", _vector_cosine(outputs["z_d"], outputs["z_v"]))
+        metrics.setdefault("tfn/feat_norm", _channelwise_l2_mean(outputs["tfn_feat"], channel_dim=1))
+        metrics.setdefault("decoder/head_out_std", _tensor_std(outputs["head_out"]))
+        metrics.setdefault("token/cos_M1_S", _pooled_cosine(outputs["M1"], outputs["S"]))
+        metrics.setdefault("token/cos_M2_S", _pooled_cosine(outputs["M2"], outputs["S"]))
         return {key: value.detach() for key, value in metrics.items()}
 
     def collect_low_frequency_metrics(
@@ -398,7 +410,11 @@ class MLflowVisualizer:
         if param_global_norm_value is not None:
             values["param_global_norm"] = float(param_global_norm_value)
         ema_metrics: dict[str, float] = {}
-        for key in _REALTIME_KEYS + ("lr", "grad_global_norm", "param_global_norm"):
+        tracked_keys = list(_REALTIME_KEYS) + ["lr", "grad_global_norm", "param_global_norm"]
+        for key in values:
+            if key in _DYNAMIC_REALTIME_EXACT or key.startswith(_DYNAMIC_REALTIME_PREFIXES):
+                tracked_keys.append(key)
+        for key in dict.fromkeys(tracked_keys):
             if key not in values:
                 continue
             ema_key = f"{stage}:{key}"

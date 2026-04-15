@@ -32,6 +32,12 @@ from src.models.components.trunks import JointNet2D
 from src.task_labels import canonical_task_label
 
 
+def _channelwise_l2_mean(x: Tensor, *, channel_dim: int) -> Tensor:
+    moved = torch.movedim(x.detach(), channel_dim, -1).float()
+    flat = moved.reshape(-1, moved.shape[-1])
+    return flat.norm(dim=-1).mean()
+
+
 class MultiScaleFusionNet(nn.Module):
     """Fuse multiscale market features into one label-specific prediction head."""
 
@@ -188,7 +194,7 @@ class MultiScaleFusionNet(nn.Module):
         s = self.side_resampler(e4.transpose(1, 2))
 
         z0 = self.drift_fusion(m1, s)
-        z1 = self.diffusion_fusion(m2, s)
+        z1, diffusion_diag = self.diffusion_fusion(m2, s, return_debug=True)
 
         z_d = self.drift_summary_head(z0)
         z_v = self.diffusion_summary_head(z1)
@@ -207,7 +213,16 @@ class MultiScaleFusionNet(nn.Module):
             "z_v": z_v,
             "tfn_feat": tfn_feat,
             "head_out": head_out,
+            "diag/encoder/E1_norm": _channelwise_l2_mean(e1, channel_dim=1),
+            "diag/encoder/E2_norm": _channelwise_l2_mean(e2, channel_dim=1),
+            "diag/encoder/E3_norm": _channelwise_l2_mean(e3, channel_dim=1),
+            "diag/encoder/E4_norm": _channelwise_l2_mean(e4, channel_dim=1),
+            "diag/map/T12_norm": _channelwise_l2_mean(t12, channel_dim=1),
+            "diag/map/T23_norm": _channelwise_l2_mean(t23, channel_dim=1),
+            "diag/map/H12_norm": _channelwise_l2_mean(h12, channel_dim=1),
+            "diag/map/H23_norm": _channelwise_l2_mean(h23, channel_dim=1),
         }
+        outputs.update({f"diag/{key}": value for key, value in diffusion_diag.items()})
 
         if self.task_label == "Edge":
             pred_edge = head_out[:, 0]
