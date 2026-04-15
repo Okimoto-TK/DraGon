@@ -9,6 +9,12 @@ from torch import Tensor, nn
 from src.models.components.normalization import LayerNorm2d
 
 
+def _channelwise_l2_mean(x: Tensor) -> Tensor:
+    moved = torch.movedim(x.detach(), 1, -1)
+    flat = moved.reshape(-1, moved.shape[-1]).float()
+    return flat.norm(dim=-1).mean()
+
+
 class EfficientViTJointBlock(nn.Module):
     """One EfficientViT-style local+global block without any downsampling."""
 
@@ -76,6 +82,7 @@ class EfficientViTJointBlock(nn.Module):
             bias=True,
         )
         self.local_fuse = nn.Conv2d(channels, channels, kernel_size=1, stride=1, bias=True)
+        self.local_out_norm = LayerNorm2d(channels)
 
         # Branch B: lightweight global linear attention
         self.qkv_pw = nn.Conv2d(channels, self.attn_dim * 3, kernel_size=1, stride=1, bias=True)
@@ -134,9 +141,11 @@ class EfficientViTJointBlock(nn.Module):
             bias=True,
         )
         self.global_out = nn.Conv2d(self.attn_dim, channels, kernel_size=1, stride=1, bias=True)
+        self.global_branch_norm = LayerNorm2d(channels)
 
         # Fuse A+B, residual
         self.fuse_pw = nn.Conv2d(channels, channels, kernel_size=1, stride=1, bias=True)
+        self.fusion_res_norm = LayerNorm2d(channels)
 
         # Conv-FFN
         hidden_dim = channels * ffn_mult
@@ -153,6 +162,7 @@ class EfficientViTJointBlock(nn.Module):
         )
         self.ffn_act = nn.GELU() if ffn_act == "gelu" else nn.SiLU()
         self.ffn_shrink = nn.Conv2d(hidden_dim, channels, kernel_size=1, stride=1, bias=True)
+        self.output_norm = LayerNorm2d(channels)
 
     def _linear_attention(self, q: Tensor, k: Tensor, v: Tensor) -> Tensor:
         # q/k/v: [B, H, N, Dh], ReLU linear attention (no softmax).
@@ -164,7 +174,7 @@ class EfficientViTJointBlock(nn.Module):
         out = torch.einsum("bhnd,bhde->bhne", q, kv) / denom
         return out
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor, *, return_debug: bool = False) -> Tensor | tuple[Tensor, dict[str, Tensor]]:
         if x.ndim != 4:
             raise ValueError(f"Expected input shape [B, C, H, W], got {tuple(x.shape)}")
         if x.shape[1] != self.channels:
@@ -179,7 +189,7 @@ class EfficientViTJointBlock(nn.Module):
         local = self.local_dw3(local_seed) + self.local_dw5(local_seed)
         if self.include_dilated_local:
             local = local + self.local_dilated3(local_seed)
-        local = self.local_fuse(local)
+        local = self.local_out_norm(self.local_fuse(local))
 
         # Global branch
         qkv = self.qkv_pw(x)
@@ -194,10 +204,11 @@ class EfficientViTJointBlock(nn.Module):
 
         attn_out = self._linear_attention(q, k, v)
         attn_out = attn_out.transpose(2, 3).contiguous().view(b, self.attn_dim, h, w)
-        global_branch = self.global_out(attn_out)
+        global_branch = self.global_branch_norm(self.global_out(attn_out))
 
         # Fuse + residual
-        x = residual + self.fuse_pw(local + global_branch)
+        fusion_residual_out = residual + self.fuse_pw(local + global_branch)
+        x = self.fusion_res_norm(fusion_residual_out)
 
         # Conv-FFN + residual
         ffn_residual = x
@@ -206,7 +217,18 @@ class EfficientViTJointBlock(nn.Module):
         x = self.ffn_dw3(x)
         x = self.ffn_act(x)
         x = self.ffn_shrink(x)
-        return ffn_residual + x
+        residual_out = ffn_residual + x
+        out = self.output_norm(residual_out)
+        if not return_debug:
+            return out
+        return out, {
+            "local_norm": _channelwise_l2_mean(local),
+            "global_norm": _channelwise_l2_mean(global_branch),
+            "fusion_residual_out_norm": _channelwise_l2_mean(fusion_residual_out),
+            "fusion_out_norm": _channelwise_l2_mean(ffn_residual),
+            "residual_out_norm": _channelwise_l2_mean(residual_out),
+            "out_norm": _channelwise_l2_mean(out),
+        }
 
 
 class JointNet2D(nn.Module):
@@ -241,6 +263,7 @@ class JointNet2D(nn.Module):
             nn.Conv2d(channels, channels, kernel_size=1, stride=1, bias=True),
             nn.SiLU(),
         )
+        self.pre_norm = LayerNorm2d(channels)
         self.blocks = nn.ModuleList(
             [
                 EfficientViTJointBlock(
@@ -258,18 +281,33 @@ class JointNet2D(nn.Module):
             LayerNorm2d(channels),
             nn.Conv2d(channels, channels, kernel_size=1, stride=1, bias=True),
         )
+        self.trunk_norm = LayerNorm2d(channels)
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor, *, return_debug: bool = False) -> Tensor | tuple[Tensor, dict[str, Tensor]]:
         if x.ndim != 4:
             raise ValueError(f"Expected input shape [B, C, H, W], got {tuple(x.shape)}")
         if x.shape[1] != self.channels:
             raise ValueError(f"Expected {self.channels} channels, got {x.shape[1]}")
 
-        trunk = self.pre(x)
-        for block in self.blocks:
-            trunk = block(trunk)
-        trunk = self.post(trunk)
-        return x + trunk
+        trunk = self.pre_norm(self.pre(x))
+        if not return_debug:
+            for block in self.blocks:
+                trunk = block(trunk)
+            trunk = self.trunk_norm(self.post(trunk))
+            return x + trunk
+
+        debug: dict[str, Tensor] = {
+            "pre_norm": _channelwise_l2_mean(trunk),
+        }
+        for block_idx, block in enumerate(self.blocks, start=1):
+            trunk, block_debug = block(trunk, return_debug=True)
+            for name, value in block_debug.items():
+                debug[f"block{block_idx}_{name}"] = value
+        trunk = self.trunk_norm(self.post(trunk))
+        out = x + trunk
+        debug["trunk_norm"] = _channelwise_l2_mean(trunk)
+        debug["out_norm"] = _channelwise_l2_mean(out)
+        return out, debug
 
 
 __all__ = ["EfficientViTJointBlock", "JointNet2D"]

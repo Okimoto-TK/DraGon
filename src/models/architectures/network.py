@@ -181,7 +181,7 @@ class MultiScaleFusionNet(nn.Module):
         e1 = self.macro_encoder(macro)
         e2 = self.mezzo_encoder(mezzo)
         e3 = self.micro_encoder(micro)
-        e4 = self.side_encoder(side)
+        e4, side_diag = self.side_encoder(side, return_debug=True)
 
         u1 = e1.transpose(1, 2)
         u2 = e2.transpose(1, 2)
@@ -190,8 +190,8 @@ class MultiScaleFusionNet(nn.Module):
         t12 = self.pairwise_lmf_12(u1, u2)
         t23 = self.pairwise_lmf_23(u2, u3)
 
-        h12 = self.jointnet_12(t12)
-        h23 = self.jointnet_23(t23)
+        h12, joint12_diag = self.jointnet_12(t12, return_debug=True)
+        h23, joint23_diag = self.jointnet_23(t23, return_debug=True)
 
         m1 = self.m1_token_norm(self.m1_token_proj(self.map_to_tokens_12(h12)))
         m2 = self.m2_token_norm(self.m2_token_proj(self.map_to_tokens_23(h23)))
@@ -230,6 +230,9 @@ class MultiScaleFusionNet(nn.Module):
         outputs.update({f"diag/{key}": value for key, value in diffusion_diag.items()})
         outputs.update({f"diag/{key}": value for key, value in drift_summary_diag.items()})
         outputs.update({f"diag/{key}": value for key, value in diffusion_summary_diag.items()})
+        outputs.update({f"diag/{key}": value for key, value in side_diag.items()})
+        outputs.update({f"diag/map/joint12_{key}": value for key, value in joint12_diag.items()})
+        outputs.update({f"diag/map/joint23_{key}": value for key, value in joint23_diag.items()})
 
         if self.task_label == "Edge":
             pred_edge = head_out[:, 0]

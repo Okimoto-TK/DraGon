@@ -29,12 +29,14 @@ class _PreNormSelfAttentionBlock(nn.Module):
 
         self.norm1 = nn.LayerNorm(dim)
         self.attn = nn.MultiheadAttention(embed_dim=dim, num_heads=num_heads, batch_first=True)
+        self.attn_res_norm = nn.LayerNorm(dim)
         self.norm2 = nn.LayerNorm(dim)
         self.ffn = nn.Sequential(
             nn.Linear(dim, dim * ff_mult),
             nn.GELU(),
             nn.Linear(dim * ff_mult, dim),
         )
+        self.output_norm = nn.LayerNorm(dim)
         self.last_attn: Tensor | None = None
 
     def forward(self, x: Tensor, *, return_debug: bool = False) -> Tensor | tuple[Tensor, dict[str, Tensor]]:
@@ -49,11 +51,17 @@ class _PreNormSelfAttentionBlock(nn.Module):
         )
         if record_debug:
             self.last_attn = attn.detach()
-        x = x + attn_out
-        x = x + self.ffn(self.norm2(x))
+        attn_residual_out = x + attn_out
+        attn_out_norm = self.attn_res_norm(attn_residual_out)
+        ffn_residual_out = attn_out_norm + self.ffn(self.norm2(attn_out_norm))
+        x = self.output_norm(ffn_residual_out)
         if not return_debug:
             return x
         return x, {
+            "attn_residual_out_norm": _token_l2_mean(attn_residual_out),
+            "attn_out_norm": _token_l2_mean(attn_out_norm),
+            "ffn_residual_out_norm": _token_l2_mean(ffn_residual_out),
+            "out_norm": _token_l2_mean(x),
             "tokens_norm": _token_l2_mean(x),
             "summary_tokens_norm": _token_l2_mean(x[:, :1, :]),
         }

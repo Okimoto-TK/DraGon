@@ -6,6 +6,12 @@ from config.config import lmf_dim as DEFAULT_LMF_DIM
 from config.config import side_hidden_dim as DEFAULT_SIDE_HIDDEN_DIM
 from torch import Tensor, nn
 
+from src.models.components.normalization import LayerNorm1d
+
+
+def _token_l2_mean(x: Tensor) -> Tensor:
+    return x.detach().float().norm(dim=-1).mean()
+
 
 class _PreNormTransformerBlock(nn.Module):
     """A compact pre-norm Transformer encoder block."""
@@ -35,6 +41,7 @@ class _PreNormTransformerBlock(nn.Module):
             dropout=dropout,
             batch_first=True,
         )
+        self.attn_res_norm = nn.LayerNorm(dim)
         self.norm2 = nn.LayerNorm(dim)
         self.ffn = nn.Sequential(
             nn.Linear(dim, dim * ff_mult),
@@ -42,13 +49,23 @@ class _PreNormTransformerBlock(nn.Module):
             nn.Dropout(dropout) if dropout > 0.0 else nn.Identity(),
             nn.Linear(dim * ff_mult, dim),
         )
+        self.output_norm = nn.LayerNorm(dim)
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor, *, return_debug: bool = False) -> Tensor | tuple[Tensor, dict[str, Tensor]]:
         attn_in = self.norm1(x)
         attn_out, _ = self.attn(attn_in, attn_in, attn_in, need_weights=False)
-        x = x + attn_out
-        x = x + self.ffn(self.norm2(x))
-        return x
+        attn_residual_out = x + attn_out
+        attn_out_norm = self.attn_res_norm(attn_residual_out)
+        ffn_residual_out = attn_out_norm + self.ffn(self.norm2(attn_out_norm))
+        x = self.output_norm(ffn_residual_out)
+        if not return_debug:
+            return x
+        return x, {
+            "attn_residual_out_norm": _token_l2_mean(attn_residual_out),
+            "attn_out_norm": _token_l2_mean(attn_out_norm),
+            "ffn_residual_out_norm": _token_l2_mean(ffn_residual_out),
+            "out_norm": _token_l2_mean(x),
+        }
 
 
 class _PatchBranch(nn.Module):
@@ -139,6 +156,7 @@ class SidechainEncoder(nn.Module):
             nn.GELU(),
             nn.Conv1d(resolved_d_model, resolved_d_model, kernel_size=1, stride=1),
         )
+        self.channel_lift_norm = LayerNorm1d(resolved_d_model)
         self.branch_2 = _PatchBranch(resolved_d_model, patch_size=2)
         self.branch_4 = _PatchBranch(resolved_d_model, patch_size=4)
         self.branch_8 = _PatchBranch(resolved_d_model, patch_size=8)
@@ -155,7 +173,7 @@ class SidechainEncoder(nn.Module):
         )
 
         self.pos_embed = nn.Parameter(torch.randn(1, 64, resolved_d_model) * 0.02)
-        self.token_norm = nn.LayerNorm(resolved_d_model)
+        self.branch_fuse_norm = nn.LayerNorm(resolved_d_model)
         self.encoder = nn.ModuleList(
             [
                 _PreNormTransformerBlock(
@@ -172,7 +190,7 @@ class SidechainEncoder(nn.Module):
             nn.Linear(resolved_d_model, lmf_dim),
         )
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor, *, return_debug: bool = False) -> Tensor | tuple[Tensor, dict[str, Tensor]]:
         if x.ndim != 3:
             raise ValueError(f"Expected input shape [B, C, L], got {tuple(x.shape)}")
         if x.shape[1] != self.in_channels:
@@ -180,7 +198,7 @@ class SidechainEncoder(nn.Module):
         if x.shape[2] != 64:
             raise ValueError(f"Expected sequence length 64, got {x.shape[2]}")
 
-        lifted = self.channel_lift(x)  # [B, d_model, 64]
+        lifted = self.channel_lift_norm(self.channel_lift(x))  # [B, d_model, 64]
         base_tokens = lifted.transpose(1, 2)  # [B, 64, d_model]
 
         branch2 = self.branch_2(base_tokens)
@@ -194,13 +212,27 @@ class SidechainEncoder(nn.Module):
         gates = torch.softmax(local_logits + global_logits, dim=-1)
 
         fused = torch.sum(branch_stack * gates.unsqueeze(-1), dim=2)
-        tokens = self.token_norm(fused + base_tokens + self.pos_embed)
+        tokens = self.branch_fuse_norm(fused + base_tokens + self.pos_embed)
 
-        for layer in self.encoder:
-            tokens = layer(tokens)
+        if not return_debug:
+            for layer in self.encoder:
+                tokens = layer(tokens)
+        else:
+            debug: dict[str, Tensor] = {
+                "encoder/side_channel_lift_norm": _token_l2_mean(base_tokens),
+                "encoder/side_branch_fuse_norm": _token_l2_mean(tokens),
+            }
+            for layer_idx, layer in enumerate(self.encoder, start=1):
+                tokens, layer_debug = layer(tokens, return_debug=True)
+                for name, value in layer_debug.items():
+                    debug[f"encoder/side_block{layer_idx}_{name}"] = value
 
         out_tokens = self.out_proj(tokens)  # [B, 64, lmf_dim]
-        return out_tokens.transpose(1, 2).contiguous()
+        out = out_tokens.transpose(1, 2).contiguous()
+        if not return_debug:
+            return out
+        debug["encoder/side_pre_out_proj_norm"] = _token_l2_mean(tokens)
+        return out, debug
 
 
 __all__ = ["SidechainEncoder"]

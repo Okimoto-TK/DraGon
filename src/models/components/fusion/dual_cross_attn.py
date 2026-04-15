@@ -26,9 +26,17 @@ class _FeedForward(nn.Module):
             nn.Dropout(dropout) if dropout > 0.0 else nn.Identity(),
             nn.Linear(dim * ff_mult, dim),
         )
+        self.output_norm = nn.LayerNorm(dim)
 
-    def forward(self, x: Tensor) -> Tensor:
-        return x + self.net(self.norm(x))
+    def forward(self, x: Tensor, *, return_debug: bool = False) -> Tensor | tuple[Tensor, dict[str, Tensor]]:
+        residual_out = x + self.net(self.norm(x))
+        next_x = self.output_norm(residual_out)
+        if not return_debug:
+            return next_x
+        return next_x, {
+            "residual_out_norm": _token_l2_mean(residual_out),
+            "out_norm": _token_l2_mean(next_x),
+        }
 
 
 class _SelfAttentionRefine(nn.Module):
@@ -43,10 +51,18 @@ class _SelfAttentionRefine(nn.Module):
             dropout=dropout,
             batch_first=True,
         )
+        self.output_norm = nn.LayerNorm(dim)
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor, *, return_debug: bool = False) -> Tensor | tuple[Tensor, dict[str, Tensor]]:
         refined, _ = self.attn(self.norm(x), self.norm(x), self.norm(x), need_weights=False)
-        return x + refined
+        residual_out = x + refined
+        next_x = self.output_norm(residual_out)
+        if not return_debug:
+            return next_x
+        return next_x, {
+            "residual_out_norm": _token_l2_mean(residual_out),
+            "out_norm": _token_l2_mean(next_x),
+        }
 
 
 class _BidirectionalFusionBlock(nn.Module):
@@ -58,6 +74,8 @@ class _BidirectionalFusionBlock(nn.Module):
         self.x_kv_norm = nn.LayerNorm(dim)
         self.y_q_norm = nn.LayerNorm(dim)
         self.y_kv_norm = nn.LayerNorm(dim)
+        self.x_cross_res_norm = nn.LayerNorm(dim)
+        self.y_cross_res_norm = nn.LayerNorm(dim)
         self.x_cross = nn.MultiheadAttention(
             embed_dim=dim,
             num_heads=num_heads,
@@ -102,18 +120,41 @@ class _BidirectionalFusionBlock(nn.Module):
         if record_debug:
             self.last_x_to_y_attn = x_to_y_attn.detach()
             self.last_y_to_x_attn = y_to_x_attn.detach()
-        x = x + next_x
-        y = y + next_y
-        x = self.x_self(x)
-        y = self.y_self(y)
-        x = self.x_ffn(x)
-        y = self.y_ffn(y)
+        x_cross_residual = x + next_x
+        y_cross_residual = y + next_y
+        x = self.x_cross_res_norm(x_cross_residual)
+        y = self.y_cross_res_norm(y_cross_residual)
+        x_cross_out = x
+        y_cross_out = y
+        if not return_debug:
+            x = self.x_self(x)
+            y = self.y_self(y)
+            x = self.x_ffn(x)
+            y = self.y_ffn(y)
+            return x, y
+        x, x_self_debug = self.x_self(x, return_debug=True)
+        y, y_self_debug = self.y_self(y, return_debug=True)
+        x, x_ffn_debug = self.x_ffn(x, return_debug=True)
+        y, y_ffn_debug = self.y_ffn(y, return_debug=True)
         if not return_debug:
             return x, y
-        return x, y, {
+        debug = {
+            "x_cross_residual_out_norm": _token_l2_mean(x_cross_residual),
+            "x_cross_out_norm": _token_l2_mean(x_cross_out),
+            "y_cross_residual_out_norm": _token_l2_mean(y_cross_residual),
+            "y_cross_out_norm": _token_l2_mean(y_cross_out),
             "x_norm": _token_l2_mean(x),
             "y_norm": _token_l2_mean(y),
         }
+        for name, value in x_self_debug.items():
+            debug[f"x_self_{name}"] = value
+        for name, value in y_self_debug.items():
+            debug[f"y_self_{name}"] = value
+        for name, value in x_ffn_debug.items():
+            debug[f"x_ffn_{name}"] = value
+        for name, value in y_ffn_debug.items():
+            debug[f"y_ffn_{name}"] = value
+        return x, y, debug
 
 
 class DualCrossAttentionFusion(nn.Module):
