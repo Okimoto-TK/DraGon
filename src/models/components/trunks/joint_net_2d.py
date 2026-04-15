@@ -6,21 +6,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-
-class LayerNorm2d(nn.Module):
-    """LayerNorm over channels for NCHW tensors."""
-
-    def __init__(self, channels: int) -> None:
-        super().__init__()
-        self.channels = channels
-        self.norm = nn.LayerNorm(channels)
-
-    def forward(self, x: Tensor) -> Tensor:
-        if x.ndim != 4:
-            raise ValueError(f"Expected input shape [B, C, H, W], got {tuple(x.shape)}")
-        if x.shape[1] != self.channels:
-            raise ValueError(f"Expected {self.channels} channels, got {x.shape[1]}")
-        return self.norm(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+from src.models.components.normalization import LayerNorm2d
 
 
 class EfficientViTJointBlock(nn.Module):

@@ -155,7 +155,10 @@ class MultiScaleFusionNet(nn.Module):
             dim=token_dim,
         )
         self.m1_token_proj = nn.Linear(lmf_dim, token_dim)
+        self.m1_token_norm = nn.LayerNorm(token_dim)
         self.m2_token_proj = nn.Linear(lmf_dim, token_dim)
+        self.m2_token_norm = nn.LayerNorm(token_dim)
+        self.side_token_norm = nn.LayerNorm(token_dim)
 
         self.drift_fusion = DualCrossAttentionFusion(dim=token_dim, num_layers=2)
         self.diffusion_fusion = SemanticGatedChannelFusion(dim=token_dim)
@@ -163,6 +166,7 @@ class MultiScaleFusionNet(nn.Module):
         self.drift_summary_head = SummaryHead(dim=token_dim, summary_dim=summary_dim)
         self.diffusion_summary_head = SummaryHead(dim=token_dim, summary_dim=summary_dim)
         self.full_tfn = TensorFusion(dim_x=summary_dim, dim_y=summary_dim)
+        self.tfn_feat_norm = nn.LayerNorm(self.full_tfn.out_dim)
 
         head_out_dim = 1 if self.task_label == "Persist" else 2
         self.decoder_head = DecoderHead(in_dim=self.full_tfn.out_dim, out_dim=head_out_dim)
@@ -189,16 +193,16 @@ class MultiScaleFusionNet(nn.Module):
         h12 = self.jointnet_12(t12)
         h23 = self.jointnet_23(t23)
 
-        m1 = self.m1_token_proj(self.map_to_tokens_12(h12))
-        m2 = self.m2_token_proj(self.map_to_tokens_23(h23))
-        s = self.side_resampler(e4.transpose(1, 2))
+        m1 = self.m1_token_norm(self.m1_token_proj(self.map_to_tokens_12(h12)))
+        m2 = self.m2_token_norm(self.m2_token_proj(self.map_to_tokens_23(h23)))
+        s = self.side_token_norm(self.side_resampler(e4.transpose(1, 2)))
 
-        z0 = self.drift_fusion(m1, s)
+        z0, drift_diag = self.drift_fusion(m1, s, return_debug=True)
         z1, diffusion_diag = self.diffusion_fusion(m2, s, return_debug=True)
 
-        z_d = self.drift_summary_head(z0)
-        z_v = self.diffusion_summary_head(z1)
-        tfn_feat = self.full_tfn(z_d, z_v)
+        z_d, drift_summary_diag = self.drift_summary_head(z0, return_debug=True, debug_prefix="drift")
+        z_v, diffusion_summary_diag = self.diffusion_summary_head(z1, return_debug=True, debug_prefix="diffusion")
+        tfn_feat = self.tfn_feat_norm(self.full_tfn(z_d, z_v))
         head_out = self.decoder_head(tfn_feat)
 
         outputs: dict[str, Tensor] = {
@@ -222,7 +226,10 @@ class MultiScaleFusionNet(nn.Module):
             "diag/map/H12_norm": _channelwise_l2_mean(h12, channel_dim=1),
             "diag/map/H23_norm": _channelwise_l2_mean(h23, channel_dim=1),
         }
+        outputs.update({f"diag/{key}": value for key, value in drift_diag.items()})
         outputs.update({f"diag/{key}": value for key, value in diffusion_diag.items()})
+        outputs.update({f"diag/{key}": value for key, value in drift_summary_diag.items()})
+        outputs.update({f"diag/{key}": value for key, value in diffusion_summary_diag.items()})
 
         if self.task_label == "Edge":
             pred_edge = head_out[:, 0]

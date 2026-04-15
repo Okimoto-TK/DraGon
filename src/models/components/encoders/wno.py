@@ -8,6 +8,7 @@ from config.config import lmf_dim as DEFAULT_LMF_DIM
 from config.config import macro_wno_num_blocks as DEFAULT_WNO_NUM_BLOCKS
 from torch import Tensor, nn
 
+from src.models.components.normalization import LayerNorm1d
 from src.models.components.encoders.res_conv_1d import ResConv1dBlock
 
 _DB4_DEC_LO = (
@@ -72,6 +73,7 @@ class WNOBlock(nn.Module):
         self.skip = nn.Identity()
         self.approx_block = ResConv1dBlock(channels, kernel_size=1)
         self.detail_block = ResConv1dBlock(channels, kernel_size=1)
+        self.output_norm = LayerNorm1d(channels)
 
         self.register_buffer("dec_lo", torch.tensor(_DB4_DEC_LO, dtype=torch.float32).view(1, 1, -1))
         self.register_buffer("dec_hi", torch.tensor(_DB4_DEC_HI, dtype=torch.float32).view(1, 1, -1))
@@ -138,7 +140,7 @@ class WNOBlock(nn.Module):
         for detail, output_length in zip(reversed(details), reversed(output_lengths), strict=False):
             y = self._idwt(y, detail, output_length)
 
-        return y + skip
+        return self.output_norm(y + skip)
 
 
 class WNOEncoder(nn.Module):
@@ -178,13 +180,12 @@ class WNOEncoder(nn.Module):
         self.lmf_dim = lmf_dim
         self.decomp_level = decomp_level
         self.num_blocks = num_blocks
-        blocks = [WNOBlock(hidden_dim, decomp_level=decomp_level) for _ in range(num_blocks)]
-        self.encoder = nn.Sequential(
-            nn.Conv1d(in_channels, hidden_dim, kernel_size=1, stride=1),
-            nn.GELU(),
-            *blocks,
-            nn.Conv1d(hidden_dim, lmf_dim, kernel_size=1, stride=1),
-        )
+        self.input_proj = nn.Conv1d(in_channels, hidden_dim, kernel_size=1, stride=1)
+        self.input_norm = LayerNorm1d(hidden_dim)
+        self.input_act = nn.GELU()
+        self.blocks = nn.Sequential(*[WNOBlock(hidden_dim, decomp_level=decomp_level) for _ in range(num_blocks)])
+        self.output_proj = nn.Conv1d(hidden_dim, lmf_dim, kernel_size=1, stride=1)
+        self.output_norm = LayerNorm1d(lmf_dim)
 
     def forward(self, x: Tensor) -> Tensor:
         if x.ndim != 3:
@@ -195,7 +196,11 @@ class WNOEncoder(nn.Module):
             msg = f"Expected {self.in_channels} channels, got {x.shape[1]}"
             raise ValueError(msg)
 
-        return self.encoder(x)
+        x = self.input_proj(x)
+        x = self.input_act(self.input_norm(x))
+        x = self.blocks(x)
+        x = self.output_proj(x)
+        return self.output_norm(x)
 
 
 __all__ = ["WNOBlock", "WNOEncoder"]

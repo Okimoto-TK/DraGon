@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from torch import Tensor, nn
 
+from src.models.components.normalization import LayerNorm1d
+
 
 class ResConv1dBlock(nn.Module):
     """A length-preserving residual Conv1d block."""
@@ -38,6 +40,8 @@ class ResConv1dBlock(nn.Module):
         padding = kernel_size // 2
 
         self.channels = channels
+        self.pre_norm = LayerNorm1d(channels)
+        self.branch_norm = LayerNorm1d(channels)
         self.block = nn.Sequential(
             nn.Conv1d(
                 in_channels=channels,
@@ -68,7 +72,9 @@ class ResConv1dBlock(nn.Module):
             msg = f"Expected {self.channels} channels, got {x.shape[1]}"
             raise ValueError(msg)
 
-        return x + self.block(x)
+        residual = x
+        x = self.block(self.pre_norm(x))
+        return residual + self.branch_norm(x)
 
 
 __all__ = ["ResConv1dBlock"]

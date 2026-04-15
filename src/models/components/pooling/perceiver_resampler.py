@@ -53,6 +53,7 @@ class PerceiverResampler(nn.Module):
             batch_first=True,
         )
         self.post_attn_norm = nn.LayerNorm(dim)
+        self.output_norm = nn.LayerNorm(dim)
         self.ffn = nn.Sequential(
             nn.Linear(dim, dim * ff_mult),
             nn.GELU(),
@@ -81,7 +82,7 @@ class PerceiverResampler(nn.Module):
         if record_debug:
             self.last_cross_attn = attn.detach()
         tokens = latents + attended
-        return tokens + self.ffn(self.post_attn_norm(tokens))
+        return self.output_norm(tokens + self.ffn(self.post_attn_norm(tokens)))
 
     def get_last_debug(self) -> dict[str, Tensor | None]:
         return {"cross_attn": self.last_cross_attn}

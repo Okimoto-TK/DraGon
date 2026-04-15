@@ -35,6 +35,7 @@ class _SemanticFusionBlock(nn.Module):
         self.fc_in = nn.Linear(dim * 4, hidden_dim * 2)
         self.dropout = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
         self.fc_out = nn.Linear(hidden_dim, dim)
+        self.output_norm = nn.LayerNorm(dim)
         self.last_term_norms: dict[str, Tensor] = {}
         self.last_gate_activation: Tensor | None = None
 
@@ -56,7 +57,8 @@ class _SemanticFusionBlock(nn.Module):
         if record_debug:
             self.last_gate_activation = gate_act.detach()
         fused = value * gate_act
-        next_x = x + self.fc_out(self.dropout(fused))
+        residual_out = x + self.fc_out(self.dropout(fused))
+        next_x = self.output_norm(residual_out)
         if not return_debug:
             return next_x
         return next_x, {
@@ -65,6 +67,7 @@ class _SemanticFusionBlock(nn.Module):
             "product_norm": _token_l2_mean(product),
             "difference_norm": _token_l2_mean(difference),
             "gate_norm": _token_l2_mean(gate_act),
+            "residual_out_norm": _token_l2_mean(residual_out),
             "out_norm": _token_l2_mean(next_x),
         }
 
@@ -84,6 +87,7 @@ class SemanticGatedChannelFusion(nn.Module):
         self.dim = dim
         self.side_pool = AttentivePool1d(dim=dim)
         self.blocks = nn.ModuleList([_SemanticFusionBlock(dim, dropout=dropout) for _ in range(num_layers)])
+        self.output_norm = nn.LayerNorm(dim)
         self.last_side_global: Tensor | None = None
 
     def forward(
@@ -110,7 +114,7 @@ class SemanticGatedChannelFusion(nn.Module):
         if not return_debug:
             for block in self.blocks:
                 tokens = block(tokens, side_broadcast)
-            return tokens
+            return self.output_norm(tokens)
 
         debug: dict[str, Tensor] = {
             "fusion/side_global_norm": _token_l2_mean(side_global),
@@ -119,7 +123,7 @@ class SemanticGatedChannelFusion(nn.Module):
             tokens, block_debug = block(tokens, side_broadcast, return_debug=True)
             for name, value in block_debug.items():
                 debug[f"fusion/diffusion_block{block_idx}_{name}"] = value
-        return tokens, debug
+        return self.output_norm(tokens), debug
 
     def get_last_debug(self) -> dict[str, object]:
         return {

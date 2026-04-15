@@ -6,6 +6,8 @@ from config.config import lmf_dim as DEFAULT_LMF_DIM
 from config.config import lmf_rank as DEFAULT_LMF_RANK
 from torch import Tensor, nn
 
+from src.models.components.normalization import LayerNorm2d
+
 
 class LowRankFusion(nn.Module):
     """Fuse two vectors with low-rank multiplicative interactions."""
@@ -39,8 +41,11 @@ class LowRankFusion(nn.Module):
         self.dy = dy
         self.d_out = d_out
         self.rank = rank
+        self.x_norm = nn.LayerNorm(dx)
+        self.y_norm = nn.LayerNorm(dy)
         self.x_proj = nn.Linear(dx, rank * d_out)
         self.y_proj = nn.Linear(dy, rank * d_out)
+        self.out_norm = nn.LayerNorm(d_out)
 
     def forward(self, x: Tensor, y: Tensor) -> Tensor:
         if x.shape[:-1] != y.shape[:-1]:
@@ -55,9 +60,11 @@ class LowRankFusion(nn.Module):
             msg = f"Expected y last dim {self.dy}, got {y.shape[-1]}"
             raise ValueError(msg)
 
+        x = self.x_norm(x)
+        y = self.y_norm(y)
         a = self.x_proj(x).view(*x.shape[:-1], self.rank, self.d_out)
         b = self.y_proj(y).view(*y.shape[:-1], self.rank, self.d_out)
-        return (a * b).sum(dim=-2)
+        return self.out_norm((a * b).sum(dim=-2))
 
 
 class PairwiseLMFMap(nn.Module):
@@ -80,8 +87,11 @@ class PairwiseLMFMap(nn.Module):
         self.dy = dy
         self.d_out = d_out
         self.rank = rank
+        self.x_norm = nn.LayerNorm(dx)
+        self.y_norm = nn.LayerNorm(dy)
         self.x_proj = nn.Linear(dx, rank * d_out)
         self.y_proj = nn.Linear(dy, rank * d_out)
+        self.out_norm = LayerNorm2d(d_out)
 
     def forward(self, x: Tensor, y: Tensor) -> Tensor:
         if x.ndim != 3 or y.ndim != 3:
@@ -100,9 +110,12 @@ class PairwiseLMFMap(nn.Module):
             msg = f"Expected y last dim {self.dy}, got {y.shape[-1]}"
             raise ValueError(msg)
 
+        x = self.x_norm(x)
+        y = self.y_norm(y)
         a = self.x_proj(x).view(x.shape[0], x.shape[1], self.rank, self.d_out)
         b = self.y_proj(y).view(y.shape[0], y.shape[1], self.rank, self.d_out)
-        return torch.einsum("biro,bjro->boij", a, b)
+        fused = torch.einsum("biro,bjro->bijo", a, b).permute(0, 3, 1, 2)
+        return self.out_norm(fused)
 
 
 class TokenLMF(nn.Module):
@@ -125,8 +138,11 @@ class TokenLMF(nn.Module):
         self.dy = dy
         self.d_out = d_out
         self.rank = rank
+        self.x_norm = nn.LayerNorm(dx)
+        self.y_norm = nn.LayerNorm(dy)
         self.x_proj = nn.Linear(dx, rank * d_out)
         self.y_proj = nn.Linear(dy, rank * d_out)
+        self.out_norm = nn.LayerNorm(d_out)
 
     def forward(self, x: Tensor, y: Tensor) -> Tensor:
         if x.ndim != 3 or y.ndim != 3:
@@ -145,9 +161,11 @@ class TokenLMF(nn.Module):
             msg = f"Expected y last dim {self.dy}, got {y.shape[-1]}"
             raise ValueError(msg)
 
+        x = self.x_norm(x)
+        y = self.y_norm(y)
         a = self.x_proj(x).view(x.shape[0], x.shape[1], self.rank, self.d_out)
         b = self.y_proj(y).view(y.shape[0], y.shape[1], self.rank, self.d_out)
-        return (a * b).sum(dim=2)
+        return self.out_norm((a * b).sum(dim=2))
 
 
 __all__ = ["LowRankFusion", "PairwiseLMFMap", "TokenLMF"]

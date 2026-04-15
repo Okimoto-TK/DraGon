@@ -22,10 +22,13 @@ class DecoderHead(nn.Module):
 
         self.in_dim = in_dim
         self.out_dim = out_dim
+        self.input_norm = nn.LayerNorm(in_dim)
         self.fc1 = nn.Linear(in_dim, hidden_dim1)
         self.act1 = nn.GELU()
+        self.hidden1_norm = nn.LayerNorm(hidden_dim1)
         self.fc2 = nn.Linear(hidden_dim1, hidden_dim2)
         self.act2 = nn.GELU()
+        self.hidden2_norm = nn.LayerNorm(hidden_dim2)
         self.fc3 = nn.Linear(hidden_dim2, out_dim)
         self.last_hidden1: Tensor | None = None
         self.last_hidden2: Tensor | None = None
@@ -36,8 +39,9 @@ class DecoderHead(nn.Module):
             raise ValueError(f"Expected input shape [B, D], got {tuple(x.shape)}")
         if x.shape[-1] != self.in_dim:
             raise ValueError(f"Expected input dim {self.in_dim}, got {x.shape[-1]}")
-        hidden1 = self.act1(self.fc1(x))
-        hidden2 = self.act2(self.fc2(hidden1))
+        x = self.input_norm(x)
+        hidden1 = self.hidden1_norm(self.act1(self.fc1(x)))
+        hidden2 = self.hidden2_norm(self.act2(self.fc2(hidden1)))
         out = self.fc3(hidden2)
         if _should_record_debug():
             self.last_hidden1 = hidden1.detach()

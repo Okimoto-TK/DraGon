@@ -41,9 +41,11 @@ class UnifiedHead(nn.Module):
         self.out_dim = out_dim
         self.hidden_dim = resolved_hidden_dim
         self.pool = AttentivePool1d(dim=dim)
+        self.input_norm = nn.LayerNorm(dim)
         self.mlp = nn.Sequential(
             nn.Linear(dim, resolved_hidden_dim),
             nn.GELU(),
+            nn.LayerNorm(resolved_hidden_dim),
             nn.Dropout(dropout) if dropout > 0.0 else nn.Identity(),
             nn.Linear(resolved_hidden_dim, out_dim),
         )
@@ -57,7 +59,7 @@ class UnifiedHead(nn.Module):
             msg = f"Expected feature dim {self.dim}, got {x.shape[-1]}"
             raise ValueError(msg)
 
-        pooled = self.pool(x)
+        pooled = self.input_norm(self.pool(x))
         return self.mlp(pooled)
 
 

@@ -68,10 +68,16 @@ _REALTIME_KEYS = (
 _DYNAMIC_REALTIME_PREFIXES = (
     "encoder/",
     "map/",
+    "fusion/drift_layer",
     "fusion/diffusion_block",
+    "summary/drift_block",
+    "summary/diffusion_block",
 )
 _DYNAMIC_REALTIME_EXACT = {
     "fusion/side_global_norm",
+    "fusion/drift_fused_tokens_norm",
+    "summary/drift_vec_norm",
+    "summary/diffusion_vec_norm",
 }
 
 

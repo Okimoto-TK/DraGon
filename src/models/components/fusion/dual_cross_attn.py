@@ -10,6 +10,10 @@ def _should_record_debug() -> bool:
     return not (torch.cuda.is_available() and torch.cuda.is_current_stream_capturing())
 
 
+def _token_l2_mean(x: Tensor) -> Tensor:
+    return x.detach().float().norm(dim=-1).mean()
+
+
 class _FeedForward(nn.Module):
     """Residual FFN with large expansion."""
 
@@ -73,7 +77,13 @@ class _BidirectionalFusionBlock(nn.Module):
         self.last_x_to_y_attn: Tensor | None = None
         self.last_y_to_x_attn: Tensor | None = None
 
-    def forward(self, x: Tensor, y: Tensor) -> tuple[Tensor, Tensor]:
+    def forward(
+        self,
+        x: Tensor,
+        y: Tensor,
+        *,
+        return_debug: bool = False,
+    ) -> tuple[Tensor, Tensor] | tuple[Tensor, Tensor, dict[str, Tensor]]:
         record_debug = _should_record_debug()
         next_x, x_to_y_attn = self.x_cross(
             self.x_q_norm(x),
@@ -98,7 +108,12 @@ class _BidirectionalFusionBlock(nn.Module):
         y = self.y_self(y)
         x = self.x_ffn(x)
         y = self.y_ffn(y)
-        return x, y
+        if not return_debug:
+            return x, y
+        return x, y, {
+            "x_norm": _token_l2_mean(x),
+            "y_norm": _token_l2_mean(y),
+        }
 
 
 class DualCrossAttentionFusion(nn.Module):
@@ -146,7 +161,13 @@ class DualCrossAttentionFusion(nn.Module):
         pooled = nn.functional.adaptive_avg_pool1d(tokens.transpose(1, 2), target_len)
         return pooled.transpose(1, 2)
 
-    def forward(self, x: Tensor, y: Tensor) -> Tensor:
+    def forward(
+        self,
+        x: Tensor,
+        y: Tensor,
+        *,
+        return_debug: bool = False,
+    ) -> Tensor | tuple[Tensor, dict[str, Tensor]]:
         if x.ndim != 3 or y.ndim != 3:
             raise ValueError(f"Expected x and y to be [B, L, D], got {tuple(x.shape)} and {tuple(y.shape)}")
         if x.shape[0] != y.shape[0]:
@@ -156,14 +177,25 @@ class DualCrossAttentionFusion(nn.Module):
 
         x_tokens = x
         y_tokens = y
-        for layer in self.layers:
-            x_tokens, y_tokens = layer(x_tokens, y_tokens)
+        if not return_debug:
+            for layer in self.layers:
+                x_tokens, y_tokens = layer(x_tokens, y_tokens)
+        else:
+            debug: dict[str, Tensor] = {}
+            for layer_idx, layer in enumerate(self.layers, start=1):
+                x_tokens, y_tokens, layer_debug = layer(x_tokens, y_tokens, return_debug=True)
+                for name, value in layer_debug.items():
+                    debug[f"fusion/drift_layer{layer_idx}_{name}"] = value
 
         fused_len = max(x_tokens.shape[1], y_tokens.shape[1])
         x_aligned = self._match_length(x_tokens, fused_len)
         y_aligned = self._match_length(y_tokens, fused_len)
         fused = torch.cat((x_aligned, y_aligned), dim=-1)
-        return self.fuse_proj(self.fuse_norm(fused))
+        fused_out = self.fuse_proj(self.fuse_norm(fused))
+        if not return_debug:
+            return fused_out
+        debug["fusion/drift_fused_tokens_norm"] = _token_l2_mean(fused_out)
+        return fused_out, debug
 
     def get_last_debug(self) -> dict[str, list[Tensor | None]]:
         return {

@@ -11,6 +11,10 @@ def _should_record_debug() -> bool:
     return not (torch.cuda.is_available() and torch.cuda.is_current_stream_capturing())
 
 
+def _token_l2_mean(x: Tensor) -> Tensor:
+    return x.detach().float().norm(dim=-1).mean()
+
+
 class _PreNormSelfAttentionBlock(nn.Module):
     """A small pre-norm transformer encoder block."""
 
@@ -33,7 +37,7 @@ class _PreNormSelfAttentionBlock(nn.Module):
         )
         self.last_attn: Tensor | None = None
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor, *, return_debug: bool = False) -> Tensor | tuple[Tensor, dict[str, Tensor]]:
         attn_in = self.norm1(x)
         record_debug = _should_record_debug()
         attn_out, attn = self.attn(
@@ -47,7 +51,12 @@ class _PreNormSelfAttentionBlock(nn.Module):
             self.last_attn = attn.detach()
         x = x + attn_out
         x = x + self.ffn(self.norm2(x))
-        return x
+        if not return_debug:
+            return x
+        return x, {
+            "tokens_norm": _token_l2_mean(x),
+            "summary_tokens_norm": _token_l2_mean(x[:, :1, :]),
+        }
 
 
 class SummaryHead(nn.Module):
@@ -86,8 +95,15 @@ class SummaryHead(nn.Module):
             [_PreNormSelfAttentionBlock(dim, num_heads=num_heads, ff_mult=ff_mult) for _ in range(num_layers)]
         )
         self.out_proj = nn.Linear(num_summary_tokens * dim, resolved_summary_dim)
+        self.output_norm = nn.LayerNorm(resolved_summary_dim)
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(
+        self,
+        x: Tensor,
+        *,
+        return_debug: bool = False,
+        debug_prefix: str = "summary",
+    ) -> Tensor | tuple[Tensor, dict[str, Tensor]]:
         if x.ndim != 3:
             raise ValueError(f"Expected input shape [B, K, D], got {tuple(x.shape)}")
         if x.shape[-1] != self.dim:
@@ -96,10 +112,21 @@ class SummaryHead(nn.Module):
         bsz = x.shape[0]
         summary = self.summary_tokens.unsqueeze(0).expand(bsz, -1, -1)
         tokens = F.layer_norm(torch.cat((summary, x), dim=1), (self.dim,))
-        for layer in self.layers:
-            tokens = layer(tokens)
+        if not return_debug:
+            for layer in self.layers:
+                tokens = layer(tokens)
+        else:
+            debug: dict[str, Tensor] = {}
+            for layer_idx, layer in enumerate(self.layers, start=1):
+                tokens, layer_debug = layer(tokens, return_debug=True)
+                for name, value in layer_debug.items():
+                    debug[f"summary/{debug_prefix}_block{layer_idx}_{name}"] = value
         summary_tokens = tokens[:, : self.num_summary_tokens, :]
-        return self.out_proj(summary_tokens.reshape(bsz, self.num_summary_tokens * self.dim))
+        summary_vec = self.output_norm(self.out_proj(summary_tokens.reshape(bsz, self.num_summary_tokens * self.dim)))
+        if not return_debug:
+            return summary_vec
+        debug[f"summary/{debug_prefix}_vec_norm"] = _token_l2_mean(summary_vec.unsqueeze(1))
+        return summary_vec, debug
 
     def get_last_debug(self) -> dict[str, object]:
         return {

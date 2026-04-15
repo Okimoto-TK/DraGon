@@ -53,6 +53,7 @@ class InteractionMapToTokens(nn.Module):
             batch_first=True,
         )
         self.post_attn_norm = nn.LayerNorm(dim)
+        self.output_norm = nn.LayerNorm(dim)
         self.ffn = nn.Sequential(
             nn.Linear(dim, dim * ff_mult),
             nn.GELU(),
@@ -84,7 +85,7 @@ class InteractionMapToTokens(nn.Module):
         attended, _ = self.cross_attn(queries, fmap_tokens, fmap_tokens, need_weights=False)
         tokens = queries + attended
         tokens = tokens + self.ffn(self.post_attn_norm(tokens))
-        return tokens
+        return self.output_norm(tokens)
 
 
 __all__ = ["InteractionMapToTokens"]

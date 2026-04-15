@@ -16,7 +16,10 @@ class GatedFiLM(nn.Module):
             raise ValueError(msg)
 
         self.dim = dim
+        self.x_norm = nn.LayerNorm(dim)
+        self.signal_norm = nn.LayerNorm(dim)
         self.modulation = nn.Linear(dim, dim * 3)
+        self.out_norm = nn.LayerNorm(dim)
 
     def forward(self, x: Tensor, signal: Tensor) -> Tensor:
         if x.ndim != 3 or signal.ndim != 3:
@@ -31,10 +34,12 @@ class GatedFiLM(nn.Module):
             msg = f"Expected feature dim {self.dim}, got {x.shape[-1]}"
             raise ValueError(msg)
 
+        x_norm = self.x_norm(x)
+        signal = self.signal_norm(signal)
         gamma, beta, gate = self.modulation(signal).chunk(3, dim=-1)
         gate = gate.sigmoid()
-        modulated = x * (1.0 + gamma) + beta
-        return x + gate * (modulated - x)
+        modulated = x_norm * (1.0 + gamma) + beta
+        return self.out_norm(x + gate * (modulated - x_norm))
 
 
 __all__ = ["GatedFiLM"]
