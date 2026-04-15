@@ -24,10 +24,10 @@ _MANIFEST_NAME = "_packed_manifest.json"
 
 @dataclass(frozen=True)
 class SampleIndexTable:
-    """Compact per-sample index over packed per-code tensors."""
+    """Compact per-sample index over packed payload shards."""
 
-    codebook: tuple[str, ...]
-    code_ids: np.ndarray
+    payloadbook: tuple[str, ...]
+    payload_ids: np.ndarray
     sample_idx: np.ndarray
     date: np.ndarray
 
@@ -36,43 +36,52 @@ class SampleIndexTable:
 
     def subset(self, mask: np.ndarray) -> "SampleIndexTable":
         return SampleIndexTable(
-            codebook=self.codebook,
-            code_ids=self.code_ids[mask],
+            payloadbook=self.payloadbook,
+            payload_ids=self.payload_ids[mask],
             sample_idx=self.sample_idx[mask],
             date=self.date[mask],
         )
 
-    def code_at(self, index: int) -> str:
-        return self.codebook[int(self.code_ids[index])]
+    def payload_at(self, index: int) -> str:
+        return self.payloadbook[int(self.payload_ids[index])]
+
+
+def _payload_code(stem: str) -> str:
+    return stem.split("__", 1)[0]
 
 
 def discover_codes(root: Path = assembled_dir) -> list[str]:
-    """Return codes that already have packed training tensors."""
+    """Return logical codes that already have packed training tensors."""
     manifest = _get_packed_manifest(root)
-    return sorted(code for code, meta in manifest.items() if int(meta.get("count", 0)) > 0)
+    totals: dict[str, int] = {}
+    for stem, meta in manifest.items():
+        code = str(meta.get("code", _payload_code(stem)))
+        totals[code] = totals.get(code, 0) + int(meta.get("count", 0))
+    return sorted(code for code, total in totals.items() if total > 0)
 
 
-def _packed_path(code: str) -> Path:
-    return assembled_dir / f"{code}.npz"
+def _packed_path(payload_name: str) -> Path:
+    return assembled_dir / f"{payload_name}.npz"
 
 
 def _manifest_path(root: Path) -> Path:
     return root / _MANIFEST_NAME
 
 
-def _scan_packed_file(path: Path) -> dict[str, int]:
+def _scan_packed_file(path: Path) -> dict[str, int | str]:
     with np.load(path, allow_pickle=False) as packed:
         count = int(np.asarray(packed["date"]).shape[0])
     stat = path.stat()
     return {
+        "code": _payload_code(path.stem),
         "count": count,
         "size": int(stat.st_size),
         "mtime_ns": int(stat.st_mtime_ns),
     }
 
 
-def _build_packed_manifest(root: Path) -> dict[str, dict[str, int]]:
-    manifest: dict[str, dict[str, int]] = {}
+def _build_packed_manifest(root: Path) -> dict[str, dict[str, int | str]]:
+    manifest: dict[str, dict[str, int | str]] = {}
     for path in sorted(root.glob("*.npz")):
         manifest[path.stem] = _scan_packed_file(path)
     try:
@@ -85,7 +94,7 @@ def _build_packed_manifest(root: Path) -> dict[str, dict[str, int]]:
     return manifest
 
 
-def _get_packed_manifest(root: Path) -> dict[str, dict[str, int]]:
+def _get_packed_manifest(root: Path) -> dict[str, dict[str, int | str]]:
     manifest_path = _manifest_path(root)
     current_files = {path.stem: path for path in root.glob("*.npz")}
 
@@ -99,10 +108,12 @@ def _get_packed_manifest(root: Path) -> dict[str, dict[str, int]]:
                 same_keys = set(manifest.keys()) == set(current_files.keys())
                 if same_keys:
                     up_to_date = True
-                    for code, path in current_files.items():
-                        meta = manifest.get(code, {})
+                    for payload_name, path in current_files.items():
+                        meta = manifest.get(payload_name, {})
                         stat = path.stat()
                         if (
+                            str(meta.get("code", "")) != _payload_code(payload_name)
+                            or
                             int(meta.get("size", -1)) != int(stat.st_size)
                             or int(meta.get("mtime_ns", -1)) != int(stat.st_mtime_ns)
                         ):
@@ -110,12 +121,13 @@ def _get_packed_manifest(root: Path) -> dict[str, dict[str, int]]:
                             break
                     if up_to_date:
                         return {
-                            code: {
+                            payload_name: {
+                                "code": str(meta.get("code", _payload_code(payload_name))),
                                 "count": int(meta.get("count", 0)),
                                 "size": int(meta.get("size", 0)),
                                 "mtime_ns": int(meta.get("mtime_ns", 0)),
                             }
-                            for code, meta in manifest.items()
+                            for payload_name, meta in manifest.items()
                         }
 
     return _build_packed_manifest(root)
@@ -123,18 +135,25 @@ def _get_packed_manifest(root: Path) -> dict[str, dict[str, int]]:
 
 def build_packed_sample_index(codes: list[str]) -> SampleIndexTable:
     """Build a lightweight index by scanning packed ``.npz`` metadata only."""
-    codebook = tuple(codes)
+    selected_codes = set(codes)
     manifest = _get_packed_manifest(assembled_dir)
-    code_id_parts: list[np.ndarray] = []
+    payloadbook: list[str] = []
+    payload_id_parts: list[np.ndarray] = []
     sample_idx_parts: list[np.ndarray] = []
     date_parts: list[np.ndarray] = []
 
-    for code_id, code in enumerate(codebook):
-        path = _packed_path(code)
+    for payload_name in sorted(manifest.keys()):
+        meta = manifest.get(payload_name, {})
+        code = str(meta.get("code", _payload_code(payload_name)))
+        if code not in selected_codes:
+            continue
+        path = _packed_path(payload_name)
         if not path.exists():
             continue
-        if int(manifest.get(code, {}).get("count", 0)) <= 0:
+        if int(meta.get("count", 0)) <= 0:
             continue
+        payload_id = len(payloadbook)
+        payloadbook.append(payload_name)
 
         with np.load(path, allow_pickle=False) as packed:
             date = np.asarray(packed["date"], dtype=np.float32)
@@ -143,23 +162,23 @@ def build_packed_sample_index(codes: list[str]) -> SampleIndexTable:
             continue
 
         count = int(date.shape[0])
-        code_id_parts.append(np.full(count, code_id, dtype=np.int32))
+        payload_id_parts.append(np.full(count, payload_id, dtype=np.int32))
         sample_idx_parts.append(np.arange(count, dtype=np.int32))
         date_parts.append(date)
 
-    if not code_id_parts:
+    if not payload_id_parts:
         empty_i32 = np.empty((0,), dtype=np.int32)
         empty_f32 = np.empty((0,), dtype=np.float32)
         return SampleIndexTable(
-            codebook=codebook,
-            code_ids=empty_i32,
+            payloadbook=tuple(payloadbook),
+            payload_ids=empty_i32,
             sample_idx=empty_i32,
             date=empty_f32,
         )
 
     return SampleIndexTable(
-        codebook=codebook,
-        code_ids=np.concatenate(code_id_parts),
+        payloadbook=tuple(payloadbook),
+        payload_ids=np.concatenate(payload_id_parts),
         sample_idx=np.concatenate(sample_idx_parts),
         date=np.concatenate(date_parts),
     )
@@ -201,7 +220,7 @@ def split_index_by_date(
 
 
 class PackedTensorDataset(Dataset[dict[str, Tensor]]):
-    """Training-ready dataset backed by per-code packed ``.npz`` tensors."""
+    """Training-ready dataset backed by packed payload shard ``.npz`` tensors."""
 
     def __init__(
         self,
@@ -216,10 +235,10 @@ class PackedTensorDataset(Dataset[dict[str, Tensor]]):
     def __len__(self) -> int:
         return len(self.sample_index)
 
-    def _load_payload(self, code: str) -> dict[str, Tensor]:
-        cached = self._cache.pop(code, None)
+    def _load_payload(self, payload_name: str) -> dict[str, Tensor]:
+        cached = self._cache.pop(payload_name, None)
         if cached is None:
-            with np.load(_packed_path(code), allow_pickle=False) as packed:
+            with np.load(_packed_path(payload_name), allow_pickle=False) as packed:
                 cached = {
                     "date": torch.from_numpy(np.ascontiguousarray(packed["date"], dtype=np.float32)),
                     "label": torch.from_numpy(np.ascontiguousarray(packed["label"], dtype=np.float32)),
@@ -229,7 +248,7 @@ class PackedTensorDataset(Dataset[dict[str, Tensor]]):
                     "sidechain": torch.from_numpy(np.ascontiguousarray(packed["sidechain"], dtype=np.float32)),
                 }
 
-        self._cache[code] = cached
+        self._cache[payload_name] = cached
         while len(self._cache) > self.max_cached_codes:
             self._cache.popitem(last=False)
         return cached
@@ -252,21 +271,21 @@ class PackedTensorDataset(Dataset[dict[str, Tensor]]):
         return item
 
     def __getitem__(self, index: int) -> dict[str, Tensor]:
-        code = self.sample_index.code_at(index)
-        payload = self._load_payload(code)
+        payload_name = self.sample_index.payload_at(index)
+        payload = self._load_payload(payload_name)
         sample_idx = int(self.sample_index.sample_idx[index])
         return self._item_from_payload(payload, sample_idx)
 
     def __getitems__(self, indices: list[int]) -> list[dict[str, Tensor]]:
         items: list[dict[str, Tensor]] = []
-        current_code: str | None = None
+        current_payload_name: str | None = None
         current_payload: dict[str, Tensor] | None = None
 
         for index in indices:
-            code = self.sample_index.code_at(index)
-            if code != current_code or current_payload is None:
-                current_code = code
-                current_payload = self._load_payload(code)
+            payload_name = self.sample_index.payload_at(index)
+            if payload_name != current_payload_name or current_payload is None:
+                current_payload_name = payload_name
+                current_payload = self._load_payload(payload_name)
             sample_idx = int(self.sample_index.sample_idx[index])
             items.append(self._item_from_payload(current_payload, sample_idx))
 

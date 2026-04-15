@@ -79,6 +79,7 @@ train_val_split_date: float | None = None
 val_ratio = 0.1
 memory_mode = "lazy_packed"
 lazy_cache_codes = 16
+packed_min_files_per_code = 1
 train_samples_per_epoch = 2_000_000
 val_samples_per_epoch = None
 trend_ema_alpha = 0.2

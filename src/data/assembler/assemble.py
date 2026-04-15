@@ -1,12 +1,13 @@
 import os
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor
+import zlib
 
 import numpy as np
 import polars as pl
 from numpy.lib.stride_tricks import sliding_window_view
 
-from config.config import processed_path, assembled_dir, debug
+from config.config import assembled_dir, debug, packed_min_files_per_code, processed_path, train_seed
 
 
 # --- 特征列定义 (保持不变) ---
@@ -100,17 +101,62 @@ def _build_packed_payload(data: np.ndarray) -> dict[str, np.ndarray]:
     }
 
 
+def _shard_suffix(index: int) -> str:
+    return f"__{index:03d}"
+
+
+def _shuffled_shard_indices(count: int, *, code: str) -> list[np.ndarray]:
+    if count <= 0:
+        return []
+
+    num_shards = min(max(1, int(packed_min_files_per_code)), count)
+    seed = np.uint64(train_seed) ^ np.uint64(zlib.crc32(code.encode("utf-8")))
+    rng = np.random.default_rng(seed)
+    shuffled = rng.permutation(count)
+    return [np.asarray(part, dtype=np.int32) for part in np.array_split(shuffled, num_shards) if part.size > 0]
+
+
+def _clear_existing_packed_files(code: str) -> None:
+    legacy_path = assembled_dir / f"{code}.npz"
+    if legacy_path.exists():
+        legacy_path.unlink()
+    for path in assembled_dir.glob(f"{code}__*.npz"):
+        path.unlink()
+
+
 def _write_packed_samples(code: str, data: np.ndarray) -> None:
     payload = _build_packed_payload(data)
-    np.savez(
-        assembled_dir / f"{code}.npz",
-        date=payload["date"],
-        label=payload["label"],
-        macro=payload["macro"],
-        sidechain=payload["sidechain"],
-        mezzo=payload["mezzo"],
-        micro=payload["micro"],
-    )
+    _clear_existing_packed_files(code)
+
+    shards = _shuffled_shard_indices(int(payload["date"].shape[0]), code=code)
+    if not shards:
+        np.savez(
+            assembled_dir / f"{code}.npz",
+            date=payload["date"],
+            label=payload["label"],
+            macro=payload["macro"],
+            sidechain=payload["sidechain"],
+            mezzo=payload["mezzo"],
+            micro=payload["micro"],
+        )
+        return
+
+    single_shard = len(shards) == 1
+    for shard_idx, order in enumerate(shards):
+        shard_path = (
+            assembled_dir / f"{code}.npz"
+            if single_shard
+            else assembled_dir / f"{code}{_shard_suffix(shard_idx)}.npz"
+        )
+        np.savez(
+            shard_path,
+            date=payload["date"][order],
+            label=payload["label"][order],
+            macro=payload["macro"][order],
+            sidechain=payload["sidechain"][order],
+            mezzo=payload["mezzo"][order],
+            micro=payload["micro"][order],
+        )
 
 
 def _scan_parquet(path: str | os.PathLike[str], columns: list[str]) -> pl.LazyFrame:

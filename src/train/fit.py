@@ -216,14 +216,14 @@ def _grouped_epoch_indices(
             dtype=np.int32,
         )
 
-    selected_code_ids = sample_index.code_ids[selected]
-    unique_code_ids = np.unique(selected_code_ids)
-    shuffled_code_ids = np.asarray(rng.permutation(unique_code_ids), dtype=selected_code_ids.dtype)
-    code_rank = np.empty(int(sample_index.code_ids.max()) + 1, dtype=np.int32)
-    code_rank.fill(-1)
-    code_rank[shuffled_code_ids] = np.arange(shuffled_code_ids.size, dtype=np.int32)
+    selected_payload_ids = sample_index.payload_ids[selected]
+    unique_payload_ids = np.unique(selected_payload_ids)
+    shuffled_payload_ids = np.asarray(rng.permutation(unique_payload_ids), dtype=selected_payload_ids.dtype)
+    payload_rank = np.empty(int(sample_index.payload_ids.max()) + 1, dtype=np.int32)
+    payload_rank.fill(-1)
+    payload_rank[shuffled_payload_ids] = np.arange(shuffled_payload_ids.size, dtype=np.int32)
 
-    order = np.lexsort((selected, code_rank[selected_code_ids]))
+    order = np.lexsort((selected, sample_index.sample_idx[selected], payload_rank[selected_payload_ids]))
     return selected[order].tolist()
 
 
