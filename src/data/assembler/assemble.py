@@ -7,7 +7,7 @@ import numpy as np
 import polars as pl
 from numpy.lib.stride_tricks import sliding_window_view
 
-from config.config import assembled_dir, debug, packed_min_files_per_code, processed_path, train_seed
+from config.config import assembled_dir, debug, label_schema_version as PACKED_LABEL_SCHEMA_VERSION, packed_min_files_per_code, processed_path, train_seed
 
 
 # --- 特征列定义 (保持不变) ---
@@ -21,6 +21,7 @@ MICRO_USED_FEATURES = MICRO_FEATURES[:-2]
 MACRO_LOOKBACK = 64
 MEZZO_DAYS = 8
 MICRO_DAYS = 1
+_LABEL_NAMES_ARRAY = np.asarray(LABEL_COLS, dtype="<U32")
 
 
 def _compute_sample_valid(step_valid: np.ndarray) -> np.ndarray:
@@ -132,6 +133,8 @@ def _write_packed_samples(code: str, data: np.ndarray) -> None:
     if not shards:
         np.savez(
             assembled_dir / f"{code}.npz",
+            label_schema_version=np.asarray(PACKED_LABEL_SCHEMA_VERSION, dtype=np.int32),
+            label_names=_LABEL_NAMES_ARRAY,
             date=payload["date"],
             label=payload["label"],
             macro=payload["macro"],
@@ -150,6 +153,8 @@ def _write_packed_samples(code: str, data: np.ndarray) -> None:
         )
         np.savez(
             shard_path,
+            label_schema_version=np.asarray(PACKED_LABEL_SCHEMA_VERSION, dtype=np.int32),
+            label_names=_LABEL_NAMES_ARRAY,
             date=payload["date"][order],
             label=payload["label"][order],
             macro=payload["macro"][order],

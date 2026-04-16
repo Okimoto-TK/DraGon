@@ -43,6 +43,9 @@ _HOOK_TARGETS = {
 _REALTIME_KEYS = (
     "loss_total",
     "loss_task",
+    "loss_mu",
+    "loss_unc",
+    "loss_prob",
     "loss_task/Edge",
     "loss_task/Persist",
     "loss_task/DownRisk",
@@ -55,6 +58,7 @@ _REALTIME_KEYS = (
     "unc_mean/Persist",
     "unc_mean/DownRisk",
     "nu/Edge",
+    "nu/Persist",
     "nu/DownRisk",
     "token/M1_norm",
     "token/M2_norm",
@@ -651,7 +655,7 @@ class MLflowVisualizer:
 
             axes[2].hist(unc, bins=30, alpha=0.8, color="tab:orange")
             axes[2].set_title("Persist Uncertainty")
-            axes[2].set_xlabel("Persist_unc")
+            axes[2].set_xlabel("Predicted Probability Width")
             fig.tight_layout()
             return fig
 
@@ -810,7 +814,7 @@ class MLflowVisualizer:
             if not isinstance(value, Tensor) or not key.startswith("diag/"):
                 continue
             metrics[key.removeprefix("diag/")] = _as_scalar_tensor(value, device)
-        for key in ("loss_total", "loss_task"):
+        for key in ("loss_total", "loss_task", "loss_mu", "loss_unc", "loss_prob"):
             if key in loss_metrics:
                 metrics[key] = _as_scalar_tensor(loss_metrics[key], device)
         if task == "Persist":

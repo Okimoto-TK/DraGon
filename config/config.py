@@ -70,6 +70,16 @@ macro_wno_num_blocks = 2
 mezzo_wno_num_blocks = 2
 micro_wno_num_blocks = 3
 jointnet_23_blocks = 4
+label_schema_version = 2
+persist_theta = 0.0
+persist_tau = 0.01
+student_t_nu = 5.0
+uncertainty_floor = 1e-4
+uncertainty_loss_weight = 0.1
+persist_probability_loss_weight = 0.25
+edge_huber_beta = 0.01
+persist_logit_huber_beta = 0.5
+downrisk_log_huber_beta = 0.05
 
 batch_size = 128
 learning_rate = 1e-3

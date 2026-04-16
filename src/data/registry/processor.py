@@ -1,6 +1,9 @@
 """Processor constants and configurations."""
 from __future__ import annotations
 
+from config.config import persist_tau as PERSIST_TAU
+from config.config import persist_theta as PERSIST_THETA
+
 # === Processing Window Constants ===
 
 FEAT_WINDOW = 5
@@ -12,7 +15,6 @@ LABEL_WEIGHTS = [
     0.15,
     0.10,
 ]
-PERSIST_TAU = 0.5
 
 # === Chunking Configuration ===
 

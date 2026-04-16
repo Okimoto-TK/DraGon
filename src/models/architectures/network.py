@@ -19,6 +19,7 @@ from config.config import micro_wno_num_blocks as DEFAULT_MICRO_WNO_NUM_BLOCKS
 from config.config import side_hidden_dim as DEFAULT_SIDE_HIDDEN_DIM
 from config.config import summary_dim as DEFAULT_SUMMARY_DIM
 from config.config import token_dim as DEFAULT_TOKEN_DIM
+from config.config import uncertainty_floor as DEFAULT_UNCERTAINTY_FLOOR
 from src.models.components.encoders import SidechainEncoder, WNOEncoder
 from src.models.components.fusion import (
     DualCrossAttentionFusion,
@@ -59,7 +60,7 @@ class MultiScaleFusionNet(nn.Module):
         micro_decomp_level: int = DEFAULT_MICRO_DECOMP_LEVEL,
         micro_wno_num_blocks: int = DEFAULT_MICRO_WNO_NUM_BLOCKS,
         jointnet_23_blocks: int = DEFAULT_JOINTNET_23_BLOCKS,
-        uncertainty_floor: float = 1e-4,
+        uncertainty_floor: float = DEFAULT_UNCERTAINTY_FLOOR,
         downrisk_eps: float = 1e-6,
     ) -> None:
         super().__init__()
@@ -168,8 +169,7 @@ class MultiScaleFusionNet(nn.Module):
         self.full_tfn = TensorFusion(dim_x=summary_dim, dim_y=summary_dim)
         self.tfn_feat_norm = nn.LayerNorm(self.full_tfn.out_dim)
 
-        head_out_dim = 1 if self.task_label == "Persist" else 2
-        self.decoder_head = DecoderHead(in_dim=self.full_tfn.out_dim, out_dim=head_out_dim)
+        self.decoder_head = DecoderHead(in_dim=self.full_tfn.out_dim, out_dim=2)
 
     def forward(
         self,
@@ -251,12 +251,20 @@ class MultiScaleFusionNet(nn.Module):
 
         if self.task_label == "Persist":
             logit_persist = head_out[:, 0]
+            raw_unc_persist = head_out[:, 1]
+            unc_logit_persist = F.softplus(raw_unc_persist) + self.uncertainty_floor
             pred_persist = torch.sigmoid(logit_persist)
-            persist_unc = 4.0 * pred_persist * (1.0 - pred_persist)
+            persist_unc = (
+                torch.sigmoid(logit_persist + unc_logit_persist)
+                - torch.sigmoid(logit_persist - unc_logit_persist)
+            ).clamp_min(0.0)
             outputs.update(
                 {
                     "logit_Persist": logit_persist,
+                    "raw_unc_Persist": raw_unc_persist,
+                    "unc_logit_Persist": unc_logit_persist,
                     "pred_Persist": pred_persist,
+                    "unc_Persist": persist_unc,
                     "Persist": pred_persist,
                     "Persist_unc": persist_unc,
                 }

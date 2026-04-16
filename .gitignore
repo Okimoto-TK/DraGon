@@ -4,6 +4,7 @@
 # Logs & Output
 /log/
 /out/
+/report/
 
 # Dataset
 /data/

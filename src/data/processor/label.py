@@ -4,11 +4,11 @@ from __future__ import annotations
 import polars as pl
 from tqdm import tqdm
 
-from src.data.registry.processor import LABEL_WEIGHTS, LABEL_WINDOW, PERSIST_TAU
+from src.data.registry.processor import LABEL_WEIGHTS, LABEL_WINDOW, PERSIST_TAU, PERSIST_THETA
 from src.data.schemas.processed import PROCESSED_LABEL_SCHEMA
 from src.data.validators import validate_table
 
-_ROBUST_Z_EPS = 1e-6
+_NUMERIC_EPS = 1e-6
 
 
 def process_label(
@@ -58,41 +58,24 @@ def process_label(
 
     df = df.with_columns(q_tilde_exprs + close_exprs + low_exprs)
 
-    median_exprs: list[pl.Expr] = []
-    for k in range(1, LABEL_WINDOW + 1):
-        median_exprs.append(pl.col(f"_q_tilde_{k}").median().over("trade_date").alias(f"_q_med_{k}"))
-    df = df.with_columns(median_exprs)
-
-    mad_exprs: list[pl.Expr] = []
-    for k in range(1, LABEL_WINDOW + 1):
-        mad_exprs.append(
-            (pl.col(f"_q_tilde_{k}") - pl.col(f"_q_med_{k}")).abs().median().over("trade_date").alias(f"_q_mad_{k}")
-        )
-    df = df.with_columns(mad_exprs)
-
-    robust_q_exprs: list[pl.Expr] = []
     edge_expr = pl.lit(0.0)
     persist_expr = pl.lit(0.0)
     for k, weight in enumerate(LABEL_WEIGHTS, start=1):
-        q_col_name = f"_q_{k}"
-        q_expr = (
-            (pl.col(f"_q_tilde_{k}") - pl.col(f"_q_med_{k}"))
-            / (1.4826 * pl.col(f"_q_mad_{k}") + _ROBUST_Z_EPS)
-        ).alias(q_col_name)
-        robust_q_exprs.append(q_expr)
-        q_col = pl.col(q_col_name)
-        edge_expr = edge_expr + float(weight) * q_col
-        persist_expr = persist_expr + (1.0 / (1.0 + (-(q_col / PERSIST_TAU)).exp()))
+        q_tilde = pl.col(f"_q_tilde_{k}")
+        edge_expr = edge_expr + float(weight) * q_tilde
+        persist_expr = persist_expr + (
+            1.0
+            / (1.0 + (-((q_tilde - float(PERSIST_THETA)) / float(PERSIST_TAU))).exp())
+        )
 
     peak_expr = pl.col("entry_open")
     downrisk_expr = pl.lit(0.0)
     for k in range(1, LABEL_WINDOW + 1):
         low_k = pl.col(f"_low_{k}")
-        drawdown_k = ((peak_expr - low_k) / peak_expr.clip(lower_bound=_ROBUST_Z_EPS)).clip(lower_bound=0.0)
+        drawdown_k = ((peak_expr - low_k) / peak_expr.clip(lower_bound=_NUMERIC_EPS)).clip(lower_bound=0.0)
         downrisk_expr = pl.max_horizontal(downrisk_expr, drawdown_k)
         peak_expr = pl.max_horizontal(peak_expr, pl.col(f"_close_{k}"))
 
-    df = df.with_columns(robust_q_exprs)
     df = df.with_columns(
         edge_expr.alias("label_Edge"),
         (persist_expr / float(LABEL_WINDOW)).alias("label_Persist"),

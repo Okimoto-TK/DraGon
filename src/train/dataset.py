@@ -16,10 +16,38 @@ from config.config import assembled_dir
 from config.config import lazy_cache_codes as DEFAULT_LAZY_CACHE_CODES
 from config.config import val_ratio as DEFAULT_VAL_RATIO
 from src.data.assembler.assemble import LABEL_COLS
+from src.data.assembler.assemble import PACKED_LABEL_SCHEMA_VERSION
 
 MemoryMode = Literal["lazy_packed", "auto"]
 _LABEL_INDEX = {name: idx for idx, name in enumerate(LABEL_COLS)}
 _MANIFEST_NAME = "_packed_manifest.json"
+
+
+def _validate_packed_schema(packed: np.lib.npyio.NpzFile, *, path: Path) -> None:
+    if "label_schema_version" not in packed or "label_names" not in packed:
+        raise ValueError(
+            f"Packed tensor file {path} is missing label schema metadata. "
+            "Rebuild assembled data with `dragon prepare assembled`."
+        )
+
+    schema_version = int(np.asarray(packed["label_schema_version"]).reshape(()).item())
+    label_names_raw = np.asarray(packed["label_names"])
+    label_names = [str(name) for name in label_names_raw.reshape(-1).tolist()]
+    if schema_version != int(PACKED_LABEL_SCHEMA_VERSION) or label_names != list(LABEL_COLS):
+        raise ValueError(
+            f"Packed tensor file {path} has label schema {schema_version}:{label_names}, "
+            f"expected {PACKED_LABEL_SCHEMA_VERSION}:{LABEL_COLS}. "
+            "Rebuild processed labels and assembled data."
+        )
+
+    if "label" not in packed:
+        raise ValueError(f"Packed tensor file {path} is missing `label` payload.")
+    label = np.asarray(packed["label"])
+    if label.ndim != 2 or int(label.shape[1]) != len(LABEL_COLS):
+        raise ValueError(
+            f"Packed tensor file {path} has label shape {tuple(label.shape)}, "
+            f"expected (*, {len(LABEL_COLS)}). Rebuild assembled data."
+        )
 
 
 @dataclass(frozen=True)
@@ -70,6 +98,7 @@ def _manifest_path(root: Path) -> Path:
 
 def _scan_packed_file(path: Path) -> dict[str, int | str]:
     with np.load(path, allow_pickle=False) as packed:
+        _validate_packed_schema(packed, path=path)
         count = int(np.asarray(packed["date"]).shape[0])
     stat = path.stat()
     return {
@@ -77,6 +106,8 @@ def _scan_packed_file(path: Path) -> dict[str, int | str]:
         "count": count,
         "size": int(stat.st_size),
         "mtime_ns": int(stat.st_mtime_ns),
+        "schema_version": int(PACKED_LABEL_SCHEMA_VERSION),
+        "label_names": list(LABEL_COLS),
     }
 
 
@@ -116,6 +147,8 @@ def _get_packed_manifest(root: Path) -> dict[str, dict[str, int | str]]:
                             or
                             int(meta.get("size", -1)) != int(stat.st_size)
                             or int(meta.get("mtime_ns", -1)) != int(stat.st_mtime_ns)
+                            or int(meta.get("schema_version", -1)) != int(PACKED_LABEL_SCHEMA_VERSION)
+                            or list(meta.get("label_names", [])) != list(LABEL_COLS)
                         ):
                             up_to_date = False
                             break
@@ -126,6 +159,8 @@ def _get_packed_manifest(root: Path) -> dict[str, dict[str, int | str]]:
                                 "count": int(meta.get("count", 0)),
                                 "size": int(meta.get("size", 0)),
                                 "mtime_ns": int(meta.get("mtime_ns", 0)),
+                                "schema_version": int(meta.get("schema_version", PACKED_LABEL_SCHEMA_VERSION)),
+                                "label_names": list(meta.get("label_names", LABEL_COLS)),
                             }
                             for payload_name, meta in manifest.items()
                         }
@@ -156,6 +191,7 @@ def build_packed_sample_index(codes: list[str]) -> SampleIndexTable:
         payloadbook.append(payload_name)
 
         with np.load(path, allow_pickle=False) as packed:
+            _validate_packed_schema(packed, path=path)
             date = np.asarray(packed["date"], dtype=np.float32)
 
         if date.size == 0:
@@ -239,6 +275,7 @@ class PackedTensorDataset(Dataset[dict[str, Tensor]]):
         cached = self._cache.pop(payload_name, None)
         if cached is None:
             with np.load(_packed_path(payload_name), allow_pickle=False) as packed:
+                _validate_packed_schema(packed, path=_packed_path(payload_name))
                 cached = {
                     "date": torch.from_numpy(np.ascontiguousarray(packed["date"], dtype=np.float32)),
                     "label": torch.from_numpy(np.ascontiguousarray(packed["label"], dtype=np.float32)),

@@ -22,6 +22,9 @@ from config.config import trend_ema_alpha as DEFAULT_TREND_EMA_ALPHA
 _DISPLAY_KEYS = [
     "loss_total",
     "loss_task",
+    "loss_mu",
+    "loss_unc",
+    "loss_prob",
     "loss_Edge",
     "loss_Persist",
     "loss_DownRisk",
@@ -34,6 +37,7 @@ _DISPLAY_KEYS = [
     "unc_Persist_mean",
     "unc_DownRisk_mean",
     "nu_Edge",
+    "nu_Persist",
     "nu_DownRisk",
 ]
 
