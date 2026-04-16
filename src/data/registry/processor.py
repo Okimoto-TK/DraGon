@@ -1,23 +1,16 @@
 """Processor constants and configurations."""
 from __future__ import annotations
 
-from config.config import persist_tau as PERSIST_TAU
-from config.config import persist_theta as PERSIST_THETA
-
 # === Processing Window Constants ===
 
 FEAT_WINDOW = 5
-LABEL_WINDOW = 5
-LABEL_WEIGHTS = [
-    0.30,
-    0.25,
-    0.20,
-    0.15,
-    0.10,
-]
+LABEL_WINDOW = 4
 
 # === Chunking Configuration ===
 
-CHUNK_DAYS = 48  # Number of days to process in one chunk for high-volume data
-CHUNK_TAIL_BARS = 1  # 5-min bars to carry over (covers Mezzo lookback: 64 * 6 = 384)
-CHUNK_TAIL_DAYS = 1  # Daily adj factors to carry over
+CHUNK_DAYS = 128  # Number of days to process in one chunk for high-volume data
+# Carry 5 full trading days of 5-minute bars per code so intraday F4 can use the
+# previous 5 sessions' same-slot moving average across chunk boundaries.
+CHUNK_TAIL_BARS = 5 * 48
+# Daily adj factors / limit prices must cover the same 5 carried-over sessions.
+CHUNK_TAIL_DAYS = 5

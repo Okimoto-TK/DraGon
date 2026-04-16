@@ -35,7 +35,6 @@ from .processed import (
     PROCESSED_PARAM_MAP
 )
 from .processor import (
-    LABEL_WEIGHTS,
     LABEL_WINDOW,
 )
 
@@ -64,7 +63,6 @@ __all__ = [
     "MEZZO_LOOKBACK",
     "MICRO_LOOKBACK",
     "LABEL_WINDOW",
-    "LABEL_WEIGHTS",
     # Parameter maps
     "PARAM_MAP",
     "PROCESSED_PARAM_MAP",

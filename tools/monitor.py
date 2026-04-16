@@ -28,6 +28,8 @@ from urllib.parse import parse_qs, urlparse, urlunparse
 
 from mlflow.tracking import MlflowClient
 
+from src.task_labels import TASK_LABELS, canonical_task_label, is_quantile_task
+
 DEFAULT_RUN_URLS: list[str] = [
     # "http://127.0.0.1:5000/#/experiments/1/runs/<run_id>",
 ]
@@ -103,26 +105,32 @@ def _metric_history(client: MlflowClient, run_id: str, key: str) -> list[tuple[i
 def _infer_task(metric_keys: set[str], params: dict[str, str]) -> str:
     explicit = params.get("label")
     if explicit:
-        return explicit
+        return canonical_task_label(explicit)
     joined = " ".join(sorted(metric_keys))
-    if "Persist" in joined:
-        return "Persist"
-    if "DownRisk" in joined:
-        return "DownRisk"
-    return "Edge"
+    for task in TASK_LABELS:
+        if f".{task}" in joined or f"_{task}" in joined or task in joined:
+            return task
+    return "ret"
 
 
 def _task_metric_keys(task: str) -> dict[str, tuple[str, str] | tuple[str, str, str]]:
-    if task == "Persist":
+    if is_quantile_task(task):
         return {
             "loss_total": ("train.realtime.loss_total", "val.epoch_diag.loss_total"),
             "loss_mu": ("train.realtime.loss_mu", "val.epoch_diag.loss_mu"),
             "loss_unc": ("train.realtime.loss_unc", "val.epoch_diag.loss_unc"),
-            "loss_prob": ("train.realtime.loss_prob", "val.epoch_diag.loss_prob"),
-            "brier": ("train.realtime.brier.Persist", "val.epoch_diag.brier.Persist"),
-            "prob_mean": ("train.realtime.prob_mean.Persist", "val.epoch_diag.prob_mean.Persist"),
-            "unc_mean": ("train.realtime.unc_mean.Persist", "val.epoch_diag.unc_mean.Persist"),
-            "nu": ("train.realtime.nu.Persist", "val.epoch_diag.nu.Persist"),
+            "loss_quantile": (f"train.realtime.loss_{task}", f"val.epoch_diag.loss_{task}"),
+            "mae": (f"train.realtime.mae.{task}", f"val.epoch_diag.mae.{task}"),
+            "unc_mean": (f"train.realtime.unc_mean.{task}", f"val.epoch_diag.unc_mean.{task}"),
+        }
+    if task == "rv":
+        return {
+            "loss_total": ("train.realtime.loss_total", "val.epoch_diag.loss_total"),
+            "loss_mu": ("train.realtime.loss_mu", "val.epoch_diag.loss_mu"),
+            "loss_unc": ("train.realtime.loss_unc", "val.epoch_diag.loss_unc"),
+            "loss_rv": ("train.realtime.loss_rv", "val.epoch_diag.loss_rv"),
+            "mae": ("train.realtime.mae.rv", "val.epoch_diag.mae.rv"),
+            "unc_mean": ("train.realtime.unc_mean.rv", "val.epoch_diag.unc_mean.rv"),
         }
     return {
         "loss_total": ("train.realtime.loss_total", "val.epoch_diag.loss_total"),
@@ -130,7 +138,6 @@ def _task_metric_keys(task: str) -> dict[str, tuple[str, str] | tuple[str, str, 
         "loss_unc": ("train.realtime.loss_unc", "val.epoch_diag.loss_unc"),
         "mae": (f"train.realtime.mae.{task}", f"val.epoch_diag.mae.{task}"),
         "unc_mean": (f"train.realtime.unc_mean.{task}", f"val.epoch_diag.unc_mean.{task}"),
-        "nu": (f"train.realtime.nu.{task}", f"val.epoch_diag.nu.{task}"),
     }
 
 
@@ -196,20 +203,17 @@ def _trend_symbol(current: float | None, previous: float | None) -> str:
 def _metric_groups_for_task(task: str) -> list[list[str]]:
     keys = _task_metric_keys(task)
     health = _health_metric_keys()
-    if task == "Persist":
+    if is_quantile_task(task):
         return [
             [keys["loss_total"][0], keys["loss_total"][1]],
             [keys["loss_mu"][0], keys["loss_mu"][1], keys["loss_unc"][0], keys["loss_unc"][1]],
-            [keys["loss_prob"][0], keys["loss_prob"][1]],
             [
-                keys["brier"][0],
-                keys["brier"][1],
-                keys["prob_mean"][0],
-                keys["prob_mean"][1],
+                keys["loss_quantile"][0],
+                keys["loss_quantile"][1],
+                keys["mae"][0],
+                keys["mae"][1],
                 keys["unc_mean"][0],
                 keys["unc_mean"][1],
-                keys["nu"][0],
-                keys["nu"][1],
             ],
             list(health.values()),
         ]
@@ -217,7 +221,7 @@ def _metric_groups_for_task(task: str) -> list[list[str]]:
         [keys["loss_total"][0], keys["loss_total"][1]],
         [keys["loss_mu"][0], keys["loss_mu"][1], keys["loss_unc"][0], keys["loss_unc"][1]],
         [keys["mae"][0], keys["mae"][1]],
-        [keys["unc_mean"][0], keys["unc_mean"][1], keys["nu"][0], keys["nu"][1]],
+        [keys["unc_mean"][0], keys["unc_mean"][1]],
         list(health.values()),
     ]
 
@@ -484,9 +488,13 @@ def _loss_plot(snapshot: dict[str, Any]) -> bytes:
         ("train mu", _series(snapshot, keys["loss_mu"][0]), _COLORS["mu"], "-"),
         ("train unc", _series(snapshot, keys["loss_unc"][0]), _COLORS["unc"], "-"),
     ]
-    if task == "Persist":
+    if is_quantile_task(task):
         components.append(
-            ("train prob", _series(snapshot, keys["loss_prob"][0]), _COLORS["prob"], "-")
+            ("train quantile", _series(snapshot, keys["loss_quantile"][0]), _COLORS["prob"], "-")
+        )
+    elif task == "rv":
+        components.append(
+            ("train rv", _series(snapshot, keys["loss_rv"][0]), _COLORS["prob"], "-")
         )
     _plot_lines(axes[1], components)
     axes[1].set_title("Train Components")
@@ -507,42 +515,31 @@ def _task_plot(snapshot: dict[str, Any]) -> bytes:
     plt, _ = _get_matplotlib()
     fig, axes = plt.subplots(1, 2, figsize=(10, 3.6), dpi=150)
 
-    if task == "Persist":
-        _plot_lines(
-            axes[0],
-            [
-                ("train brier", _series(snapshot, keys["brier"][0]), _COLORS["quality"], "-"),
-                ("val brier", _series(snapshot, keys["brier"][1]), _COLORS["val"], "--"),
-            ],
+    _plot_lines(
+        axes[0],
+        [
+            ("train mae", _series(snapshot, keys["mae"][0]), _COLORS["quality"], "-"),
+            ("val mae", _series(snapshot, keys["mae"][1]), _COLORS["val"], "--"),
+        ],
+    )
+    axes[0].set_title("Prediction Error")
+    uncertainty_series: list[tuple[str, list[tuple[int, float]], str, str]] = [
+        ("train unc", _series(snapshot, keys["unc_mean"][0]), _COLORS["unc"], "-"),
+        ("val unc", _series(snapshot, keys["unc_mean"][1]), _COLORS["val"], "--"),
+    ]
+    if is_quantile_task(task):
+        uncertainty_series.append(
+            ("train quantile", _series(snapshot, keys["loss_quantile"][0]), _COLORS["prob"], "-.")
         )
-        axes[0].set_title("Probability Quality")
-        _plot_lines(
-            axes[1],
-            [
-                ("train prob mean", _series(snapshot, keys["prob_mean"][0]), _COLORS["train"], "-"),
-                ("val prob mean", _series(snapshot, keys["prob_mean"][1]), _COLORS["val"], "--"),
-                ("train unc", _series(snapshot, keys["unc_mean"][0]), _COLORS["unc"], "-."),
-            ],
+        axes[1].set_title("Quantile / Uncertainty")
+    elif task == "rv":
+        uncertainty_series.append(
+            ("train rv", _series(snapshot, keys["loss_rv"][0]), _COLORS["prob"], "-.")
         )
-        axes[1].set_title("Probability / Uncertainty")
+        axes[1].set_title("RV / Uncertainty")
     else:
-        _plot_lines(
-            axes[0],
-            [
-                ("train mae", _series(snapshot, keys["mae"][0]), _COLORS["quality"], "-"),
-                ("val mae", _series(snapshot, keys["mae"][1]), _COLORS["val"], "--"),
-            ],
-        )
-        axes[0].set_title("Prediction Error")
-        _plot_lines(
-            axes[1],
-            [
-                ("train unc", _series(snapshot, keys["unc_mean"][0]), _COLORS["unc"], "-"),
-                ("val unc", _series(snapshot, keys["unc_mean"][1]), _COLORS["val"], "--"),
-                ("train nu", _series(snapshot, keys["nu"][0]), _COLORS["prob"], "-."),
-            ],
-        )
         axes[1].set_title("Uncertainty")
+    _plot_lines(axes[1], uncertainty_series)
 
     fig.suptitle(f"{snapshot['run_name']} · {task} · Task", x=0.03, ha="left", fontsize=12, fontweight="bold")
     buf = io.BytesIO()
@@ -880,7 +877,7 @@ def _html_page(title: str) -> str:
         statCard("Val Total", summary.val_loss_total),
         statCard("Train Mu", summary.train_loss_mu),
         statCard("Train Unc", summary.train_loss_unc),
-        statCard("Quality", summary.train_brier || summary.train_mae),
+        statCard("Quality", summary.train_loss_quantile || summary.train_loss_rv || summary.train_mae),
         statCard("LR", summary.lr),
       ].join("");
 

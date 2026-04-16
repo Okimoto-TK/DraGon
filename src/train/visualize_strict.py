@@ -15,6 +15,7 @@ from config.config import trend_ema_alpha as DEFAULT_EMA_ALPHA
 from torch import Tensor, nn
 
 from src.task_labels import detect_task_from_outputs
+from src.task_labels import task_target_column
 from src.train.utils import grad_norm
 
 try:
@@ -45,21 +46,15 @@ _REALTIME_KEYS = (
     "loss_task",
     "loss_mu",
     "loss_unc",
-    "loss_prob",
-    "loss_task/Edge",
-    "loss_task/Persist",
-    "loss_task/DownRisk",
-    "mae/Edge",
-    "mae/Persist",
-    "mae/DownRisk",
-    "brier/Persist",
-    "prob_mean/Persist",
-    "unc_mean/Edge",
-    "unc_mean/Persist",
-    "unc_mean/DownRisk",
-    "nu/Edge",
-    "nu/Persist",
-    "nu/DownRisk",
+    "loss_task/ret",
+    "loss_task/rv",
+    "loss_task/p90",
+    "mae/ret",
+    "mae/rv",
+    "mae/p90",
+    "unc_mean/ret",
+    "unc_mean/rv",
+    "unc_mean/p90",
     "token/M1_norm",
     "token/M2_norm",
     "token/S_norm",
@@ -74,6 +69,9 @@ _REALTIME_KEYS = (
     "decoder/head_out_std",
 )
 _DYNAMIC_REALTIME_PREFIXES = (
+    "loss_task/",
+    "mae/",
+    "unc_mean/",
     "encoder/",
     "map/",
     "fusion/drift_layer",
@@ -389,10 +387,8 @@ class MLflowVisualizer:
         buffer.update(lightweight, weight=int(batch["macro"].shape[0]))
 
         task = detect_task_from_outputs(outputs)
-        if task == "Persist":
-            buffer.add_task_samples("Persist", outputs["pred_Persist"], batch["label_Persist"], outputs["Persist_unc"])
-        else:
-            buffer.add_task_samples(task, outputs[f"pred_{task}"], batch[f"label_{task}"], outputs[f"unc_{task}"])
+        target = batch[task_target_column(task)]
+        buffer.add_task_samples(task, outputs[f"pred_{task}"], target, outputs[f"unc_{task}"])
 
         for name in ("H12", "H23"):
             feature = outputs.get(name)
@@ -637,28 +633,6 @@ class MLflowVisualizer:
         if pred.size == 0 or label.size == 0 or unc.size == 0:
             return None
 
-        if task == "Persist":
-            fig, axes = plt.subplots(1, 3, figsize=(15, 4))
-            rel_x, rel_y = _reliability_curve(pred, label)
-            if rel_x.size > 0:
-                axes[0].plot([0.0, 1.0], [0.0, 1.0], linestyle="--", color="tab:gray")
-                axes[0].plot(rel_x, rel_y, marker="o")
-            axes[0].set_xlim(0.0, 1.0)
-            axes[0].set_ylim(0.0, 1.0)
-            axes[0].set_title("Persist Reliability")
-            axes[0].set_xlabel("Predicted")
-            axes[0].set_ylabel("Observed Soft Label")
-
-            axes[1].hist(pred, bins=30, alpha=0.8, color="tab:blue")
-            axes[1].set_title("Persist Probability")
-            axes[1].set_xlabel("Predicted Probability")
-
-            axes[2].hist(unc, bins=30, alpha=0.8, color="tab:orange")
-            axes[2].set_title("Persist Uncertainty")
-            axes[2].set_xlabel("Predicted Probability Width")
-            fig.tight_layout()
-            return fig
-
         fig, axes = plt.subplots(2, 2, figsize=(12, 8))
         error = np.abs(pred - label)
         if pred.size >= 128:
@@ -814,27 +788,16 @@ class MLflowVisualizer:
             if not isinstance(value, Tensor) or not key.startswith("diag/"):
                 continue
             metrics[key.removeprefix("diag/")] = _as_scalar_tensor(value, device)
-        for key in ("loss_total", "loss_task", "loss_mu", "loss_unc", "loss_prob"):
+        for key in ("loss_total", "loss_task", "loss_mu", "loss_unc"):
             if key in loss_metrics:
                 metrics[key] = _as_scalar_tensor(loss_metrics[key], device)
-        if task == "Persist":
-            pred = outputs["pred_Persist"]
-            target = batch["label_Persist"]
-            metrics.setdefault("mae/Persist", torch.mean(torch.abs(pred - target)).detach().float())
-            metrics.setdefault("brier/Persist", torch.mean((pred - target).float() ** 2).detach())
-            metrics.setdefault("prob_mean/Persist", pred.detach().float().mean())
-            metrics.setdefault("unc_mean/Persist", outputs["Persist_unc"].detach().float().mean())
-        else:
-            pred = outputs[f"pred_{task}"]
-            target = batch[f"label_{task}"]
-            metrics.setdefault(f"mae/{task}", torch.mean(torch.abs(pred - target)).detach().float())
-            metrics.setdefault(f"unc_mean/{task}", outputs[f"unc_{task}"].detach().float().mean())
+        pred = outputs[f"pred_{task}"]
+        target = batch[task_target_column(task)]
+        metrics.setdefault(f"mae/{task}", torch.mean(torch.abs(pred - target)).detach().float())
+        metrics.setdefault(f"unc_mean/{task}", outputs[f"unc_{task}"].detach().float().mean())
         loss_key = f"loss_{task}"
         if loss_key in loss_metrics:
             metrics[f"loss_task/{task}"] = _as_scalar_tensor(loss_metrics[loss_key], device)
-        nu_key = f"nu_{task}"
-        if nu_key in loss_metrics:
-            metrics[f"nu/{task}"] = _as_scalar_tensor(loss_metrics[nu_key], device)
         metrics.setdefault("token/M1_norm", _channelwise_l2_mean(outputs["M1"], channel_dim=2))
         metrics.setdefault("token/M2_norm", _channelwise_l2_mean(outputs["M2"], channel_dim=2))
         metrics.setdefault("token/S_norm", _channelwise_l2_mean(outputs["S"], channel_dim=2))

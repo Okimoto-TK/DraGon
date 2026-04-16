@@ -24,21 +24,15 @@ _DISPLAY_KEYS = [
     "loss_task",
     "loss_mu",
     "loss_unc",
-    "loss_prob",
-    "loss_Edge",
-    "loss_Persist",
-    "loss_DownRisk",
-    "mae_Edge",
-    "mae_Persist",
-    "mae_DownRisk",
-    "brier_Persist",
-    "prob_Persist_mean",
-    "unc_Edge_mean",
-    "unc_Persist_mean",
-    "unc_DownRisk_mean",
-    "nu_Edge",
-    "nu_Persist",
-    "nu_DownRisk",
+    "loss_ret",
+    "loss_rv",
+    "loss_p90",
+    "mae_ret",
+    "mae_rv",
+    "mae_p90",
+    "unc_ret_mean",
+    "unc_rv_mean",
+    "unc_p90_mean",
 ]
 
 
@@ -69,6 +63,8 @@ def _metrics_table(
     table.add_column(justify="left", no_wrap=True, overflow="ellipsis")
 
     visible_keys = [key for key in _DISPLAY_KEYS if key in metrics]
+    if not visible_keys:
+        visible_keys = sorted(metrics.keys())
 
     if visible_keys:
         for key in visible_keys:

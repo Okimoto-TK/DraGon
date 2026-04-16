@@ -13,6 +13,8 @@ from src.data.schemas.processed import (
 from src.data.validators import validate_table
 
 _EPS = 1e-8
+_LIMIT_TOL = 1e-4
+_FEATURE_COUNT = 9
 
 
 def _normal_rank(s: pl.Series) -> pl.Series:
@@ -67,7 +69,7 @@ def process_macro(
         freq="macro",
     )
 
-    for i in range(9):
+    for i in range(_FEATURE_COUNT):
         result = result.rename({f"f{i}": f"mcr_f{i}"})
 
     validate_table(result, PROCESSED_MACRO_SCHEMA)
@@ -115,7 +117,7 @@ def process_micro(
         freq="micro",
     )
 
-    for i in range(9):
+    for i in range(_FEATURE_COUNT):
         result = result.rename({f"f{i}": f"mic_f{i}"})
 
     validate_table(result, PROCESSED_MICRO_SCHEMA)
@@ -159,7 +161,7 @@ def process_mezzo(
         freq="mezzo",
     )
 
-    for i in range(9):
+    for i in range(_FEATURE_COUNT):
         result = result.rename({f"f{i}": f"mzo_f{i}"})
 
     validate_table(result, PROCESSED_MEZZO_SCHEMA)
@@ -172,7 +174,7 @@ def _process_ohlcv(
     limit_df: pl.DataFrame,
     freq: str = "macro",
 ) -> pl.DataFrame:
-    """Process OHLCV data into nine backbone features."""
+    """Process OHLCV data into backbone features."""
     df = ohlcv_df.join(
         index_df.select(["code", "trade_date", "logic_index"]),
         on=["code", "trade_date"],
@@ -193,32 +195,56 @@ def _process_ohlcv(
 
     if freq == "macro":
         f0_expr = pl.col("close").log() - pl.col("close").shift(1).over("code").log()
-        f1_expr = (pl.col("amount") + 1).log() - (
-            pl.col("amount").shift(1).over("code") + 1
-        ).log()
     else:
         f0_expr = pl.col("close").log() - pl.col("open").log()
-        f1_expr = (pl.col("amount") + 1).log() - (
-            pl.col("amount").shift(1).over("code") + 1
-        ).log()
+
+    if has_time_index:
+        # For intraday branches, compare against the previous 5 sessions'
+        # average amount at the same slot, excluding the current bar.
+        amount_ma5 = (
+            pl.col("amount")
+            .rolling_mean(5)
+            .shift(1)
+            .over(["code", "time_index"])
+        )
+    else:
+        # For daily macro features, compare against the previous 5 trading days'
+        # average amount, excluding the current day.
+        amount_ma5 = pl.col("amount").rolling_mean(5).shift(1).over("code")
+    up_limit_tol = pl.col("up_limit").abs() * _LIMIT_TOL + 1e-6
+    down_limit_tol = pl.col("down_limit").abs() * _LIMIT_TOL + 1e-6
+    amihud_expr = f0_expr / (pl.col("amount") + _EPS)
 
     df = df.with_columns([
         f0_expr.alias("f0_raw"),
-        f1_expr.alias("f1_raw"),
-        (pl.col("high") / (pl.col("low") + _EPS)).log().alias("f2_raw"),
+        (pl.col("high") / (pl.col("low") + _EPS)).log().alias("f1_raw"),
         pl.when(pl.col("high") == pl.col("low"))
         .then(pl.lit(0.5))
         .otherwise(
             (pl.col("close") - pl.col("low")) / (pl.col("high") - pl.col("low"))
         )
         .clip(0.0, 1.0)
-        .alias("f3_raw"),
+        .alias("f2_raw"),
         (
             (pl.col("close") - pl.col("down_limit"))
             / (pl.col("up_limit") - pl.col("down_limit") + _EPS)
         )
         .clip(0.0, 1.0)
-        .alias("f4_raw"),
+        .alias("f3_raw"),
+        (pl.col("amount") / (amount_ma5 + _EPS)).clip(0.0, 10.0).alias("f4_raw"),
+        amihud_expr.alias("f5_raw"),
+        (pl.col("high") >= pl.col("up_limit") - up_limit_tol)
+        .cast(pl.Float64)
+        .alias("_hit_up_raw"),
+        (pl.col("low") <= pl.col("down_limit") + down_limit_tol)
+        .cast(pl.Float64)
+        .alias("_hit_down_raw"),
+        ((pl.col("close") - pl.col("up_limit")).abs() <= up_limit_tol)
+        .cast(pl.Float64)
+        .alias("_close_up_raw"),
+        ((pl.col("close") - pl.col("down_limit")).abs() <= down_limit_tol)
+        .cast(pl.Float64)
+        .alias("_close_down_raw"),
     ])
 
     if freq == "micro":
@@ -245,22 +271,36 @@ def _process_ohlcv(
         )
 
     df = df.with_columns([
-        (pl.col("step_idx") * 2 * np.pi / period).sin().alias("f5_raw"),
-        (pl.col("step_idx") * 2 * np.pi / period).cos().alias("f6_raw"),
-        pl.col("f0_raw").map_batches(_normal_rank).over(group_key).alias("f7_raw"),
-        pl.col("f1_raw").map_batches(_normal_rank).over(group_key).alias("f8_raw"),
+        (
+            pl.col("_hit_up_raw") * 8.0
+            + pl.col("_hit_down_raw") * 4.0
+            + pl.col("_close_up_raw") * 2.0
+            + pl.col("_close_down_raw")
+        ).alias("f6_raw"),
+        (pl.col("step_idx") * 2 * np.pi / period).sin().alias("f7_raw"),
+        (pl.col("step_idx") * 2 * np.pi / period).cos().alias("f8_raw"),
     ])
 
-    cols_to_drop = ["logic_index", "up_limit", "down_limit", "step_idx", "weekday"]
+    cols_to_drop = [
+        "logic_index",
+        "up_limit",
+        "down_limit",
+        "step_idx",
+        "weekday",
+        "_hit_up_raw",
+        "_hit_down_raw",
+        "_close_up_raw",
+        "_close_down_raw",
+    ]
     df = df.drop([c for c in cols_to_drop if c in df.columns])
 
-    for i in range(9):
+    for i in range(_FEATURE_COUNT):
         df = df.rename({f"f{i}_raw": f"f{i}"})
 
     select_cols = (
         ["code", "trade_date"]
         + (["time_index"] if has_time_index else [])
-        + [f"f{i}" for i in range(9)]
+        + [f"f{i}" for i in range(_FEATURE_COUNT)]
     )
     result = df.select([c for c in select_cols if c in df.columns])
 

@@ -1,6 +1,7 @@
 # Backup
 *.bak
-
+*.csv
+*.json
 # Logs & Output
 /log/
 /out/
@@ -219,3 +220,4 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+/.codex

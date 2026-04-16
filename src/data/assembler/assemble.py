@@ -10,13 +10,13 @@ from numpy.lib.stride_tricks import sliding_window_view
 from config.config import assembled_dir, debug, label_schema_version as PACKED_LABEL_SCHEMA_VERSION, packed_min_files_per_code, processed_path, train_seed
 
 
-# --- 特征列定义 (保持不变) ---
+# --- 特征列定义 ---
 MACRO_FEATURES = [f"mcr_f{i}" for i in range(9)]
-SIDECHAIN_FEATURES = ["gap", "gap_rank", "mf_net_ratio", "mf_net_rank", "mf_concentration", "amt_surge_rank", "velocity_rank", "amihud_impact"]
-LABEL_COLS = ["label_Edge", "label_Persist", "label_DownRisk"]
+SIDECHAIN_FEATURES = ["gap", "gap_rank", "mf_net_ratio", "mf_net_rank", "mf_concentration", "amount_rank", "velocity_rank", "amihud_impact"]
+LABEL_COLS = ["label_ret", "label_rv"]
 MEZZO_FEATURES = [f"mzo_f{i}" for i in range(9)]
 MICRO_FEATURES = [f"mic_f{i}" for i in range(9)]
-MICRO_USED_FEATURES = MICRO_FEATURES[:-2]
+MICRO_USED_FEATURES = MICRO_FEATURES
 
 MACRO_LOOKBACK = 64
 MEZZO_DAYS = 8

@@ -68,7 +68,7 @@ def process_sidechain(
             pl.col("amount") / (pl.col("amount").rolling_mean(5).over("code") + _EPS)
         ).alias("amt_surge_raw"),
     ]).with_columns(
-        (pl.col("velocity_raw").abs() / (pl.col("amount") + _EPS)).alias("amihud_raw")
+        (pl.col("velocity_raw") / (pl.col("amount") + _EPS)).alias("amihud_raw")
     )
 
     group_key = ["trade_date"]
@@ -78,10 +78,10 @@ def process_sidechain(
         .map_batches(_normal_rank)
         .over(group_key)
         .alias("velocity_rank"),
-        pl.col("amt_surge_raw")
+        pl.col("amount")
         .map_batches(_normal_rank)
         .over(group_key)
-        .alias("amt_surge_rank"),
+        .alias("amount_rank"),
         pl.col("amihud_raw")
         .map_batches(_normal_rank)
         .over(group_key)
@@ -110,7 +110,7 @@ def process_sidechain(
         "mf_net_ratio",
         "mf_net_rank",
         "mf_concentration",
-        "amt_surge_rank",
+        "amount_rank",
         "velocity_rank",
         "amihud_impact",
     ]).sort(["code", "trade_date"])

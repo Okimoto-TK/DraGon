@@ -265,11 +265,11 @@ PROCESSED_SIDECHAIN_SCHEMA = TableSchema(
             description="Main force net rank: NormalRank(mf_net_ratio)",
         ),
         ColumnSchema(
-            name="amt_surge_rank",
+            name="amount_rank",
             dtype=pl.Float64,
             required=True,
             nullable=True,
-            description="Volume surge normal rank: NormalRank(Amount / MA(Amount, 5))",
+            description="Cross-sectional normal rank of raw amount.",
         ),
         ColumnSchema(
             name="velocity_rank",
@@ -283,7 +283,7 @@ PROCESSED_SIDECHAIN_SCHEMA = TableSchema(
             dtype=pl.Float64,
             required=True,
             nullable=True,
-            description="Amihud illiquidity rank: NormalRank(abs(Velocity) / Amount)",
+            description="Signed Amihud rank: NormalRank(Velocity / Amount)",
         ),
     ),
 )
@@ -292,7 +292,7 @@ PROCESSED_SIDECHAIN_SCHEMA = TableSchema(
 PROCESSED_LABEL_SCHEMA = TableSchema(
     name="processed_label",
     layer="processed",
-    description="Processed labels for Edge / Persist / DownRisk single-task modeling.",
+    description="Processed labels for ret / rv dual-target modeling.",
     primary_key=("code", "trade_date"),
     partition_by=("code",),
     columns=(
@@ -313,25 +313,18 @@ PROCESSED_LABEL_SCHEMA = TableSchema(
             description="As-of date.",
         ),
         ColumnSchema(
-            name="label_Edge",
+            name="label_ret",
             dtype=pl.Float64,
             required=True,
             nullable=True,
-            description="Weighted robust-z future opportunity score over the next 5 trading days.",
+            description="Mean adjusted open over T+2..T+4 divided by adjusted open at T+1.",
         ),
         ColumnSchema(
-            name="label_Persist",
+            name="label_rv",
             dtype=pl.Float64,
             required=True,
             nullable=True,
-            description="Soft persistence probability derived from future robust-z opportunity scores.",
-        ),
-        ColumnSchema(
-            name="label_DownRisk",
-            dtype=pl.Float64,
-            required=True,
-            nullable=True,
-            description="Future 5-day maximum drawdown using adjusted low path.",
+            description="Future realized volatility over the next 4 trading days using log(High/Low).",
         ),
     ),
 )

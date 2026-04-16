@@ -284,7 +284,7 @@ def fit(
     grad_clip: float | None = DEFAULT_GRAD_CLIP,
     checkpoint_path: str | Path | None = None,
     checkpoint_dir: str | Path = DEFAULT_CHECKPOINT_DIR,
-    label: str = "Edge",
+    label: str = "ret",
     run_name: str = "default",
     load_checkpoint: str | Path | None = None,
     save_every: int = DEFAULT_SAVE_EVERY,
@@ -680,7 +680,7 @@ def run_training(
 
 def smoke_test(
     *,
-    label: str = "Edge",
+    label: str = "ret",
     device: str | None = None,
     max_codes: int = 1,
     memory_mode: str = DEFAULT_MEMORY_MODE,

@@ -8,6 +8,7 @@ import torch
 from torch import Tensor
 
 from src.task_labels import detect_task_from_outputs
+from src.task_labels import task_target_column
 
 
 def move_batch_to_device(batch: Mapping[str, Tensor], device: str) -> dict[str, Tensor]:
@@ -115,16 +116,8 @@ def batch_prediction_metrics(
 ) -> dict[str, Tensor]:
     """Compute single-task prediction diagnostics for one batch."""
     task = detect_task_from_outputs(outputs)
-    target = batch[f"label_{task}"]
+    target = batch[task_target_column(task)]
     metrics: dict[str, Tensor] = {}
-
-    if task == "Persist":
-        pred = outputs["pred_Persist"]
-        metrics["mae_Persist"] = torch.mean(torch.abs(pred - target)).detach()
-        metrics["brier_Persist"] = torch.mean((pred - target) * (pred - target)).detach()
-        metrics["prob_Persist_mean"] = pred.mean().detach()
-        metrics["unc_Persist_mean"] = outputs["Persist_unc"].mean().detach()
-        return metrics
 
     pred = outputs[f"pred_{task}"]
     metrics[f"mae_{task}"] = torch.mean(torch.abs(pred - target)).detach()
