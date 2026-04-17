@@ -64,6 +64,11 @@ _REALTIME_KEYS = (
     "token/macro_joint_norm",
     "token/mezzo_joint_norm",
     "token/micro_joint_norm",
+    "token/price_norm",
+    "token/liquid_norm",
+    "token/state_norm",
+    "token/side_context_norm",
+    "token/micro_signal_norm",
     "fusion/macro_conditioned_mezzo_norm",
     "fusion/micro_refined_mezzo_norm",
     "fusion/macro_to_mezzo_delta",
@@ -852,6 +857,11 @@ class MLflowVisualizer:
         metrics.setdefault("token/macro_joint_norm", _channelwise_l2_mean(outputs["macro_joint_tokens"], channel_dim=2))
         metrics.setdefault("token/mezzo_joint_norm", _channelwise_l2_mean(outputs["mezzo_joint_tokens"], channel_dim=2))
         metrics.setdefault("token/micro_joint_norm", _channelwise_l2_mean(outputs["micro_joint_tokens"], channel_dim=2))
+        metrics.setdefault("token/price_norm", _channelwise_l2_mean(outputs["price_tokens"], channel_dim=2))
+        metrics.setdefault("token/liquid_norm", _channelwise_l2_mean(outputs["liquid_tokens"], channel_dim=2))
+        metrics.setdefault("token/state_norm", _channelwise_l2_mean(outputs["state_tokens"], channel_dim=2))
+        metrics.setdefault("token/side_context_norm", _channelwise_l2_mean(outputs["side_context_tokens"], channel_dim=2))
+        metrics.setdefault("token/micro_signal_norm", _channelwise_l2_mean(outputs["micro_signal_tokens"], channel_dim=2))
         metrics.setdefault(
             "fusion/macro_conditioned_mezzo_norm",
             _channelwise_l2_mean(outputs["macro_conditioned_mezzo_tokens"], channel_dim=2),

@@ -69,11 +69,6 @@ def train_one_epoch(
 
         with autocast(device_type="cuda", enabled=amp_enabled):
             loss, loss_metrics = criterion(outputs, batch)
-        mean_metrics = batch_prediction_metrics(outputs, batch)
-        diag_metrics: dict[str, torch.Tensor | float] = {}
-        if visualizer is not None:
-            diag_metrics = visualizer.collect_batch_metrics(model, outputs, batch, loss_metrics)
-            visualizer.update_epoch_buffer("train", model, outputs, batch, metrics=diag_metrics)
 
         if amp_enabled and scaler is not None:
             scaler.scale(loss).backward()
@@ -94,9 +89,9 @@ def train_one_epoch(
             optimizer.step()
 
         batch_size = int(batch["macro"].shape[0])
-        step_metrics = {"loss": loss.detach(), **loss_metrics, **mean_metrics, **diag_metrics}
-        tracker.update(step_metrics, weight=batch_size)
-        window_tracker.update(step_metrics, weight=batch_size)
+        lightweight_metrics = {"loss": loss.detach(), **loss_metrics}
+        tracker.update(lightweight_metrics, weight=batch_size)
+        window_tracker.update(lightweight_metrics, weight=batch_size)
 
         should_sync = (
             log_every <= 0
@@ -109,6 +104,13 @@ def train_one_epoch(
             steps_in_window = log_every if log_every > 0 and step_idx % log_every == 0 else 1
             step_time_seconds = elapsed / max(steps_in_window, 1)
             last_sync_time = now
+            mean_metrics = batch_prediction_metrics(outputs, batch)
+            diag_metrics: dict[str, torch.Tensor | float] = {}
+            if visualizer is not None:
+                diag_metrics = visualizer.collect_batch_metrics(model, outputs, batch, loss_metrics)
+                visualizer.update_epoch_buffer("train", model, outputs, batch, metrics=diag_metrics)
+            window_tracker.update(mean_metrics, weight=batch_size)
+            window_tracker.update(diag_metrics, weight=batch_size)
             synced_metrics = window_tracker.compute_and_reset(reset=True)
             if visualizer is not None:
                 lr = float(optimizer.param_groups[0]["lr"]) if optimizer.param_groups else None

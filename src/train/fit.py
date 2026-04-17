@@ -353,8 +353,11 @@ def fit(
         _preload_sample_index(train_loader.dataset, num_workers)
         _preload_sample_index(val_loader.dataset, num_workers)
 
-    # Set FP32 matmul precision for stability when autocast is enabled.
+    # Favor throughput on fixed-shape CUDA training.
     torch.set_float32_matmul_precision("high")
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    torch.backends.cudnn.benchmark = True
 
     history: dict[str, list[dict[str, float]]] = {"train": [], "val": []}
     best_val_loss = float("inf")
@@ -686,6 +689,7 @@ def run_training(
         model.parameters(),
         lr=learning_rate,
         weight_decay=weight_decay,
+        fused=True,
         capturable=compile_mode == "max-autotune",
     )
     scheduler = _build_scheduler(
