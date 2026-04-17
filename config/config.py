@@ -113,9 +113,9 @@ grad_clip = 1.0
 early_stopping_patience = 5
 num_workers = 16
 prefetch_factor = 8
+preload_index_into_memory = True
 amp_enabled = True
-use_cuda_graph = True
-cuda_graph_warmup_steps = 4
+compile_mode = "reduce-overhead"  # "max-autotune" (with cudagraph) or "reduce-overhead" (without)
 
 scheduler_name = "plateau"
 scheduler_factor = 0.5

@@ -33,10 +33,11 @@ from config.config import save_every as DEFAULT_SAVE_EVERY
 from config.config import train_seed as DEFAULT_TRAIN_SEED
 from config.config import train_samples_per_epoch as DEFAULT_TRAIN_SAMPLES_PER_EPOCH
 from config.config import train_val_split_date as DEFAULT_TRAIN_VAL_SPLIT_DATE
-from config.config import use_cuda_graph as DEFAULT_USE_CUDA_GRAPH
 from config.config import val_ratio as DEFAULT_VAL_RATIO
 from config.config import val_samples_per_epoch as DEFAULT_VAL_SAMPLES_PER_EPOCH
 from config.config import weight_decay as DEFAULT_WEIGHT_DECAY
+from config.config import preload_index_into_memory as DEFAULT_PRELOAD_INDEX
+from config.config import compile_mode as DEFAULT_COMPILE_MODE
 from src.models import MultiScaleFusionNet
 from src.models.losses import SingleTaskLoss
 from src.task_labels import TASK_LABELS, canonical_task_label
@@ -89,6 +90,26 @@ def _resolve_dataset_cache_owner(dataset: Any) -> Any:
     while isinstance(current, Subset):
         current = current.dataset
     return current
+
+
+def _preload_sample_index(dataset: Any, num_workers: int) -> None:
+    """Load sample_index into RAM permanently to avoid repeated disk reads each epoch."""
+    owner = _resolve_dataset_cache_owner(dataset)
+    si = getattr(owner, "sample_index", None)
+    if si is None:
+        return
+    # Check if already preloaded (has _index_cached attribute)
+    if getattr(owner, "_index_preloaded", False):
+        return
+    # Read once into numpy arrays
+    payload_ids = si.payload_ids
+    sample_idx = si.sample_idx
+    # Store as numpy arrays for fast access
+    owner._index_payload_ids = np.asarray(payload_ids, dtype=np.int32)
+    owner._index_sample_idx = np.asarray(sample_idx, dtype=np.int32)
+    owner._index_payload_ids_max = int(payload_ids.max())
+    owner._index_preloaded = True
+    return None  # Explicitly return None to indicate preload done
 
 
 def _clear_dataset_cache(dataset: Any) -> None:
@@ -197,12 +218,25 @@ def _grouped_epoch_indices(
     samples_per_epoch: int | None,
     seed: int,
     epoch: int,
+    num_workers: int = 1,
 ) -> list[int] | None:
-    sample_index = getattr(dataset, "sample_index", None)
-    if sample_index is None:
+    """Compute epoch-specific sample indices with optional multiprocessing."""
+    owner = _resolve_dataset_cache_owner(dataset)
+    si = getattr(owner, "sample_index", None)
+    if si is None:
         return None
 
-    total = len(sample_index)
+    # Use preloaded numpy arrays if available, otherwise read from sample_index
+    if getattr(owner, "_index_preloaded", False):
+        payload_ids = owner._index_payload_ids
+        sample_idx = owner._index_sample_idx
+        payload_ids_max = owner._index_payload_ids_max
+    else:
+        payload_ids = np.asarray(si.payload_ids, dtype=np.int32)
+        sample_idx = np.asarray(si.sample_idx, dtype=np.int32)
+        payload_ids_max = int(si.payload_ids.max())
+
+    total = len(payload_ids)
     if total == 0:
         return []
 
@@ -215,14 +249,14 @@ def _grouped_epoch_indices(
             dtype=np.int32,
         )
 
-    selected_payload_ids = sample_index.payload_ids[selected]
+    selected_payload_ids = payload_ids[selected]
     unique_payload_ids = np.unique(selected_payload_ids)
     shuffled_payload_ids = np.asarray(rng.permutation(unique_payload_ids), dtype=selected_payload_ids.dtype)
-    payload_rank = np.empty(int(sample_index.payload_ids.max()) + 1, dtype=np.int32)
+    payload_rank = np.empty(payload_ids_max + 1, dtype=np.int32)
     payload_rank.fill(-1)
     payload_rank[shuffled_payload_ids] = np.arange(shuffled_payload_ids.size, dtype=np.int32)
 
-    order = np.lexsort((selected, sample_index.sample_idx[selected], payload_rank[selected_payload_ids]))
+    order = np.lexsort((selected, sample_idx[selected], payload_rank[selected_payload_ids]))
     return selected[order].tolist()
 
 
@@ -248,6 +282,7 @@ def _set_epoch_loader_indices(
     samples_per_epoch: int | None,
     seed: int,
     epoch: int,
+    num_workers: int,
     shuffle: bool,
 ) -> None:
     """Update one persistent loader's sampler with epoch-specific indices."""
@@ -263,6 +298,7 @@ def _set_epoch_loader_indices(
         samples_per_epoch=samples_per_epoch,
         seed=seed,
         epoch=epoch,
+        num_workers=num_workers,
     )
     if grouped_indices is None:
         if samples_per_epoch is None or samples_per_epoch <= 0 or len(dataset) <= samples_per_epoch:
@@ -300,7 +336,9 @@ def fit(
     log_every: int = DEFAULT_LOG_EVERY,
     seed: int = DEFAULT_TRAIN_SEED,
     amp_enabled: bool = DEFAULT_AMP_ENABLED,
-    use_cuda_graph: bool = DEFAULT_USE_CUDA_GRAPH,
+    compile_mode: str = DEFAULT_COMPILE_MODE,
+    preload_index: bool = DEFAULT_PRELOAD_INDEX,
+    num_workers: int = DEFAULT_NUM_WORKERS,
 ) -> dict[str, Any]:
     """Run the full training loop."""
     resolved_label = canonical_task_label(label)
@@ -309,6 +347,11 @@ def fit(
 
     model.to(device)
     criterion.to(device)
+
+    # Preload sample indices into RAM once to avoid repeated disk reads per epoch.
+    if preload_index:
+        _preload_sample_index(train_loader.dataset, num_workers)
+        _preload_sample_index(val_loader.dataset, num_workers)
 
     # Set FP32 matmul precision for stability when autocast is enabled.
     torch.set_float32_matmul_precision("high")
@@ -380,6 +423,7 @@ def fit(
                 samples_per_epoch=train_samples_per_epoch,
                 seed=seed,
                 epoch=epoch * 2,
+                num_workers=num_workers,
                 shuffle=False,
             )
             _set_epoch_loader_indices(
@@ -387,6 +431,7 @@ def fit(
                 samples_per_epoch=val_samples_per_epoch,
                 seed=seed,
                 epoch=epoch * 2 + 1,
+                num_workers=num_workers,
                 shuffle=False,
             )
             epoch_train_loader = train_loader
@@ -588,7 +633,8 @@ def run_training(
     log_every: int = DEFAULT_LOG_EVERY,
     prefetch_factor: int = DEFAULT_PREFETCH_FACTOR,
     amp_enabled: bool = DEFAULT_AMP_ENABLED,
-    use_cuda_graph: bool = DEFAULT_USE_CUDA_GRAPH,
+    compile_mode: str = DEFAULT_COMPILE_MODE,
+    preload_index: bool = DEFAULT_PRELOAD_INDEX,
 ) -> dict[str, Any]:
     """Build datasets, model, loss, optimizer, and run training."""
     resolved_label = canonical_task_label(label)
@@ -632,7 +678,6 @@ def run_training(
 
     model = MultiScaleFusionNet(task_label=resolved_label)
 
-    compile_mode = "max-autotune" if use_cuda_graph else "max-autotune-no-cudagraphs"
     model = torch.compile(model, mode=compile_mode)
 
     criterion = SingleTaskLoss(task_label=resolved_label).to(resolved_device)
@@ -640,7 +685,7 @@ def run_training(
         model.parameters(),
         lr=learning_rate,
         weight_decay=weight_decay,
-        capturable=use_cuda_graph,
+        capturable=compile_mode == "max-autotune",
     )
     scheduler = _build_scheduler(
         optimizer,
@@ -675,7 +720,9 @@ def run_training(
         log_every=log_every,
         seed=seed,
         amp_enabled=amp_enabled,
-        use_cuda_graph=use_cuda_graph,
+        compile_mode=compile_mode,
+        preload_index=preload_index,
+        num_workers=num_workers,
     )
 
 
