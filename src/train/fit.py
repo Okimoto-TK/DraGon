@@ -390,7 +390,7 @@ def fit(
                     "batch_size": train_loader.batch_size,
                     "num_epochs": num_epochs,
                     "amp_enabled": resolved_amp_enabled,
-                    "use_cuda_graph": use_cuda_graph,
+                    "compile_mode": compile_mode,
                     "train_samples_per_epoch": train_samples_per_epoch,
                     "val_samples_per_epoch": val_samples_per_epoch,
                     "log_every": log_every,
