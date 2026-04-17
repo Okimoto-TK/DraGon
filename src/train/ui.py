@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import time
 from collections.abc import Mapping
 
 from rich.columns import Columns
@@ -13,7 +14,6 @@ from rich.progress import (
     Progress,
     TaskID,
     TextColumn,
-    TimeRemainingColumn,
 )
 from rich.table import Table
 
@@ -84,7 +84,7 @@ class TrainingUI:
             TextColumn("[bold blue]{task.description}"),
             BarColumn(bar_width=None),
             TextColumn("{task.completed}/{task.total}"),
-            TimeRemainingColumn(),
+            TextColumn("{task.fields[eta]}"),
             expand=True,
         )
         self._ema_alpha = float(ema_alpha)
@@ -96,11 +96,29 @@ class TrainingUI:
         self._train_trends: dict[str, str] = {}
         self._val_trends: dict[str, str] = {}
         self._status = "idle"
+        self._epoch_start_time: float | None = None
         self._live = Live(
             self._render(),
             refresh_per_second=8,
             transient=False,
         )
+
+    def _format_eta(self, *, step: int, total_steps: int) -> str:
+        if self._epoch_start_time is None or step <= 0 or total_steps <= 0 or step >= total_steps:
+            return "ETA --:--"
+        elapsed = max(0.0, time.monotonic() - self._epoch_start_time)
+        if elapsed <= 0.0:
+            return "ETA --:--"
+        steps_per_second = step / elapsed
+        if steps_per_second <= 0.0:
+            return "ETA --:--"
+        remaining_seconds = max(0.0, (total_steps - step) / steps_per_second)
+        total_seconds = int(round(remaining_seconds))
+        hours, rem = divmod(total_seconds, 3600)
+        minutes, seconds = divmod(rem, 60)
+        if hours > 0:
+            return f"ETA {hours:02d}:{minutes:02d}:{seconds:02d}"
+        return f"ETA {minutes:02d}:{seconds:02d}"
 
     def _render(self) -> Group:
         progress_panel = Panel(
@@ -132,13 +150,14 @@ class TrainingUI:
 
     def start_epoch(self, epoch: int, num_epochs: int, total_steps: int) -> None:
         self._status = f"Epoch {epoch}/{num_epochs}"
+        self._epoch_start_time = time.monotonic()
         self._train_metrics = {}
         self._train_ema = {}
         self._train_trends = {}
         if self._task_id is not None:
             self._progress.remove_task(self._task_id)
             self._task_id = None
-        self._task_id = self._progress.add_task("train", total=max(total_steps, 1))
+        self._task_id = self._progress.add_task("train", total=max(total_steps, 1), eta="ETA --:--")
         self.refresh()
 
     def _update_trends(
@@ -191,6 +210,7 @@ class TrainingUI:
             self._task_id,
             completed=min(step, max(total_steps, 1)),
             total=max(total_steps, 1),
+            eta=self._format_eta(step=step, total_steps=max(total_steps, 1)),
         )
         self.refresh()
 

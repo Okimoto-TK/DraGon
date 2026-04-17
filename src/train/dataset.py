@@ -351,6 +351,14 @@ class PackedTensorDataset(Dataset[dict[str, Tensor]]):
     def clear_cache(self) -> None:
         self._cache.clear()
 
+    def _preload_payloads(self, payload_names: list[str]) -> None:
+        seen: set[str] = set()
+        for payload_name in payload_names:
+            if payload_name in seen:
+                continue
+            seen.add(payload_name)
+            self._load_payload(payload_name)
+
     def _item_from_payload(self, payload: dict[str, Tensor], sample_idx: int) -> dict[str, Tensor]:
         label = payload["label"][sample_idx]
         item = {
@@ -372,12 +380,14 @@ class PackedTensorDataset(Dataset[dict[str, Tensor]]):
         return self._item_from_payload(payload, sample_idx)
 
     def __getitems__(self, indices: list[int]) -> list[dict[str, Tensor]]:
+        payload_names = [self.sample_index.payload_at(index) for index in indices]
+        self._preload_payloads(payload_names)
+
         items: list[dict[str, Tensor]] = []
         current_payload_name: str | None = None
         current_payload: dict[str, Tensor] | None = None
 
-        for index in indices:
-            payload_name = self.sample_index.payload_at(index)
+        for index, payload_name in zip(indices, payload_names, strict=True):
             if payload_name != current_payload_name or current_payload is None:
                 current_payload_name = payload_name
                 current_payload = self._load_payload(payload_name)
