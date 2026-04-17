@@ -41,8 +41,8 @@ _HOOK_TARGETS = {
     "mezzo_return_encoder": "mezzo_return_encoder",
     "micro_return_encoder": "micro_return_encoder",
     "side_gap_encoder": "side_gap_encoder",
-    "mezzo_pair_interaction_grid": "mezzo_pair_interaction_grid",
-    "micro_pair_interaction_grid": "micro_pair_interaction_grid",
+    "mezzo_pv_interaction_fusion": "mezzo_pv_interaction_fusion",
+    "micro_pv_interaction_fusion": "micro_pv_interaction_fusion",
     "mezzo_joint_token_readout": "mezzo_joint_token_readout",
     "micro_joint_token_readout": "micro_joint_token_readout",
 }

@@ -672,6 +672,7 @@ def run_training(
     train_loader = DataLoader(
         train_dataset,
         sampler=train_sampler,
+        drop_last=True,
         **loader_kwargs,
     )
     val_loader = DataLoader(

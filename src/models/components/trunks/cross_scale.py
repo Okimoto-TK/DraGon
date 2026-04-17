@@ -8,7 +8,7 @@ from src.models.components.normalization import ada_layer_norm
 from src.models.components.trunks.common import SwiGLUFFN, flatten_tokens, pool_tokens, reshape_tokens
 
 
-class CrossScaleCondition(nn.Module):
+class MultiContextCondition(nn.Module):
     def __init__(self, dim: int, *, num_contexts: int) -> None:
         super().__init__()
         self.net = nn.Sequential(
@@ -24,12 +24,12 @@ class CrossScaleCondition(nn.Module):
         return gamma, beta, torch.sigmoid(gate)
 
 
-class FlattenCrossAttentionAdapter(nn.Module):
+class CrossScaleCrossAttention(nn.Module):
     def __init__(self, dim: int, *, num_heads: int, num_contexts: int) -> None:
         super().__init__()
         self.q_norm = nn.LayerNorm(dim)
         self.kv_norm = nn.LayerNorm(dim)
-        self.cond = CrossScaleCondition(dim, num_contexts=num_contexts)
+        self.cond = MultiContextCondition(dim, num_contexts=num_contexts)
         self.attn = nn.MultiheadAttention(dim, num_heads=num_heads, batch_first=True, dropout=0.0)
         self.out_norm = nn.LayerNorm(dim)
 
@@ -45,10 +45,10 @@ class FlattenCrossAttentionAdapter(nn.Module):
         return reshape_tokens(out, steps=q_steps, tokens=q_tokens)
 
 
-class MezzoFusionFFN(nn.Module):
+class CrossScaleFFN(nn.Module):
     def __init__(self, dim: int, *, num_contexts: int) -> None:
         super().__init__()
-        self.cond = CrossScaleCondition(dim, num_contexts=num_contexts)
+        self.cond = MultiContextCondition(dim, num_contexts=num_contexts)
         self.norm = nn.LayerNorm(dim)
         self.ffn = SwiGLUFFN(dim)
         self.out_norm = nn.LayerNorm(dim)
@@ -57,12 +57,12 @@ class MezzoFusionFFN(nn.Module):
         bsz, steps, tokens, dim = x.shape
         gamma, beta, gate = self.cond(*contexts)
         flat = x.reshape(bsz * steps, tokens, dim)
-        gamma_bt = gamma.unsqueeze(1).expand(-1, steps, -1).reshape(bsz * steps, dim)
-        beta_bt = beta.unsqueeze(1).expand(-1, steps, -1).reshape(bsz * steps, dim)
-        mod = ada_layer_norm(flat, gamma_bt, beta_bt, self.norm)
+        gamma_expanded = gamma.unsqueeze(1).expand(-1, steps, -1).reshape(bsz * steps, dim)
+        beta_expanded = beta.unsqueeze(1).expand(-1, steps, -1).reshape(bsz * steps, dim)
+        mod = ada_layer_norm(flat, gamma_expanded, beta_expanded, self.norm)
         delta = self.ffn(mod)
         flat = self.out_norm(flat + gate.unsqueeze(1).expand(-1, steps, -1).reshape(bsz * steps, 1, 1) * delta)
         return flat.reshape(bsz, steps, tokens, dim)
 
 
-__all__ = ["CrossScaleCondition", "FlattenCrossAttentionAdapter", "MezzoFusionFFN"]
+__all__ = ["CrossScaleCrossAttention", "CrossScaleFFN", "MultiContextCondition"]

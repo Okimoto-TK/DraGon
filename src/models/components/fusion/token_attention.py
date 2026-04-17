@@ -8,7 +8,7 @@ from src.models.components.normalization import ada_layer_norm
 from src.models.components.trunks.common import SmallTokenRefine, SwiGLUFFN, pool_tokens
 
 
-class TokenSelfAttentionBlock(nn.Module):
+class TokenSelfAttention(nn.Module):
     def __init__(self, dim: int, *, num_heads: int) -> None:
         super().__init__()
         self.norm1 = nn.LayerNorm(dim)
@@ -45,7 +45,7 @@ class PerTimeCrossAttention(nn.Module):
         return self.out_norm(out).reshape(bsz, steps, q_tokens, dim)
 
 
-class SequenceCrossBlock(nn.Module):
+class SequenceCrossAttention(nn.Module):
     def __init__(self, dim: int, *, num_heads: int) -> None:
         super().__init__()
         self.q_norm = nn.LayerNorm(dim)
@@ -60,7 +60,7 @@ class SequenceCrossBlock(nn.Module):
         return self.out_norm(q + gate * delta)
 
 
-class SideWriteIntoJoint(nn.Module):
+class SideToJointWrite(nn.Module):
     def __init__(self, dim: int, *, num_heads: int) -> None:
         super().__init__()
         self.cross = nn.MultiheadAttention(dim, num_heads=num_heads, batch_first=True, dropout=0.0)
@@ -68,7 +68,7 @@ class SideWriteIntoJoint(nn.Module):
         self.cross_kv_norm = nn.LayerNorm(dim)
         self.write_gate = nn.Sequential(nn.Linear(dim * 3, dim), nn.SiLU(), nn.Linear(dim, 1), nn.Sigmoid())
         self.cond = nn.Sequential(nn.Linear(dim * 2, dim * 3 + 2), nn.SiLU(), nn.Linear(dim * 3 + 2, dim * 2 + 2))
-        self.token_self = TokenSelfAttentionBlock(dim, num_heads=num_heads)
+        self.token_self = TokenSelfAttention(dim, num_heads=num_heads)
         self.ffn = SmallTokenRefine(dim)
         self.write_out_norm = nn.LayerNorm(dim)
         self.adaln_norm = nn.LayerNorm(dim)
@@ -95,21 +95,21 @@ class SideWriteIntoJoint(nn.Module):
         gamma, beta, g_attn, g_ffn = torch.split(cond, [dim, dim, 1, 1], dim=-1)
 
         flat = joint_out.reshape(bsz * steps, tokens, dim)
-        gamma_bt = gamma.unsqueeze(1).expand(-1, steps, -1).reshape(bsz * steps, dim)
-        beta_bt = beta.unsqueeze(1).expand(-1, steps, -1).reshape(bsz * steps, dim)
+        gamma_expanded = gamma.unsqueeze(1).expand(-1, steps, -1).reshape(bsz * steps, dim)
+        beta_expanded = beta.unsqueeze(1).expand(-1, steps, -1).reshape(bsz * steps, dim)
         attn_gate = g_attn.unsqueeze(1).expand(-1, steps, -1).reshape(bsz * steps, 1, 1)
         ffn_gate = g_ffn.unsqueeze(1).expand(-1, steps, -1).reshape(bsz * steps, 1, 1)
 
-        mod = ada_layer_norm(flat, gamma_bt, beta_bt, self.adaln_norm)
+        mod = ada_layer_norm(flat, gamma_expanded, beta_expanded, self.adaln_norm)
         attn_delta = self.token_self(mod.reshape(bsz, steps, tokens, dim)).reshape(bsz * steps, tokens, dim) - mod
         flat = self.attn_res_norm(flat + attn_gate * attn_delta)
-        ffn_in = ada_layer_norm(flat, gamma_bt, beta_bt, self.adaln_norm)
+        ffn_in = ada_layer_norm(flat, gamma_expanded, beta_expanded, self.adaln_norm)
         ffn_delta = self.ffn(ffn_in.reshape(bsz, steps, tokens, dim)).reshape(bsz * steps, tokens, dim) - ffn_in
         flat = self.ffn_res_norm(flat + ffn_gate * ffn_delta)
         return flat.reshape(bsz, steps, tokens, dim)
 
 
-class StateQueryJointReader(nn.Module):
+class StateJointReader(nn.Module):
     def __init__(self, dim: int, *, num_heads: int) -> None:
         super().__init__()
         self.cross = PerTimeCrossAttention(dim, num_heads=num_heads)
@@ -121,8 +121,8 @@ class StateQueryJointReader(nn.Module):
 
 __all__ = [
     "PerTimeCrossAttention",
-    "SequenceCrossBlock",
-    "SideWriteIntoJoint",
-    "StateQueryJointReader",
-    "TokenSelfAttentionBlock",
+    "SequenceCrossAttention",
+    "SideToJointWrite",
+    "StateJointReader",
+    "TokenSelfAttention",
 ]

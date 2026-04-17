@@ -5,6 +5,8 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from src.models.components.trunks.common import to_channel_major, to_time_major
+
 
 class RBFEncoding(nn.Module):
     def __init__(self) -> None:
@@ -28,8 +30,28 @@ class FourierEncoding(nn.Module):
         return torch.cat((torch.sin(angles), torch.cos(angles)), dim=-1)
 
 
+class LiquidityXYMixer(nn.Module):
+    """与 PathEncoder 风格一致的共享 XY mixer"""
+    def __init__(self, dim: int, kernel_size: int) -> None:
+        super().__init__()
+        padding = kernel_size // 2
+        self.conv = nn.Conv1d(dim + 2, dim, kernel_size=kernel_size, padding=padding)
+        self.proj = nn.Conv1d(dim, dim, kernel_size=1)
+        self.norm = nn.LayerNorm(dim)
+
+    def forward(self, h: Tensor, xy: Tensor) -> Tensor:
+        residual = h
+        y = torch.cat((h, xy), dim=-1)  # [B, T, D+2]
+        y = to_channel_major(y)
+        y = self.conv(y)
+        y = F.silu(y)
+        y = self.proj(y)
+        y = to_time_major(y)
+        return self.norm(residual + y)
+
+
 class LiquidityBranch(nn.Module):
-    def __init__(self, dim: int, *, out_tokens: int) -> None:
+    def __init__(self, dim: int, *, out_tokens: int, local_kernel: int) -> None:
         super().__init__()
         self.rbf = RBFEncoding()
         self.fourier = FourierEncoding()
@@ -38,14 +60,22 @@ class LiquidityBranch(nn.Module):
             nn.SiLU(),
             nn.Linear(dim, 8),
         )
-        self.base_proj = nn.Sequential(
-            nn.Linear(7, dim),
+        # 不含 xy 的 liquidity feature 投影
+        self.pre_xy_proj = nn.Sequential(
+            nn.Linear(1 + 4, dim),  # r(1) + direction(4) = 5
             nn.SiLU(),
             nn.Linear(dim, dim),
         )
-        self.base_norm = nn.LayerNorm(dim)
-        self.token_proj = nn.Linear(dim, out_tokens * dim)
+        # Path 风格的 XY mixer (内部已含 norm)
+        self.xy_mixer = LiquidityXYMixer(dim, kernel_size=local_kernel)
+
+        # Gated Slot Projection 替代原来的 token_proj
+        self.token_content = nn.Linear(dim, out_tokens * dim)
+        self.token_gate = nn.Linear(dim, out_tokens * dim)
+        self.slot_embed = nn.Parameter(torch.empty(out_tokens, dim))
         self.token_norm = nn.LayerNorm(dim)
+
+        nn.init.normal_(self.slot_embed, std=0.02)
         self.out_tokens = out_tokens
         self.eps = 1e-6
 
@@ -60,10 +90,20 @@ class LiquidityBranch(nn.Module):
         q5 = self.fourier(u5)
         direction = F.layer_norm((1.0 + gamma) * q5 + beta, (q5.shape[-1],))
 
-        base = torch.cat((r, direction, xy), dim=-1)
-        base_seq = self.base_norm(self.base_proj(base))
-        token_raw = self.token_proj(base_seq).reshape(base_seq.shape[0], base_seq.shape[1], self.out_tokens, base_seq.shape[-1])
-        z_liquid = self.token_norm(token_raw)
+        # 1) 先得到不含 xy 的 liquidity feature
+        liq_feat = self.pre_xy_proj(torch.cat([r, direction], dim=-1))
+
+        # 2) 用 XY mixer 融合 xy (内部已有 norm)
+        base_seq = self.xy_mixer(liq_feat, xy)
+
+        # 3) Gated Slot Projection
+        B, T, D = base_seq.shape
+        Kv = self.out_tokens
+        content = self.token_content(base_seq).view(B, T, Kv, D)
+        gate = torch.sigmoid(self.token_gate(base_seq).view(B, T, Kv, D))
+        tokens = content * gate + self.slot_embed.view(1, 1, Kv, D)
+        z_liquid = self.token_norm(tokens)
+
         return z_liquid, base_seq
 
 

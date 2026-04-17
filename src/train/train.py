@@ -59,7 +59,7 @@ def train_one_epoch(
         batch = move_batch_to_device(batch, device)
 
         optimizer.zero_grad(set_to_none=True)
-        with autocast(device_type="cuda", enabled=amp_enabled):
+        with autocast(**_cuda_amp_autocast_kwargs(amp_enabled)):
             outputs = model(
                 batch["macro"],
                 batch["mezzo"],
@@ -67,7 +67,7 @@ def train_one_epoch(
                 batch["sidechain"],
             )
 
-        with autocast(device_type="cuda", enabled=amp_enabled):
+        with autocast(**_cuda_amp_autocast_kwargs(amp_enabled)):
             loss, loss_metrics = criterion(outputs, batch)
 
         if amp_enabled and scaler is not None:
