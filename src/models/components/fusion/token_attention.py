@@ -13,16 +13,18 @@ class TokenSelfAttentionBlock(nn.Module):
         super().__init__()
         self.norm1 = nn.LayerNorm(dim)
         self.attn = nn.MultiheadAttention(dim, num_heads=num_heads, batch_first=True, dropout=0.0)
+        self.attn_res_norm = nn.LayerNorm(dim)
         self.norm2 = nn.LayerNorm(dim)
         self.ffn = SwiGLUFFN(dim)
+        self.ffn_res_norm = nn.LayerNorm(dim)
 
     def forward(self, x: Tensor) -> Tensor:
         bsz, steps, tokens, dim = x.shape
         y = x.reshape(bsz * steps, tokens, dim)
         attn_in = self.norm1(y)
         attn_out, _ = self.attn(attn_in, attn_in, attn_in, need_weights=False)
-        y = y + attn_out
-        y = y + self.ffn(self.norm2(y))
+        y = self.attn_res_norm(y + attn_out)
+        y = self.ffn_res_norm(y + self.ffn(self.norm2(y)))
         return y.reshape(bsz, steps, tokens, dim)
 
 
@@ -32,6 +34,7 @@ class PerTimeCrossAttention(nn.Module):
         self.q_norm = nn.LayerNorm(dim)
         self.kv_norm = nn.LayerNorm(dim)
         self.attn = nn.MultiheadAttention(dim, num_heads=num_heads, batch_first=True, dropout=0.0)
+        self.out_norm = nn.LayerNorm(dim)
 
     def forward(self, q: Tensor, kv: Tensor) -> Tensor:
         bsz, steps, q_tokens, dim = q.shape
@@ -39,7 +42,7 @@ class PerTimeCrossAttention(nn.Module):
         q_flat = q.reshape(bsz * steps, q_tokens, dim)
         kv_flat = kv.reshape(bsz * steps, kv_tokens, dim)
         out, _ = self.attn(self.q_norm(q_flat), self.kv_norm(kv_flat), self.kv_norm(kv_flat), need_weights=False)
-        return out.reshape(bsz, steps, q_tokens, dim)
+        return self.out_norm(out).reshape(bsz, steps, q_tokens, dim)
 
 
 class SequenceCrossBlock(nn.Module):
@@ -69,6 +72,8 @@ class SideWriteIntoJoint(nn.Module):
         self.ffn = SmallTokenRefine(dim)
         self.write_out_norm = nn.LayerNorm(dim)
         self.adaln_norm = nn.LayerNorm(dim)
+        self.attn_res_norm = nn.LayerNorm(dim)
+        self.ffn_res_norm = nn.LayerNorm(dim)
 
     def forward(self, joint: Tensor, e_d: Tensor, s6_ctx: Tensor) -> Tensor:
         bsz, steps, tokens, dim = joint.shape
@@ -97,10 +102,10 @@ class SideWriteIntoJoint(nn.Module):
 
         mod = ada_layer_norm(flat, gamma_bt, beta_bt, self.adaln_norm)
         attn_delta = self.token_self(mod.reshape(bsz, steps, tokens, dim)).reshape(bsz * steps, tokens, dim) - mod
-        flat = flat + attn_gate * attn_delta
+        flat = self.attn_res_norm(flat + attn_gate * attn_delta)
         ffn_in = ada_layer_norm(flat, gamma_bt, beta_bt, self.adaln_norm)
         ffn_delta = self.ffn(ffn_in.reshape(bsz, steps, tokens, dim)).reshape(bsz * steps, tokens, dim) - ffn_in
-        flat = flat + ffn_gate * ffn_delta
+        flat = self.ffn_res_norm(flat + ffn_gate * ffn_delta)
         return flat.reshape(bsz, steps, tokens, dim)
 
 

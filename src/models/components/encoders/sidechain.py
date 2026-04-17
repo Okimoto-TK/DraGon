@@ -31,13 +31,14 @@ class CausalFuse(nn.Module):
         self.left = nn.Linear(dim, dim)
         self.right = nn.Linear(dim, dim)
         self.out = nn.Sequential(nn.Linear(dim * 2, dim), nn.SiLU(), nn.Linear(dim, dim))
+        self.out_norm = nn.LayerNorm(dim)
 
     def forward(self, left: Tensor, right: Tensor) -> Tensor:
         l = self.left(left)
         r = self.right(right)
         prod = l * r
         absdiff = torch.abs(l - r)
-        return self.out(torch.cat((prod, absdiff), dim=-1))
+        return self.out_norm(self.out(torch.cat((prod, absdiff), dim=-1)))
 
 
 class SidechainContextEncoder(nn.Module):

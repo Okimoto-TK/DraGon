@@ -31,6 +31,7 @@ class FlattenCrossAttentionAdapter(nn.Module):
         self.kv_norm = nn.LayerNorm(dim)
         self.cond = CrossScaleCondition(dim, num_contexts=num_contexts)
         self.attn = nn.MultiheadAttention(dim, num_heads=num_heads, batch_first=True, dropout=0.0)
+        self.out_norm = nn.LayerNorm(dim)
 
     def forward(self, query: Tensor, source: Tensor, *contexts: Tensor) -> Tensor:
         bsz, q_steps, q_tokens, dim = query.shape
@@ -40,7 +41,7 @@ class FlattenCrossAttentionAdapter(nn.Module):
         q_mod = ada_layer_norm(q_flat, gamma, beta, self.q_norm)
         src_mod = self.kv_norm(src_flat)
         delta, _ = self.attn(q_mod, src_mod, src_mod, need_weights=False)
-        out = q_flat + gate.unsqueeze(1) * delta
+        out = self.out_norm(q_flat + gate.unsqueeze(1) * delta)
         return reshape_tokens(out, steps=q_steps, tokens=q_tokens)
 
 
@@ -50,6 +51,7 @@ class MezzoFusionFFN(nn.Module):
         self.cond = CrossScaleCondition(dim, num_contexts=num_contexts)
         self.norm = nn.LayerNorm(dim)
         self.ffn = SwiGLUFFN(dim)
+        self.out_norm = nn.LayerNorm(dim)
 
     def forward(self, x: Tensor, *contexts: Tensor) -> Tensor:
         bsz, steps, tokens, dim = x.shape
@@ -59,7 +61,7 @@ class MezzoFusionFFN(nn.Module):
         beta_bt = beta.unsqueeze(1).expand(-1, steps, -1).reshape(bsz * steps, dim)
         mod = ada_layer_norm(flat, gamma_bt, beta_bt, self.norm)
         delta = self.ffn(mod)
-        flat = flat + gate.unsqueeze(1).expand(-1, steps, -1).reshape(bsz * steps, 1, 1) * delta
+        flat = self.out_norm(flat + gate.unsqueeze(1).expand(-1, steps, -1).reshape(bsz * steps, 1, 1) * delta)
         return flat.reshape(bsz, steps, tokens, dim)
 
 

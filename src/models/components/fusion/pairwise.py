@@ -60,12 +60,14 @@ class PriceLiquidityDualFusion(nn.Module):
         self.liquid_to_price = PerTimeCrossAttention(dim, num_heads=num_heads)
         self.pair_grid = PairInteractionGrid(dim)
         self.joint_readout = QueryTokenPooling(dim, out_tokens=joint_tokens, num_heads=num_heads)
+        self.price_res_norm = nn.LayerNorm(dim)
+        self.liquid_res_norm = nn.LayerNorm(dim)
 
     def forward(self, price: Tensor, liquid: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         price_self = self.price_self(price)
         liquid_self = self.liquid_self(liquid)
-        price_dual = price_self + self.price_to_liquid(price_self, liquid_self)
-        liquid_dual = liquid_self + self.liquid_to_price(liquid_self, price_self)
+        price_dual = self.price_res_norm(price_self + self.price_to_liquid(price_self, liquid_self))
+        liquid_dual = self.liquid_res_norm(liquid_self + self.liquid_to_price(liquid_self, price_self))
         pair_grid = self.pair_grid(price_dual, liquid_dual)
         joint = self.joint_readout(pair_grid)
         return price_dual, liquid_dual, pair_grid, joint

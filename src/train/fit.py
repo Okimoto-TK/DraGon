@@ -643,6 +643,12 @@ def run_training(
     )
 
     model = MultiScaleFusionNet(task_label=resolved_label)
+
+    # Compile model: use reduce-overhead mode.
+    # max-autotune is skipped to avoid excessive compilation time
+    # while still getting kernel fusion benefits with CUDA Graph.
+    model = torch.compile(model, mode="reduce-overhead")
+
     criterion = SingleTaskLoss(task_label=resolved_label).to(resolved_device)
     optimizer = AdamW(
         model.parameters(),
