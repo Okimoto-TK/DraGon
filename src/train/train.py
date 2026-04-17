@@ -435,6 +435,7 @@ def _run_cuda_graph_epoch(
             step_idx += 1
             _zero_grads_for_cuda_graph(optimizer)
             _copy_batch_to_static(cuda_graph_state.static_batch, batch)
+            torch.compiler.cudagraph_mark_step_begin()
             cuda_graph_state.graph.replay()
             if grad_clip is not None:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)

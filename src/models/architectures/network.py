@@ -172,10 +172,10 @@ class MultiScaleFusionNet(nn.Module):
             "price_relation_tokens": mezzo_out.price_relation_tokens,
             "price_liquidity_pair_grid": mezzo_out.price_liquidity_pair_grid,
             "micro_signal_tokens": micro_signal_tokens,
-            "side/moneyflow_context_tokens": side_debug["z_mf1"],
-            "side/liquidity_context_tokens": side_debug["z_liqreg1"],
-            "side/causal_context_tokens": side_debug["z_cause"],
-            "side/gap_context_tokens": side_debug["z_gap_ctx"],
+            "side/moneyflow_context_tokens": side_debug["z_mf1"].detach().clone(),
+            "side/liquidity_context_tokens": side_debug["z_liqreg1"].detach().clone(),
+            "side/causal_context_tokens": side_debug["z_cause"].detach().clone(),
+            "side/gap_context_tokens": side_debug["z_gap_ctx"].detach().clone(),
         }
         outputs.update(head_outputs)
         return outputs
