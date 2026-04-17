@@ -43,6 +43,7 @@ class LiquidityBranch(nn.Module):
             nn.SiLU(),
             nn.Linear(dim, dim),
         )
+        self.base_norm = nn.LayerNorm(dim)
         self.token_proj = nn.Linear(dim, out_tokens * dim)
         self.token_norm = nn.LayerNorm(dim)
         self.out_tokens = out_tokens
@@ -60,7 +61,7 @@ class LiquidityBranch(nn.Module):
         direction = F.layer_norm((1.0 + gamma) * q5 + beta, (q5.shape[-1],))
 
         base = torch.cat((r, direction, xy), dim=-1)
-        base_seq = self.base_proj(base)
+        base_seq = self.base_norm(self.base_proj(base))
         token_raw = self.token_proj(base_seq).reshape(base_seq.shape[0], base_seq.shape[1], self.out_tokens, base_seq.shape[-1])
         z_liquid = self.token_norm(token_raw)
         return z_liquid, base_seq
@@ -91,4 +92,3 @@ class StateQueryEncoder(nn.Module):
 
 
 __all__ = ["FourierEncoding", "LiquidityBranch", "RBFEncoding", "StateQueryEncoder"]
-

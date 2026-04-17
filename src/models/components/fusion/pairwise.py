@@ -26,6 +26,8 @@ class PairwiseCross(nn.Module):
 class PairInteractionGrid(nn.Module):
     def __init__(self, dim: int) -> None:
         super().__init__()
+        self.price_norm = nn.LayerNorm(dim)
+        self.liquid_norm = nn.LayerNorm(dim)
         self.proj_p = nn.Linear(dim, dim)
         self.proj_v = nn.Linear(dim, dim)
         self.fuse = nn.Sequential(
@@ -33,16 +35,19 @@ class PairInteractionGrid(nn.Module):
             nn.SiLU(),
             nn.Linear(dim, dim),
         )
+        self.out_norm = nn.LayerNorm(dim)
 
     def forward(self, price: Tensor, liquid: Tensor) -> Tensor:
-        p = self.proj_p(price).unsqueeze(3)
-        v = self.proj_v(liquid).unsqueeze(2)
+        price_base = self.price_norm(price)
+        liquid_base = self.liquid_norm(liquid)
+        p = self.proj_p(price_base).unsqueeze(3)
+        v = self.proj_v(liquid_base).unsqueeze(2)
         prod = p * v
         absdiff = torch.abs(p - v)
         p_b = p.expand(-1, -1, -1, liquid.shape[2], -1)
         v_b = v.expand(-1, -1, price.shape[2], -1, -1)
         pair = torch.cat((p_b, v_b, prod, absdiff), dim=-1)
-        grid = self.fuse(pair)
+        grid = self.out_norm(self.fuse(pair))
         return grid.reshape(grid.shape[0], grid.shape[1], grid.shape[2] * grid.shape[3], grid.shape[4])
 
 
@@ -67,4 +72,3 @@ class PriceLiquidityDualFusion(nn.Module):
 
 
 __all__ = ["PairInteractionGrid", "PairwiseCross", "PriceLiquidityDualFusion"]
-

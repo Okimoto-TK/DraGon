@@ -44,6 +44,8 @@ class LocalTopKCrossReadout(nn.Module):
         self.q_tokens = q_tokens
         self.q_steps = q_steps
         self.topk = int(topk)
+        self.q_norm = nn.LayerNorm(dim)
+        self.kv_norm = nn.LayerNorm(dim)
         self.q_proj = nn.Linear(dim, dim)
         self.k_proj = nn.Linear(dim, dim)
         self.v_proj = nn.Linear(dim, dim)
@@ -56,10 +58,12 @@ class LocalTopKCrossReadout(nn.Module):
         gamma, beta, _ = self.cond(*contexts)
         q_flat = flatten_tokens(query)
         src_flat = flatten_tokens(source)
-        q_mod = (q_flat * (1.0 + gamma.unsqueeze(1))) + beta.unsqueeze(1)
+        q_base = self.q_norm(q_flat)
+        src_base = self.kv_norm(src_flat)
+        q_mod = (q_base * (1.0 + gamma.unsqueeze(1))) + beta.unsqueeze(1)
         q_proj = self.q_proj(q_mod)
-        k_proj = self.k_proj(src_flat)
-        v_proj = self.v_proj(src_flat)
+        k_proj = self.k_proj(src_base)
+        v_proj = self.v_proj(src_base)
 
         scores = torch.matmul(q_proj, k_proj.transpose(1, 2)) / math.sqrt(dim)
         scores = scores + self.mask.unsqueeze(0)
@@ -73,4 +77,3 @@ class LocalTopKCrossReadout(nn.Module):
 
 
 __all__ = ["LocalTopKCrossReadout", "build_local_mask"]
-
