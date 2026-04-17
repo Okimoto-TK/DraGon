@@ -310,9 +310,6 @@ def fit(
     model.to(device)
     criterion.to(device)
 
-    # Let inductor know if CUDA Graph is used for proper kernel management.
-    torch._inductor.config.force_disable_cudagraphs = not use_cuda_graph
-
     # Set FP32 matmul precision for stability when autocast is enabled.
     torch.set_float32_matmul_precision("high")
 
@@ -635,9 +632,8 @@ def run_training(
 
     model = MultiScaleFusionNet(task_label=resolved_label)
 
-    # Let inductor know if CUDA Graph is used for proper kernel management.
-    torch._inductor.config.force_disable_cudagraphs = not use_cuda_graph
-    model = torch.compile(model, mode="max-autotune")
+    compile_mode = "max-autotune" if use_cuda_graph else "max-autotune-no-cudagraphs"
+    model = torch.compile(model, mode=compile_mode)
 
     criterion = SingleTaskLoss(task_label=resolved_label).to(resolved_device)
     optimizer = AdamW(
