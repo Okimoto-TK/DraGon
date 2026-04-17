@@ -15,7 +15,6 @@ from torch.utils.data import DataLoader, Sampler, Subset
 from config.config import amp_enabled as DEFAULT_AMP_ENABLED
 from config.config import batch_size as DEFAULT_BATCH_SIZE
 from config.config import checkpoint_dir as DEFAULT_CHECKPOINT_DIR
-from config.config import cuda_graph_warmup_steps as DEFAULT_CUDA_GRAPH_WARMUP_STEPS
 from config.config import early_stopping_patience as DEFAULT_EARLY_STOPPING_PATIENCE
 from config.config import mlflow_dir as DEFAULT_MLFLOW_DIR
 from config.config import mlflow_enabled as DEFAULT_MLFLOW_ENABLED
@@ -302,17 +301,17 @@ def fit(
     seed: int = DEFAULT_TRAIN_SEED,
     amp_enabled: bool = DEFAULT_AMP_ENABLED,
     use_cuda_graph: bool = DEFAULT_USE_CUDA_GRAPH,
-    cuda_graph_warmup_steps: int = DEFAULT_CUDA_GRAPH_WARMUP_STEPS,
 ) -> dict[str, Any]:
     """Run the full training loop."""
     resolved_label = canonical_task_label(label)
-    if not bool(use_cuda_graph):
-        raise RuntimeError("Non-CUDA-Graph training is disabled. Set use_cuda_graph=True.")
     if not (device.startswith("cuda") and torch.cuda.is_available()):
-        raise RuntimeError("CUDA Graph training requires a CUDA device.")
+        raise RuntimeError("Training requires a CUDA device.")
 
     model.to(device)
     criterion.to(device)
+
+    # Let inductor know if CUDA Graph is used for proper kernel management.
+    torch._inductor.config.force_disable_cudagraphs = not use_cuda_graph
 
     # Set FP32 matmul precision for stability when autocast is enabled.
     torch.set_float32_matmul_precision("high")
@@ -337,9 +336,7 @@ def fit(
         else None
     )
     resolved_amp_enabled = bool(amp_enabled and device.startswith("cuda") and torch.cuda.is_available())
-    resolved_cuda_graph = True
     scaler = None
-    cuda_graph_state = None
 
     try:
         if visualizer is not None:
@@ -353,8 +350,7 @@ def fit(
                     "batch_size": train_loader.batch_size,
                     "num_epochs": num_epochs,
                     "amp_enabled": resolved_amp_enabled,
-                    "use_cuda_graph": resolved_cuda_graph,
-                    "cuda_graph_warmup_steps": cuda_graph_warmup_steps,
+                    "use_cuda_graph": use_cuda_graph,
                     "train_samples_per_epoch": train_samples_per_epoch,
                     "val_samples_per_epoch": val_samples_per_epoch,
                     "log_every": log_every,
@@ -412,7 +408,7 @@ def fit(
                     metrics=payload["metrics"],
                 )
 
-            train_metrics, cuda_graph_state = train_one_epoch(
+            train_metrics = train_one_epoch(
                 model,
                 criterion,
                 optimizer,
@@ -426,9 +422,6 @@ def fit(
                 log_every=log_every,
                 scaler=scaler,
                 amp_enabled=resolved_amp_enabled,
-                use_cuda_graph=resolved_cuda_graph,
-                cuda_graph_warmup_steps=cuda_graph_warmup_steps,
-                cuda_graph_state=cuda_graph_state,
             )
             global_train_step += len(epoch_train_loader)
             if visualizer is not None:
@@ -599,7 +592,6 @@ def run_training(
     prefetch_factor: int = DEFAULT_PREFETCH_FACTOR,
     amp_enabled: bool = DEFAULT_AMP_ENABLED,
     use_cuda_graph: bool = DEFAULT_USE_CUDA_GRAPH,
-    cuda_graph_warmup_steps: int = DEFAULT_CUDA_GRAPH_WARMUP_STEPS,
 ) -> dict[str, Any]:
     """Build datasets, model, loss, optimizer, and run training."""
     resolved_label = canonical_task_label(label)
@@ -607,13 +599,10 @@ def run_training(
         raise ValueError("Exactly one of run_name or load_checkpoint must be provided.")
     resolved_run_name = str(run_name) if run_name is not None else _run_name_from_checkpoint(load_checkpoint)
     torch.manual_seed(seed)
-    if not bool(use_cuda_graph):
-        raise RuntimeError("Non-CUDA-Graph training is disabled. Set use_cuda_graph=True.")
     resolved_device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     loader_uses_cuda = resolved_device.startswith("cuda")
     if not (loader_uses_cuda and torch.cuda.is_available()):
-        raise RuntimeError("CUDA Graph training requires a CUDA device.")
-    resolved_cuda_graph = True
+        raise RuntimeError("Training requires a CUDA device.")
     persistent_workers = num_workers > 0
     loader_kwargs: dict[str, Any] = {
         "batch_size": batch_size,
@@ -636,7 +625,6 @@ def run_training(
     train_loader = DataLoader(
         train_dataset,
         sampler=train_sampler,
-        drop_last=resolved_cuda_graph,
         **loader_kwargs,
     )
     val_loader = DataLoader(
@@ -647,17 +635,16 @@ def run_training(
 
     model = MultiScaleFusionNet(task_label=resolved_label)
 
-    # Compile model: use reduce-overhead mode.
-    # max-autotune is skipped to avoid excessive compilation time
-    # while still getting kernel fusion benefits with CUDA Graph.
-    model = torch.compile(model, mode="reduce-overhead")
+    # Let inductor know if CUDA Graph is used for proper kernel management.
+    torch._inductor.config.force_disable_cudagraphs = not use_cuda_graph
+    model = torch.compile(model, mode="max-autotune")
 
     criterion = SingleTaskLoss(task_label=resolved_label).to(resolved_device)
     optimizer = AdamW(
         model.parameters(),
         lr=learning_rate,
         weight_decay=weight_decay,
-        capturable=resolved_cuda_graph,
+        capturable=use_cuda_graph,
     )
     scheduler = _build_scheduler(
         optimizer,
@@ -692,8 +679,7 @@ def run_training(
         log_every=log_every,
         seed=seed,
         amp_enabled=amp_enabled,
-        use_cuda_graph=resolved_cuda_graph,
-        cuda_graph_warmup_steps=cuda_graph_warmup_steps,
+        use_cuda_graph=use_cuda_graph,
     )
 
 
