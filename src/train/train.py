@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
 
 import torch
 from torch.amp import GradScaler, autocast
@@ -18,6 +20,16 @@ from src.train.utils import (
     batch_prediction_metrics,
     move_batch_to_device,
 )
+
+
+@dataclass
+class CudaGraphState:
+    capture_device: torch.device
+    capture_device_str: str
+    graph: torch.cuda.CUDAGraph
+    static_batch: dict[str, torch.Tensor]
+    static_outputs: dict[str, torch.Tensor]
+    static_loss: torch.Tensor
 
 
 def _make_static_batch(batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -51,6 +63,118 @@ def _zero_grads_for_cuda_graph(optimizer: torch.optim.Optimizer) -> None:
     optimizer.zero_grad(set_to_none=False)
 
 
+def _initialize_cuda_graph_state(
+    model: nn.Module,
+    criterion: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    data_iter,
+    *,
+    amp_enabled: bool,
+    cuda_graph_warmup_steps: int,
+) -> tuple[CudaGraphState | None, int]:
+    capture_device = next(model.parameters()).device
+    if capture_device.type != "cuda":
+        raise RuntimeError(f"CUDA Graph requires model parameters on CUDA, got {capture_device}")
+    torch.cuda.set_device(capture_device)
+    capture_device_str = str(capture_device)
+
+    warmup_steps = max(int(cuda_graph_warmup_steps), 0)
+    consumed_steps = 0
+    for _ in range(warmup_steps):
+        host_batch = next(data_iter, None)
+        if host_batch is None:
+            return None, consumed_steps
+        batch = move_batch_to_device(host_batch, capture_device_str)
+        _zero_grads_for_cuda_graph(optimizer)
+        with autocast(**_cuda_amp_autocast_kwargs(amp_enabled)):
+            outputs = model(
+                batch["macro"],
+                batch["mezzo"],
+                batch["micro"],
+                batch["sidechain"],
+            )
+            loss, _ = criterion(outputs, batch, return_metrics=False, update_state=False)
+        loss.backward()
+        optimizer.step()
+        consumed_steps += 1
+        del outputs
+        del loss
+
+    capture_batch_host = next(data_iter, None)
+    if capture_batch_host is None:
+        return None, consumed_steps
+    capture_batch = move_batch_to_device(capture_batch_host, capture_device_str)
+    static_batch = _make_static_batch(capture_batch)
+    _copy_batch_to_static(static_batch, capture_batch)
+    _zero_grads_for_cuda_graph(optimizer)
+
+    prev_cudnn_benchmark = torch.backends.cudnn.benchmark
+    try:
+        torch.backends.cudnn.benchmark = False
+        static_warmup_iters = max(1, min(max(int(cuda_graph_warmup_steps), 0), 3))
+        for _ in range(static_warmup_iters):
+            _zero_grads_for_cuda_graph(optimizer)
+            with autocast(**_cuda_amp_autocast_kwargs(amp_enabled)):
+                static_outputs = model(
+                    static_batch["macro"],
+                    static_batch["mezzo"],
+                    static_batch["micro"],
+                    static_batch["sidechain"],
+                )
+                static_loss, _ = criterion(
+                    static_outputs,
+                    static_batch,
+                    return_metrics=False,
+                    update_state=False,
+                )
+            static_loss.backward()
+            del static_outputs
+            del static_loss
+        _zero_grads_for_cuda_graph(optimizer)
+
+        capture_stage = "graph_init"
+        try:
+            graph = torch.cuda.CUDAGraph()
+            capture_stage = "graph_context"
+            with torch.cuda.graph(graph):
+                capture_stage = "autocast_context"
+                with autocast(**_cuda_amp_autocast_kwargs(amp_enabled)):
+                    capture_stage = "forward"
+                    static_outputs = model(
+                        static_batch["macro"],
+                        static_batch["mezzo"],
+                        static_batch["micro"],
+                        static_batch["sidechain"],
+                    )
+                    capture_stage = "loss"
+                    static_loss, _ = criterion(
+                        static_outputs,
+                        static_batch,
+                        return_metrics=False,
+                        update_state=False,
+                    )
+                capture_stage = "backward"
+                static_loss.backward()
+        except Exception as exc:
+            raise RuntimeError(
+                "CUDA Graph capture failed. "
+                f"stage={capture_stage}. "
+                "Non-CUDA-Graph fallback is disabled by policy."
+            ) from exc
+    finally:
+        torch.backends.cudnn.benchmark = prev_cudnn_benchmark
+
+    state = CudaGraphState(
+        capture_device=capture_device,
+        capture_device_str=capture_device_str,
+        graph=graph,
+        static_batch=static_batch,
+        static_outputs=static_outputs,
+        static_loss=static_loss,
+    )
+    return state, consumed_steps
+
+
 def _run_eager_epoch(
     model: nn.Module,
     criterion: nn.Module,
@@ -66,7 +190,7 @@ def _run_eager_epoch(
     log_every: int,
     scaler: GradScaler | None,
     amp_enabled: bool,
-) -> dict[str, float]:
+) -> tuple[dict[str, float], None]:
     tracker = MetricTracker(device=device)
     window_tracker = MetricTracker(device=device)
     total_steps = max(len(dataloader), 1)
@@ -145,7 +269,7 @@ def _run_eager_epoch(
                     }
                 )
 
-    return tracker.compute()
+    return tracker.compute(), None
 
 
 def _run_cuda_graph_epoch(
@@ -163,12 +287,12 @@ def _run_cuda_graph_epoch(
     log_every: int,
     amp_enabled: bool,
     cuda_graph_warmup_steps: int,
-) -> dict[str, float]:
+    cuda_graph_state: CudaGraphState | None,
+) -> tuple[dict[str, float], CudaGraphState | None]:
     capture_device = next(model.parameters()).device
     if capture_device.type != "cuda":
         raise RuntimeError(f"CUDA Graph requires model parameters on CUDA, got {capture_device}")
     torch.cuda.set_device(capture_device)
-    capture_device_str = str(capture_device)
 
     hooks_suspended = visualizer is not None
     if hooks_suspended:
@@ -178,7 +302,6 @@ def _run_cuda_graph_epoch(
     window_tracker = MetricTracker(device=device)
     total_steps = max(len(dataloader), 1)
     data_iter = iter(dataloader)
-    prev_cudnn_benchmark = torch.backends.cudnn.benchmark
 
     step_idx = 0
 
@@ -249,110 +372,56 @@ def _run_cuda_graph_epoch(
         del step_metrics
 
     try:
-        warmup_steps = max(int(cuda_graph_warmup_steps), 0)
-        warmup_exhausted = False
-        for _ in range(warmup_steps):
-            host_batch = next(data_iter, None)
-            if host_batch is None:
-                warmup_exhausted = True
-                break
-            step_idx += 1
-            _run_eager_step(move_batch_to_device(host_batch, capture_device_str), step_idx)
-        if warmup_exhausted:
-            return tracker.compute()
+        graph_initialized_this_epoch = False
+        if cuda_graph_state is None:
+            cuda_graph_state, warmup_consumed = _initialize_cuda_graph_state(
+                model,
+                criterion,
+                optimizer,
+                data_iter,
+                amp_enabled=amp_enabled,
+                cuda_graph_warmup_steps=cuda_graph_warmup_steps,
+            )
+            step_idx += warmup_consumed
+            if cuda_graph_state is None:
+                return tracker.compute(), None
+            graph_initialized_this_epoch = True
 
-        capture_batch_host = next(data_iter, None)
-        if capture_batch_host is None:
-            return tracker.compute()
-        capture_batch = move_batch_to_device(capture_batch_host, capture_device_str)
-        static_batch = _make_static_batch(capture_batch)
-        _copy_batch_to_static(static_batch, capture_batch)
-        _zero_grads_for_cuda_graph(optimizer)
+        assert cuda_graph_state is not None
 
-        # Pre-run the exact static buffers once outside capture so backend
-        # selection / plan creation does not happen during graph capture.
-        torch.backends.cudnn.benchmark = False
-        static_warmup_iters = max(1, min(max(int(cuda_graph_warmup_steps), 0), 3))
-        for _ in range(static_warmup_iters):
-            _zero_grads_for_cuda_graph(optimizer)
-            with autocast(**_cuda_amp_autocast_kwargs(amp_enabled)):
-                static_outputs = model(
-                    static_batch["macro"],
-                    static_batch["mezzo"],
-                    static_batch["micro"],
-                    static_batch["sidechain"],
-                )
-                static_loss, _ = criterion(
-                    static_outputs,
-                    static_batch,
-                    return_metrics=False,
-                    update_state=False,
-                )
-            static_loss.backward()
-            del static_outputs
-            del static_loss
-        _zero_grads_for_cuda_graph(optimizer)
-
-        capture_stage = "graph_init"
-        try:
-            graph = torch.cuda.CUDAGraph()
-            capture_stage = "graph_context"
-            with torch.cuda.graph(graph):
-                capture_stage = "autocast_context"
-                with autocast(**_cuda_amp_autocast_kwargs(amp_enabled)):
-                    capture_stage = "forward"
-                    static_outputs = model(
-                        static_batch["macro"],
-                        static_batch["mezzo"],
-                        static_batch["micro"],
-                        static_batch["sidechain"],
-                    )
-                    capture_stage = "loss"
-                    static_loss, _ = criterion(
-                        static_outputs,
-                        static_batch,
-                        return_metrics=False,
-                        update_state=False,
-                    )
-                capture_stage = "backward"
-                static_loss.backward()
-        except Exception as exc:
-            raise RuntimeError(
-                "CUDA Graph capture failed. "
-                f"stage={capture_stage}. "
-                "Non-CUDA-Graph fallback is disabled by policy."
-            ) from exc
-
-        def _iter_captured_batches():
-            yield capture_batch
-            for host_batch in data_iter:
-                yield move_batch_to_device(host_batch, capture_device_str)
-
-        for batch in _iter_captured_batches():
+        if graph_initialized_this_epoch:
             step_idx += 1
             _zero_grads_for_cuda_graph(optimizer)
-            _copy_batch_to_static(static_batch, batch)
-            graph.replay()
+            cuda_graph_state.graph.replay()
             if grad_clip is not None:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             optimizer.step()
             with torch.no_grad():
                 _, static_loss_metrics = criterion(
-                    static_outputs,
-                    static_batch,
+                    cuda_graph_state.static_outputs,
+                    cuda_graph_state.static_batch,
                     return_metrics=True,
                     update_state=True,
                 )
-            static_mean_metrics = batch_prediction_metrics(static_outputs, static_batch)
-
+            static_mean_metrics = batch_prediction_metrics(cuda_graph_state.static_outputs, cuda_graph_state.static_batch)
             diag_metrics: dict[str, torch.Tensor | float] = {}
             if visualizer is not None:
-                diag_metrics = visualizer.collect_batch_metrics(model, static_outputs, static_batch, static_loss_metrics)
-                visualizer.update_epoch_buffer("train", model, static_outputs, static_batch, metrics=diag_metrics)
-
-            batch_size = int(static_batch["macro"].shape[0])
+                diag_metrics = visualizer.collect_batch_metrics(
+                    model,
+                    cuda_graph_state.static_outputs,
+                    cuda_graph_state.static_batch,
+                    static_loss_metrics,
+                )
+                visualizer.update_epoch_buffer(
+                    "train",
+                    model,
+                    cuda_graph_state.static_outputs,
+                    cuda_graph_state.static_batch,
+                    metrics=diag_metrics,
+                )
+            batch_size = int(cuda_graph_state.static_batch["macro"].shape[0])
             step_metrics = {
-                "loss": static_loss.detach(),
+                "loss": cuda_graph_state.static_loss.detach(),
                 **static_loss_metrics,
                 **static_mean_metrics,
                 **diag_metrics,
@@ -361,9 +430,53 @@ def _run_cuda_graph_epoch(
             window_tracker.update(step_metrics, weight=batch_size)
             _sync_window_if_needed(step_idx)
 
-        return tracker.compute()
+        for host_batch in data_iter:
+            batch = move_batch_to_device(host_batch, cuda_graph_state.capture_device_str)
+            step_idx += 1
+            _zero_grads_for_cuda_graph(optimizer)
+            _copy_batch_to_static(cuda_graph_state.static_batch, batch)
+            cuda_graph_state.graph.replay()
+            if grad_clip is not None:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            optimizer.step()
+            with torch.no_grad():
+                _, static_loss_metrics = criterion(
+                    cuda_graph_state.static_outputs,
+                    cuda_graph_state.static_batch,
+                    return_metrics=True,
+                    update_state=True,
+                )
+            static_mean_metrics = batch_prediction_metrics(cuda_graph_state.static_outputs, cuda_graph_state.static_batch)
+
+            diag_metrics: dict[str, torch.Tensor | float] = {}
+            if visualizer is not None:
+                diag_metrics = visualizer.collect_batch_metrics(
+                    model,
+                    cuda_graph_state.static_outputs,
+                    cuda_graph_state.static_batch,
+                    static_loss_metrics,
+                )
+                visualizer.update_epoch_buffer(
+                    "train",
+                    model,
+                    cuda_graph_state.static_outputs,
+                    cuda_graph_state.static_batch,
+                    metrics=diag_metrics,
+                )
+
+            batch_size = int(cuda_graph_state.static_batch["macro"].shape[0])
+            step_metrics = {
+                "loss": cuda_graph_state.static_loss.detach(),
+                **static_loss_metrics,
+                **static_mean_metrics,
+                **diag_metrics,
+            }
+            tracker.update(step_metrics, weight=batch_size)
+            window_tracker.update(step_metrics, weight=batch_size)
+            _sync_window_if_needed(step_idx)
+
+        return tracker.compute(), cuda_graph_state
     finally:
-        torch.backends.cudnn.benchmark = prev_cudnn_benchmark
         if hooks_suspended:
             visualizer.attach(model)
 
@@ -386,7 +499,8 @@ def train_one_epoch(
     amp_enabled: bool = False,
     use_cuda_graph: bool = DEFAULT_USE_CUDA_GRAPH,
     cuda_graph_warmup_steps: int = DEFAULT_CUDA_GRAPH_WARMUP_STEPS,
-) -> dict[str, float]:
+    cuda_graph_state: CudaGraphState | None = None,
+) -> tuple[dict[str, float], CudaGraphState | None]:
     """Run one training epoch and return averaged metrics."""
     del diagnostics_every_steps
     model.train()
@@ -416,6 +530,7 @@ def train_one_epoch(
             log_every=log_every,
             amp_enabled=amp_enabled,
             cuda_graph_warmup_steps=cuda_graph_warmup_steps,
+            cuda_graph_state=cuda_graph_state,
         )
     raise RuntimeError(
         "CUDA Graph prerequisites not met. "

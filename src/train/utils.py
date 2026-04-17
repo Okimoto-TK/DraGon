@@ -13,10 +13,17 @@ from src.task_labels import task_target_column
 
 def move_batch_to_device(batch: Mapping[str, Tensor], device: str) -> dict[str, Tensor]:
     """Move tensor values in ``batch`` onto ``device``."""
-    return {
-        key: value.to(device, non_blocking=True) if isinstance(value, Tensor) else value
-        for key, value in batch.items()
-    }
+    target_is_cuda = str(device).startswith("cuda")
+    moved: dict[str, Tensor] = {}
+    for key, value in batch.items():
+        if not isinstance(value, Tensor):
+            moved[key] = value
+            continue
+        tensor = value
+        if target_is_cuda and tensor.device.type == "cpu" and not tensor.is_pinned():
+            tensor = tensor.pin_memory()
+        moved[key] = tensor.to(device, non_blocking=True)
+    return moved
 
 
 def grad_norm(parameters) -> float:

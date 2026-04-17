@@ -23,11 +23,11 @@ def student_t_nll_from_logvar(mean: Tensor, target: Tensor, log_sigma2: Tensor, 
     inv_sigma2 = torch.exp(-log_sigma2)
     scaled_error = squared_error * inv_sigma2 / nu_value
     log_norm = (
-        torch.lgamma(torch.tensor((nu_value + 1.0) * 0.5, device=mean.device, dtype=mean.dtype))
-        - torch.lgamma(torch.tensor(nu_value * 0.5, device=mean.device, dtype=mean.dtype))
+        math.lgamma((nu_value + 1.0) * 0.5)
+        - math.lgamma(nu_value * 0.5)
         - 0.5 * math.log(nu_value * math.pi)
     )
-    return -log_norm + 0.5 * log_sigma2 + 0.5 * (nu_value + 1.0) * torch.log1p(scaled_error)
+    return (-log_norm) + 0.5 * log_sigma2 + 0.5 * (nu_value + 1.0) * torch.log1p(scaled_error)
 
 
 def gaussian_nll_from_logvar(mean: Tensor, target: Tensor, log_sigma2: Tensor) -> Tensor:

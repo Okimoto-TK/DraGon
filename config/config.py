@@ -93,7 +93,7 @@ ret_nll_weight = 0.05
 rv_nll_weight = 0.10
 quantile_nll_weight = 0.10
 
-batch_size = 128
+batch_size = 256
 learning_rate = 1e-3
 weight_decay = 1e-4
 num_epochs = 300
@@ -115,7 +115,7 @@ num_workers = 16
 prefetch_factor = 4
 amp_enabled = True
 use_cuda_graph = True
-cuda_graph_warmup_steps = 8
+cuda_graph_warmup_steps = 4
 
 scheduler_name = "plateau"
 scheduler_factor = 0.5

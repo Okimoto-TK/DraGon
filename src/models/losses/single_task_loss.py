@@ -99,14 +99,43 @@ class SingleTaskLoss(nn.Module):
         update_state: bool = True,
     ) -> tuple[Tensor, dict[str, Tensor]]:
         del update_state
+        if not return_metrics:
+            if self.task_label == "ret":
+                y = batch["label_ret"].clamp_min(self.eps)
+                z = y.log()
+                mu = outputs["ret_mu"]
+                log_sigma2 = outputs["ret_log_sigma2"].clamp(self.log_clamp_min, self.log_clamp_max)
+                loss_main = student_t_nll_from_logvar(mu, z, log_sigma2, self.student_t_nu).mean()
+                loss_unc = student_t_nll_from_logvar(mu.detach(), z, log_sigma2, self.student_t_nu).mean()
+                return loss_main + self.ret_nll_weight * loss_unc, {}
+            if self.task_label == "rv":
+                y = batch["label_rv"].clamp_min(self.eps)
+                variance_target = y.square().clamp_min(self.eps)
+                log_variance_target = variance_target.log()
+                log_var_hat = outputs["rv_log_var"].clamp(self.log_clamp_min, self.log_clamp_max)
+                log_sigma2 = outputs["rv_log_sigma2"].clamp(self.log_clamp_min, self.log_clamp_max)
+                loss_main = qlike_from_log_variance(log_var_hat, variance_target).mean()
+                loss_unc = gaussian_nll_from_logvar(log_var_hat.detach(), log_variance_target, log_sigma2).mean()
+                return loss_main + self.rv_nll_weight * loss_unc, {}
+            assert self.q is not None
+            y = batch["label_ret"].clamp_min(self.eps)
+            z = y.log()
+            mu = outputs[f"mu_{self.task_label}"].clamp_min(self.eps)
+            log_mu = mu.log()
+            log_b = outputs[f"log_b_{self.task_label}"].clamp(self.log_clamp_min, self.log_clamp_max)
+            residual = z - log_mu
+            loss_main = pinball_loss(residual, self.q).mean()
+            detached_residual = z - log_mu.detach()
+            detached_pinball = pinball_loss(detached_residual, self.q)
+            loss_unc = log_ald_scale_loss(log_b, detached_pinball).mean()
+            return loss_main + self.quantile_nll_weight * loss_unc, {}
+
         if self.task_label == "ret":
             loss, metrics = self._ret_loss(outputs, batch)
         elif self.task_label == "rv":
             loss, metrics = self._rv_loss(outputs, batch)
         else:
             loss, metrics = self._quantile_loss(outputs, batch)
-        if not return_metrics:
-            return loss, {}
         return loss, metrics
 
 

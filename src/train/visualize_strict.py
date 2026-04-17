@@ -4,13 +4,16 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
 import torch.nn.functional as F
+from config.config import assembled_dir
 from config.config import trend_ema_alpha as DEFAULT_EMA_ALPHA
 from torch import Tensor, nn
 from torch.utils.data import Subset
@@ -96,6 +99,24 @@ _RET_REFERENCE_BUCKETS = (
     ("ret_pos5_to_pos10", 5.0, 10.0),
     ("ret_ge_pos10", 10.0, None),
 )
+
+
+def _reference_scan_workers(task_count: int) -> int:
+    if task_count <= 1:
+        return 1
+    return min(max(1, os.cpu_count() or 1), 8, task_count)
+
+
+def _scan_reference_payload(
+    payload_name: str,
+    sample_indices: np.ndarray,
+    dataset_indices: np.ndarray,
+) -> list[tuple[float, int]]:
+    path = assembled_dir / f"{payload_name}.npz"
+    with np.load(path, allow_pickle=False) as packed:
+        labels = np.asarray(packed["label"], dtype=np.float32)
+    ret_pct = (labels[sample_indices, 0] - 1.0) * 100.0
+    return list(zip(ret_pct.tolist(), dataset_indices.tolist(), strict=True))
 
 
 def _tracking_uri(repo: str | Path) -> str:
@@ -396,9 +417,8 @@ class MLflowVisualizer:
     def prepare_reference_ret_samples(self, dataset: Any, *, per_bucket: int = _REFERENCE_BUCKET_LIMIT) -> None:
         base_dataset, local_indices = self._resolve_dataset_index(dataset)
         sample_index = getattr(base_dataset, "sample_index", None)
-        load_payload = getattr(base_dataset, "_load_payload", None)
         payload_at = getattr(sample_index, "payload_at", None)
-        if sample_index is None or not callable(load_payload) or not callable(payload_at):
+        if sample_index is None or not callable(payload_at):
             self._reference_ret_samples = []
             return
 
@@ -409,12 +429,22 @@ class MLflowVisualizer:
         for dataset_idx in local_indices.tolist():
             by_payload[int(sample_index.payload_ids[dataset_idx])].append(int(dataset_idx))
 
+        tasks: list[tuple[str, np.ndarray, np.ndarray]] = []
         for payload_id, dataset_indices in by_payload.items():
             payload_name = sample_index.payloadbook[payload_id]
-            payload = load_payload(payload_name)
-            for dataset_idx in dataset_indices:
-                sample_idx = int(sample_index.sample_idx[dataset_idx])
-                ret_pct = self._reference_ret_percent(payload["label"][sample_idx][0])
+            dataset_idx_array = np.asarray(dataset_indices, dtype=np.int64)
+            sample_idx_array = sample_index.sample_idx[dataset_idx_array].astype(np.int64, copy=False)
+            tasks.append((payload_name, sample_idx_array, dataset_idx_array))
+
+        max_workers = _reference_scan_workers(len(tasks))
+        if max_workers <= 1:
+            scanned = [_scan_reference_payload(*task) for task in tasks]
+        else:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                scanned = list(executor.map(lambda args: _scan_reference_payload(*args), tasks))
+
+        for payload_matches in scanned:
+            for ret_pct, dataset_idx in payload_matches:
                 for bucket_name, left, right in _RET_REFERENCE_BUCKETS:
                     in_left = True if left is None else ret_pct >= left
                     in_right = True if right is None else ret_pct <= right

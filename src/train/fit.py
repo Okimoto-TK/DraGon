@@ -336,6 +336,7 @@ def fit(
     resolved_amp_enabled = bool(amp_enabled and device.startswith("cuda") and torch.cuda.is_available())
     resolved_cuda_graph = True
     scaler = None
+    cuda_graph_state = None
 
     try:
         if visualizer is not None:
@@ -408,7 +409,7 @@ def fit(
                     metrics=payload["metrics"],
                 )
 
-            train_metrics = train_one_epoch(
+            train_metrics, cuda_graph_state = train_one_epoch(
                 model,
                 criterion,
                 optimizer,
@@ -424,6 +425,7 @@ def fit(
                 amp_enabled=resolved_amp_enabled,
                 use_cuda_graph=resolved_cuda_graph,
                 cuda_graph_warmup_steps=cuda_graph_warmup_steps,
+                cuda_graph_state=cuda_graph_state,
             )
             global_train_step += len(epoch_train_loader)
             if visualizer is not None:
