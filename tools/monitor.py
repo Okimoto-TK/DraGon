@@ -144,12 +144,12 @@ def _task_metric_keys(task: str) -> dict[str, tuple[str, str] | tuple[str, str, 
 def _health_metric_keys() -> dict[str, str]:
     return {
         "lr": "train.realtime.lr",
-        "M2_norm": "train.realtime.token.M2_norm",
-        "Z0_norm": "train.realtime.fusion.Z0_norm",
-        "Z1_norm": "train.realtime.fusion.Z1_norm",
-        "drift_delta": "train.realtime.fusion.drift_delta",
-        "diffusion_delta": "train.realtime.fusion.diffusion_delta",
-        "tfn_norm": "train.realtime.tfn.feat_norm",
+        "mezzo_joint_norm": "train.realtime.token.mezzo_joint_norm",
+        "macro_conditioned_mezzo_norm": "train.realtime.fusion.macro_conditioned_mezzo_norm",
+        "micro_refined_mezzo_norm": "train.realtime.fusion.micro_refined_mezzo_norm",
+        "macro_to_mezzo_delta": "train.realtime.fusion.macro_to_mezzo_delta",
+        "micro_to_mezzo_delta": "train.realtime.fusion.micro_to_mezzo_delta",
+        "joint_side_interaction_norm": "train.realtime.fusion.joint_side_interaction_norm",
     }
 
 
@@ -558,10 +558,10 @@ def _health_plot(snapshot: dict[str, Any]) -> bytes:
     _plot_lines(
         axes[0],
         [
-            ("M2", _series(snapshot, health["M2_norm"]), _COLORS["health_a"], "-"),
-            ("Z0", _series(snapshot, health["Z0_norm"]), _COLORS["health_b"], "-"),
-            ("Z1", _series(snapshot, health["Z1_norm"]), _COLORS["health_c"], "-"),
-            ("TFN", _series(snapshot, health["tfn_norm"]), _COLORS["health_d"], "-"),
+            ("mezzo joint", _series(snapshot, health["mezzo_joint_norm"]), _COLORS["health_a"], "-"),
+            ("macro->mezzo", _series(snapshot, health["macro_conditioned_mezzo_norm"]), _COLORS["health_b"], "-"),
+            ("micro->mezzo", _series(snapshot, health["micro_refined_mezzo_norm"]), _COLORS["health_c"], "-"),
+            ("joint×side", _series(snapshot, health["joint_side_interaction_norm"]), _COLORS["health_d"], "-"),
         ],
     )
     axes[0].set_title("Norm Flow")
@@ -569,8 +569,8 @@ def _health_plot(snapshot: dict[str, Any]) -> bytes:
     _plot_lines(
         axes[1],
         [
-            ("drift Δ", _series(snapshot, health["drift_delta"]), _COLORS["health_b"], "-"),
-            ("diffusion Δ", _series(snapshot, health["diffusion_delta"]), _COLORS["health_c"], "-"),
+            ("macro->mezzo Δ", _series(snapshot, health["macro_to_mezzo_delta"]), _COLORS["health_b"], "-"),
+            ("micro->mezzo Δ", _series(snapshot, health["micro_to_mezzo_delta"]), _COLORS["health_c"], "-"),
             ("lr", _series(snapshot, health["lr"]), _COLORS["mu"], "--"),
         ],
     )

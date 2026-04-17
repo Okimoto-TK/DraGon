@@ -42,25 +42,24 @@ class SingleScaleFrontend(nn.Module):
     def forward(self, scale_x: Tensor, e_d: Tensor) -> dict[str, Tensor]:
         x = scale_x.transpose(1, 2).contiguous()
         xy = x[..., 7:9]
-        z_price, path_tokens_19 = self.path_branch(scale_x[:, 0:4, :], xy)
-        z_liquid, liquid_base_seq = self.liquidity_branch(x[..., 4], x[..., 5], xy)
-        z_price_dual, z_liquid_dual, pair_grid, z_joint = self.pv_fusion(z_price, z_liquid)
-        s6_ctx = self.state_query_encoder(x[..., 6], xy)
-        z_joint_ctx = self.side_write(z_joint, e_d, s6_ctx)
-        z_state = self.state_reader(s6_ctx, z_joint_ctx)
+        price_tokens, price_relation_tokens = self.path_branch(scale_x[:, 0:4, :], xy)
+        liquid_tokens, liquid_base_sequence = self.liquidity_branch(x[..., 4], x[..., 5], xy)
+        price_tokens_dual, liquid_tokens_dual, price_liquidity_pair_grid, joint_tokens = self.pv_fusion(price_tokens, liquid_tokens)
+        hard_state_tokens = self.state_query_encoder(x[..., 6], xy)
+        joint_tokens_ctx = self.side_write(joint_tokens, e_d, hard_state_tokens)
+        state_tokens = self.state_reader(hard_state_tokens, joint_tokens_ctx)
         return {
-            "Z_price": z_price,
-            "Z_liquid": z_liquid,
-            "Z_price_dual": z_price_dual,
-            "Z_liquid_dual": z_liquid_dual,
-            "Z_joint": z_joint_ctx,
-            "Z_state": z_state,
-            "path_tokens_19": path_tokens_19,
-            "pair_grid": pair_grid,
-            "liquid_base_seq": liquid_base_seq,
-            "s6_ctx": s6_ctx,
+            "price_tokens": price_tokens,
+            "liquid_tokens": liquid_tokens,
+            "price_tokens_dual": price_tokens_dual,
+            "liquid_tokens_dual": liquid_tokens_dual,
+            "joint_tokens": joint_tokens_ctx,
+            "state_tokens": state_tokens,
+            "price_relation_tokens": price_relation_tokens,
+            "price_liquidity_pair_grid": price_liquidity_pair_grid,
+            "liquid_base_sequence": liquid_base_sequence,
+            "hard_state_tokens": hard_state_tokens,
         }
 
 
 __all__ = ["SingleScaleFrontend"]
-

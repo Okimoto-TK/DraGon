@@ -31,12 +31,12 @@ from src.models.components.trunks.single_scale import SingleScaleFrontend
 
 @dataclass
 class ScaleOutputs:
-    z_price: Tensor
-    z_liquid: Tensor
-    z_joint: Tensor
-    z_state: Tensor
-    path_tokens_19: Tensor
-    pair_grid: Tensor
+    price_tokens: Tensor
+    liquid_tokens: Tensor
+    joint_tokens: Tensor
+    state_tokens: Tensor
+    price_relation_tokens: Tensor
+    price_liquidity_pair_grid: Tensor
 
 
 class MultiScaleFusionNet(nn.Module):
@@ -81,14 +81,14 @@ class MultiScaleFusionNet(nn.Module):
         )
 
         # Compatibility aliases used by visualization / monitor tooling.
-        self.macro_encoder = self.macro_frontend.path_branch.feature_encoders[0]
-        self.mezzo_encoder = self.mezzo_frontend.path_branch.feature_encoders[0]
-        self.micro_encoder = self.micro_frontend.path_branch.feature_encoders[0]
-        self.side_encoder = self.side_context_encoder.gap_encoder
-        self.pairwise_lmf_12 = self.mezzo_frontend.pv_fusion.pair_grid
-        self.pairwise_lmf_23 = self.micro_frontend.pv_fusion.pair_grid
-        self.jointnet_12 = self.mezzo_frontend.pv_fusion.joint_readout
-        self.jointnet_23 = self.micro_frontend.pv_fusion.joint_readout
+        self.macro_return_encoder = self.macro_frontend.path_branch.feature_encoders[0]
+        self.mezzo_return_encoder = self.mezzo_frontend.path_branch.feature_encoders[0]
+        self.micro_return_encoder = self.micro_frontend.path_branch.feature_encoders[0]
+        self.side_gap_encoder = self.side_context_encoder.gap_encoder
+        self.mezzo_pair_interaction_grid = self.mezzo_frontend.pv_fusion.pair_grid
+        self.micro_pair_interaction_grid = self.micro_frontend.pv_fusion.pair_grid
+        self.mezzo_joint_token_readout = self.mezzo_frontend.pv_fusion.joint_readout
+        self.micro_joint_token_readout = self.micro_frontend.pv_fusion.joint_readout
 
         self.macro_to_mezzo = FlattenCrossAttentionAdapter(dim, num_heads=DEFAULT_NUM_HEADS, num_contexts=3)
         self.mezzo_to_micro = FlattenCrossAttentionAdapter(dim, num_heads=DEFAULT_NUM_HEADS, num_contexts=3)
@@ -104,6 +104,9 @@ class MultiScaleFusionNet(nn.Module):
         )
         self.micro_to_mezzo = FlattenCrossAttentionAdapter(dim, num_heads=DEFAULT_NUM_HEADS, num_contexts=3)
         self.mezzo_ffn = MezzoFusionFFN(dim, num_contexts=2)
+        self.joint_summary_norm = nn.LayerNorm(dim)
+        self.side_summary_norm = nn.LayerNorm(dim)
+        self.joint_side_interaction_norm = nn.LayerNorm(dim)
         self.head = OutputHead(dim, task_label=task_label)
 
         # Keep explicit references for documentation/debug symmetry even if not all are consumed directly.
@@ -114,12 +117,12 @@ class MultiScaleFusionNet(nn.Module):
     def _encode_scale(self, frontend: SingleScaleFrontend, scale_x: Tensor, e_d: Tensor) -> ScaleOutputs:
         outputs = frontend(scale_x, e_d)
         return ScaleOutputs(
-            z_price=outputs["Z_price"],
-            z_liquid=outputs["Z_liquid"],
-            z_joint=outputs["Z_joint"],
-            z_state=outputs["Z_state"],
-            path_tokens_19=outputs["path_tokens_19"],
-            pair_grid=outputs["pair_grid"],
+            price_tokens=outputs["price_tokens"],
+            liquid_tokens=outputs["liquid_tokens"],
+            joint_tokens=outputs["joint_tokens"],
+            state_tokens=outputs["state_tokens"],
+            price_relation_tokens=outputs["price_relation_tokens"],
+            price_liquidity_pair_grid=outputs["price_liquidity_pair_grid"],
         )
 
     def forward(self, macro: Tensor, mezzo: Tensor, micro: Tensor, sidechain: Tensor) -> dict[str, Tensor]:
@@ -129,49 +132,50 @@ class MultiScaleFusionNet(nn.Module):
         mezzo_out = self._encode_scale(self.mezzo_frontend, mezzo, e_d)
         micro_out = self._encode_scale(self.micro_frontend, micro, e_d)
 
-        j_macro = macro_out.z_joint
-        j_mezzo = mezzo_out.z_joint
-        j_micro = micro_out.z_joint
+        j_macro = macro_out.joint_tokens
+        j_mezzo = mezzo_out.joint_tokens
+        j_micro = micro_out.joint_tokens
 
-        jm1 = self.macro_to_mezzo(j_mezzo, j_macro, e_d, macro_out.z_state, mezzo_out.z_state)
-        ji1 = self.mezzo_to_micro(j_micro, jm1, e_d, mezzo_out.z_state, micro_out.z_state)
-        j_micro_sig = self.micro_to_mezzo_sig(jm1, ji1, e_d, mezzo_out.z_state, micro_out.z_state)
-        jm2 = self.micro_to_mezzo(jm1, j_micro_sig, e_d, micro_out.z_state, mezzo_out.z_state)
-        j_fused = self.mezzo_ffn(jm2, e_d, mezzo_out.z_state)
+        macro_conditioned_mezzo_tokens = self.macro_to_mezzo(j_mezzo, j_macro, e_d, macro_out.state_tokens, mezzo_out.state_tokens)
+        micro_conditioned_tokens = self.mezzo_to_micro(j_micro, macro_conditioned_mezzo_tokens, e_d, mezzo_out.state_tokens, micro_out.state_tokens)
+        micro_signal_tokens = self.micro_to_mezzo_sig(macro_conditioned_mezzo_tokens, micro_conditioned_tokens, e_d, mezzo_out.state_tokens, micro_out.state_tokens)
+        micro_refined_mezzo_tokens = self.micro_to_mezzo(
+            macro_conditioned_mezzo_tokens,
+            micro_signal_tokens,
+            e_d,
+            micro_out.state_tokens,
+            mezzo_out.state_tokens,
+        )
+        fused_joint_tokens = self.mezzo_ffn(micro_refined_mezzo_tokens, e_d, mezzo_out.state_tokens)
 
-        z_state = mezzo_out.z_state + self.mezzo_frontend.state_reader(mezzo_out.z_state, j_fused)
+        state_tokens = mezzo_out.state_tokens + self.mezzo_frontend.state_reader(mezzo_out.state_tokens, fused_joint_tokens)
 
-        z_d = pool_tokens(j_fused)
-        z_v = pool_tokens(e_d)
-        tfn_feat = z_d * z_v
-        head_outputs = self.head(pool_tokens(j_fused))
+        joint_summary = self.joint_summary_norm(pool_tokens(fused_joint_tokens))
+        side_summary = self.side_summary_norm(pool_tokens(e_d))
+        joint_side_interaction = self.joint_side_interaction_norm(joint_summary * side_summary)
+        head_outputs = self.head(joint_summary)
 
         outputs: dict[str, Tensor] = {
-            "E_d": e_d,
-            "Z_price": mezzo_out.z_price,
-            "Z_liquid": mezzo_out.z_liquid,
-            "Z_joint": j_fused,
-            "Z_state": z_state,
-            "J_macro": j_macro,
-            "J_mezzo": j_mezzo,
-            "J_micro": j_micro,
-            "M1": j_macro,
-            "M2": j_mezzo,
-            "S": j_micro,
-            "Z0": jm1,
-            "Z1": jm2,
-            "z_d": z_d,
-            "z_v": z_v,
-            "tfn_feat": tfn_feat,
-            "T12": mezzo_out.path_tokens_19,
-            "T23": mezzo_out.z_liquid,
-            "H12": mezzo_out.pair_grid,
-            "H23": j_fused,
-            "J_micro_sig": j_micro_sig,
-            "side/z_mf1": side_debug["z_mf1"],
-            "side/z_liqreg1": side_debug["z_liqreg1"],
-            "side/z_cause": side_debug["z_cause"],
-            "side/z_gap_ctx": side_debug["z_gap_ctx"],
+            "side_context_tokens": e_d,
+            "price_tokens": mezzo_out.price_tokens,
+            "liquid_tokens": mezzo_out.liquid_tokens,
+            "joint_tokens": fused_joint_tokens,
+            "state_tokens": state_tokens,
+            "macro_joint_tokens": j_macro,
+            "mezzo_joint_tokens": j_mezzo,
+            "micro_joint_tokens": j_micro,
+            "macro_conditioned_mezzo_tokens": macro_conditioned_mezzo_tokens,
+            "micro_refined_mezzo_tokens": micro_refined_mezzo_tokens,
+            "joint_summary": joint_summary,
+            "side_summary": side_summary,
+            "joint_side_interaction": joint_side_interaction,
+            "price_relation_tokens": mezzo_out.price_relation_tokens,
+            "price_liquidity_pair_grid": mezzo_out.price_liquidity_pair_grid,
+            "micro_signal_tokens": micro_signal_tokens,
+            "side/moneyflow_context_tokens": side_debug["z_mf1"],
+            "side/liquidity_context_tokens": side_debug["z_liqreg1"],
+            "side/causal_context_tokens": side_debug["z_cause"],
+            "side/gap_context_tokens": side_debug["z_gap_ctx"],
         }
         outputs.update(head_outputs)
         return outputs

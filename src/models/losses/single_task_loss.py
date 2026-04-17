@@ -6,15 +6,16 @@ from torch import Tensor, nn
 from config.config import quantile_nll_weight as DEFAULT_QUANTILE_NLL_WEIGHT
 from config.config import ret_nll_weight as DEFAULT_RET_NLL_WEIGHT
 from config.config import rv_nll_weight as DEFAULT_RV_NLL_WEIGHT
+from config.config import student_t_nu as DEFAULT_STUDENT_T_NU
 from config.config import variance_eps as DEFAULT_VARIANCE_EPS
 from config.config import variance_log_clamp_max as DEFAULT_LOG_CLAMP_MAX
 from config.config import variance_log_clamp_min as DEFAULT_LOG_CLAMP_MIN
 from src.models.losses.objectives import (
-    corr_loss,
     gaussian_nll_from_logvar,
     log_ald_scale_loss,
     pinball_loss,
     qlike_from_log_variance,
+    student_t_nll_from_logvar,
 )
 from src.task_labels import is_quantile_task, quantile_level
 
@@ -29,6 +30,7 @@ class SingleTaskLoss(nn.Module):
         self.ret_nll_weight = float(DEFAULT_RET_NLL_WEIGHT)
         self.rv_nll_weight = float(DEFAULT_RV_NLL_WEIGHT)
         self.quantile_nll_weight = float(DEFAULT_QUANTILE_NLL_WEIGHT)
+        self.student_t_nu = float(DEFAULT_STUDENT_T_NU)
         self.q = quantile_level(task_label) if is_quantile_task(task_label) else None
 
     def _ret_loss(self, outputs: dict[str, Tensor], batch: dict[str, Tensor]) -> tuple[Tensor, dict[str, Tensor]]:
@@ -36,8 +38,8 @@ class SingleTaskLoss(nn.Module):
         z = y.log()
         mu = outputs["ret_mu"]
         log_sigma2 = outputs["ret_log_sigma2"].clamp(self.log_clamp_min, self.log_clamp_max)
-        loss_main = corr_loss(mu, z, self.eps)
-        loss_unc = gaussian_nll_from_logvar(mu.detach(), z, log_sigma2).mean()
+        loss_main = student_t_nll_from_logvar(mu, z, log_sigma2, self.student_t_nu).mean()
+        loss_unc = student_t_nll_from_logvar(mu.detach(), z, log_sigma2, self.student_t_nu).mean()
         total = loss_main + self.ret_nll_weight * loss_unc
         metrics = {
             "loss_total": total.detach(),

@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 import json
+import multiprocessing as mp
+import os
 from pathlib import Path
 from typing import Literal
 
@@ -21,6 +24,19 @@ from src.data.assembler.assemble import PACKED_LABEL_SCHEMA_VERSION
 MemoryMode = Literal["lazy_packed", "auto"]
 _LABEL_INDEX = {name: idx for idx, name in enumerate(LABEL_COLS)}
 _MANIFEST_NAME = "_packed_manifest.json"
+
+
+def _resolve_scan_workers(
+    requested_workers: int | None,
+    *,
+    task_count: int,
+) -> int:
+    if task_count <= 1:
+        return 1
+    cpu_limit = max(1, (os.cpu_count() or 1) // 2)
+    if requested_workers is None:
+        return min(cpu_limit, task_count)
+    return max(1, min(int(requested_workers), cpu_limit, task_count))
 
 
 def _validate_packed_schema(packed: np.lib.npyio.NpzFile, *, path: Path) -> None:
@@ -78,9 +94,9 @@ def _payload_code(stem: str) -> str:
     return stem.split("__", 1)[0]
 
 
-def discover_codes(root: Path = assembled_dir) -> list[str]:
+def discover_codes(root: Path = assembled_dir, *, scan_workers: int | None = None) -> list[str]:
     """Return logical codes that already have packed training tensors."""
-    manifest = _get_packed_manifest(root)
+    manifest = _get_packed_manifest(root, scan_workers=scan_workers)
     totals: dict[str, int] = {}
     for stem, meta in manifest.items():
         code = str(meta.get("code", _payload_code(stem)))
@@ -111,10 +127,34 @@ def _scan_packed_file(path: Path) -> dict[str, int | str]:
     }
 
 
-def _build_packed_manifest(root: Path) -> dict[str, dict[str, int | str]]:
+def _load_packed_dates(path: Path) -> tuple[str, np.ndarray]:
+    with np.load(path, allow_pickle=False) as packed:
+        _validate_packed_schema(packed, path=path)
+        date = np.asarray(packed["date"], dtype=np.float32)
+    return path.stem, date
+
+
+def _build_packed_manifest(
+    root: Path,
+    *,
+    scan_workers: int | None = None,
+) -> dict[str, dict[str, int | str]]:
     manifest: dict[str, dict[str, int | str]] = {}
-    for path in sorted(root.glob("*.npz")):
-        manifest[path.stem] = _scan_packed_file(path)
+    paths = sorted(root.glob("*.npz"))
+    max_workers = _resolve_scan_workers(scan_workers, task_count=len(paths))
+    if max_workers <= 1:
+        for path in paths:
+            manifest[path.stem] = _scan_packed_file(path)
+    else:
+        ctx = mp.get_context("spawn")
+        chunksize = max(1, min(64, len(paths) // (max_workers * 4) or 1))
+        with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as executor:
+            for path, meta in zip(
+                paths,
+                executor.map(_scan_packed_file, paths, chunksize=chunksize),
+                strict=True,
+            ):
+                manifest[path.stem] = meta
     try:
         _manifest_path(root).write_text(
             json.dumps(manifest, ensure_ascii=True, separators=(",", ":")),
@@ -125,7 +165,11 @@ def _build_packed_manifest(root: Path) -> dict[str, dict[str, int | str]]:
     return manifest
 
 
-def _get_packed_manifest(root: Path) -> dict[str, dict[str, int | str]]:
+def _get_packed_manifest(
+    root: Path,
+    *,
+    scan_workers: int | None = None,
+) -> dict[str, dict[str, int | str]]:
     manifest_path = _manifest_path(root)
     current_files = {path.stem: path for path in root.glob("*.npz")}
 
@@ -165,18 +209,23 @@ def _get_packed_manifest(root: Path) -> dict[str, dict[str, int | str]]:
                             for payload_name, meta in manifest.items()
                         }
 
-    return _build_packed_manifest(root)
+    return _build_packed_manifest(root, scan_workers=scan_workers)
 
 
-def build_packed_sample_index(codes: list[str]) -> SampleIndexTable:
+def build_packed_sample_index(
+    codes: list[str],
+    *,
+    scan_workers: int | None = None,
+) -> SampleIndexTable:
     """Build a lightweight index by scanning packed ``.npz`` metadata only."""
     selected_codes = set(codes)
-    manifest = _get_packed_manifest(assembled_dir)
+    manifest = _get_packed_manifest(assembled_dir, scan_workers=scan_workers)
     payloadbook: list[str] = []
     payload_id_parts: list[np.ndarray] = []
     sample_idx_parts: list[np.ndarray] = []
     date_parts: list[np.ndarray] = []
 
+    selected_payload_names: list[str] = []
     for payload_name in sorted(manifest.keys()):
         meta = manifest.get(payload_name, {})
         code = str(meta.get("code", _payload_code(payload_name)))
@@ -187,12 +236,21 @@ def build_packed_sample_index(codes: list[str]) -> SampleIndexTable:
             continue
         if int(meta.get("count", 0)) <= 0:
             continue
+        selected_payload_names.append(payload_name)
+
+    paths = [_packed_path(payload_name) for payload_name in selected_payload_names]
+    max_workers = _resolve_scan_workers(scan_workers, task_count=len(paths))
+    if max_workers <= 1:
+        loaded_dates = [_load_packed_dates(path) for path in paths]
+    else:
+        ctx = mp.get_context("spawn")
+        chunksize = max(1, min(64, len(paths) // (max_workers * 4) or 1))
+        with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as executor:
+            loaded_dates = list(executor.map(_load_packed_dates, paths, chunksize=chunksize))
+
+    for payload_name, date in loaded_dates:
         payload_id = len(payloadbook)
         payloadbook.append(payload_name)
-
-        with np.load(path, allow_pickle=False) as packed:
-            _validate_packed_schema(packed, path=path)
-            date = np.asarray(packed["date"], dtype=np.float32)
 
         if date.size == 0:
             continue
@@ -340,6 +398,7 @@ def create_train_val_datasets(
     max_codes: int | None = None,
     filter_invalid: bool = True,
     memory_mode: MemoryMode = "lazy_packed",
+    scan_workers: int | None = None,
 ) -> tuple[Dataset[dict[str, Tensor]], Dataset[dict[str, Tensor]]]:
     """Create train/validation datasets from packed per-code ``.npz`` tensors."""
     del filter_invalid
@@ -350,11 +409,11 @@ def create_train_val_datasets(
             "'lazy_packed' or 'auto'."
         )
 
-    selected_codes = discover_codes() if codes is None else list(codes)
+    selected_codes = discover_codes(scan_workers=scan_workers) if codes is None else list(codes)
     if max_codes is not None:
         selected_codes = selected_codes[:max_codes]
 
-    sample_index = build_packed_sample_index(selected_codes)
+    sample_index = build_packed_sample_index(selected_codes, scan_workers=scan_workers)
     if len(sample_index) == 0 and selected_codes:
         raise FileNotFoundError(
             "Packed training tensors were not found. Run the assembler to generate "

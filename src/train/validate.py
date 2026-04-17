@@ -52,8 +52,6 @@ def validate(
         if visualizer is not None:
             diag_metrics = visualizer.collect_batch_metrics(model, outputs, batch, loss_metrics)
             visualizer.update_epoch_buffer("val", model, outputs, batch, metrics=diag_metrics)
-        if visualizer is not None and step_idx == total_steps:
-            visualizer.capture_epoch_snapshot("val", model, outputs, batch)
 
         batch_size = int(batch["macro"].shape[0])
         step_metrics = {"loss": loss.detach(), **loss_metrics, **mean_metrics, **diag_metrics}

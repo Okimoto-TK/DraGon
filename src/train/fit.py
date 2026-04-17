@@ -10,7 +10,7 @@ import torch
 from torch.amp import GradScaler
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Sampler, Subset
 
 from config.config import amp_enabled as DEFAULT_AMP_ENABLED
 from config.config import batch_size as DEFAULT_BATCH_SIZE
@@ -227,19 +227,38 @@ def _grouped_epoch_indices(
     return selected[order].tolist()
 
 
-def _build_epoch_loader(
-    base_loader: DataLoader,
+class MutableIndexSampler(Sampler[int]):
+    """Mutable sampler to keep one worker pool alive across epochs."""
+
+    def __init__(self, indices: list[int] | range | np.ndarray) -> None:
+        self._indices: list[int] = [int(idx) for idx in indices]
+
+    def set_indices(self, indices: list[int] | np.ndarray) -> None:
+        self._indices = [int(idx) for idx in indices]
+
+    def __iter__(self):
+        return iter(self._indices)
+
+    def __len__(self) -> int:
+        return len(self._indices)
+
+
+def _set_epoch_loader_indices(
+    loader: DataLoader,
     *,
     samples_per_epoch: int | None,
     seed: int,
     epoch: int,
     shuffle: bool,
-) -> DataLoader:
-    """Create one epoch loader with optional code-grouped sampling."""
-    if samples_per_epoch is None and not shuffle:
-        return base_loader
+) -> None:
+    """Update one persistent loader's sampler with epoch-specific indices."""
+    del shuffle
 
-    dataset = base_loader.dataset
+    sampler = loader.sampler
+    if not isinstance(sampler, MutableIndexSampler):
+        raise TypeError("Expected loader.sampler to be MutableIndexSampler")
+
+    dataset = loader.dataset
     grouped_indices = _grouped_epoch_indices(
         dataset,
         samples_per_epoch=samples_per_epoch,
@@ -248,27 +267,12 @@ def _build_epoch_loader(
     )
     if grouped_indices is None:
         if samples_per_epoch is None or samples_per_epoch <= 0 or len(dataset) <= samples_per_epoch:
-            return base_loader
-        rng = np.random.default_rng(seed + epoch)
-        grouped_indices = rng.choice(len(dataset), size=samples_per_epoch, replace=False).tolist()
+            grouped_indices = list(range(len(dataset)))
+        else:
+            rng = np.random.default_rng(seed + epoch)
+            grouped_indices = rng.choice(len(dataset), size=samples_per_epoch, replace=False).tolist()
 
-    if isinstance(grouped_indices, list) and len(grouped_indices) == len(dataset):
-        # Still rebuild the loader so order is grouped by code rather than global random shuffle.
-        epoch_dataset = Subset(dataset, grouped_indices)
-    else:
-        epoch_dataset = Subset(dataset, grouped_indices)
-
-    return DataLoader(
-        epoch_dataset,
-        batch_size=base_loader.batch_size,
-        shuffle=shuffle,
-        num_workers=base_loader.num_workers,
-        collate_fn=base_loader.collate_fn,
-        pin_memory=base_loader.pin_memory,
-        drop_last=base_loader.drop_last,
-        persistent_workers=base_loader.persistent_workers,
-        prefetch_factor=base_loader.prefetch_factor if base_loader.num_workers > 0 else None,
-    )
+    sampler.set_indices(grouped_indices)
 
 
 def fit(
@@ -336,6 +340,7 @@ def fit(
     try:
         if visualizer is not None:
             visualizer.attach(model)
+            visualizer.prepare_reference_ret_samples(val_loader.dataset)
             visualizer.log_params(
                 {
                     "label": resolved_label,
@@ -373,20 +378,22 @@ def fit(
             ui.start()
 
         for epoch in range(start_epoch, num_epochs):
-            epoch_train_loader = _build_epoch_loader(
+            _set_epoch_loader_indices(
                 train_loader,
                 samples_per_epoch=train_samples_per_epoch,
                 seed=seed,
                 epoch=epoch * 2,
                 shuffle=False,
             )
-            epoch_val_loader = _build_epoch_loader(
+            _set_epoch_loader_indices(
                 val_loader,
                 samples_per_epoch=val_samples_per_epoch,
                 seed=seed,
                 epoch=epoch * 2 + 1,
                 shuffle=False,
             )
+            epoch_train_loader = train_loader
+            epoch_val_loader = val_loader
             if ui is not None:
                 ui.start_epoch(epoch + 1, num_epochs, len(epoch_train_loader))
             if visualizer is not None:
@@ -420,7 +427,7 @@ def fit(
             )
             global_train_step += len(epoch_train_loader)
             if visualizer is not None:
-                visualizer.log_epoch_diagnostics("train", epoch + 1)
+                visualizer.log_epoch_diagnostics("train", epoch + 1, model=model, device=device)
             if ui is not None:
                 ui.set_status(f"Epoch {epoch + 1}/{num_epochs} validating")
             if visualizer is not None:
@@ -434,7 +441,7 @@ def fit(
                 amp_enabled=resolved_amp_enabled,
             )
             if visualizer is not None:
-                visualizer.log_epoch_diagnostics("val", epoch + 1)
+                visualizer.log_epoch_diagnostics("val", epoch + 1, model=model, device=device)
             if ui is not None:
                 ui.set_val_metrics(val_metrics)
 
@@ -533,10 +540,8 @@ def fit(
             if ui is not None:
                 ui.set_status(f"Epoch {epoch + 1}/{num_epochs} complete")
 
-            _clear_dataset_cache(epoch_train_loader.dataset)
-            _clear_dataset_cache(epoch_val_loader.dataset)
-            del epoch_train_loader
-            del epoch_val_loader
+            _clear_dataset_cache(train_loader.dataset)
+            _clear_dataset_cache(val_loader.dataset)
             gc.collect()
 
             if patience is not None and stale_epochs >= patience:
@@ -619,16 +624,19 @@ def run_training(
         val_ratio=val_ratio,
         max_codes=max_codes,
         memory_mode=memory_mode,
+        scan_workers=max(1, num_workers),
     )
+    train_sampler = MutableIndexSampler(range(len(train_dataset)))
+    val_sampler = MutableIndexSampler(range(len(val_dataset)))
     train_loader = DataLoader(
         train_dataset,
-        shuffle=False,
+        sampler=train_sampler,
         drop_last=resolved_cuda_graph,
         **loader_kwargs,
     )
     val_loader = DataLoader(
         val_dataset,
-        shuffle=False,
+        sampler=val_sampler,
         **loader_kwargs,
     )
 
@@ -692,6 +700,7 @@ def smoke_test(
         val_ratio=0.0,
         max_codes=max_codes,
         memory_mode=memory_mode,
+        scan_workers=1,
     )
     if len(train_dataset) == 0:
         raise RuntimeError("No samples available for smoke test")
@@ -724,11 +733,11 @@ def smoke_test(
         "mezzo_shape": tuple(batch["mezzo"].shape),
         "micro_shape": tuple(batch["micro"].shape),
         "sidechain_shape": tuple(batch["sidechain"].shape),
-        "M1_shape": tuple(outputs["M1"].shape),
-        "M2_shape": tuple(outputs["M2"].shape),
-        "S_shape": tuple(outputs["S"].shape),
-        "z_d_shape": tuple(outputs["z_d"].shape),
-        "z_v_shape": tuple(outputs["z_v"].shape),
+        "macro_joint_tokens_shape": tuple(outputs["macro_joint_tokens"].shape),
+        "mezzo_joint_tokens_shape": tuple(outputs["mezzo_joint_tokens"].shape),
+        "micro_joint_tokens_shape": tuple(outputs["micro_joint_tokens"].shape),
+        "joint_summary_shape": tuple(outputs["joint_summary"].shape),
+        "side_summary_shape": tuple(outputs["side_summary"].shape),
         "head_out_shape": tuple(outputs["head_out"].shape),
         "loss": float(loss.detach().item()),
         "metrics": {key: float(value.detach().item()) for key, value in metrics.items()},

@@ -61,22 +61,30 @@ class SideWriteIntoJoint(nn.Module):
     def __init__(self, dim: int, *, num_heads: int) -> None:
         super().__init__()
         self.cross = nn.MultiheadAttention(dim, num_heads=num_heads, batch_first=True, dropout=0.0)
+        self.cross_q_norm = nn.LayerNorm(dim)
+        self.cross_kv_norm = nn.LayerNorm(dim)
         self.write_gate = nn.Sequential(nn.Linear(dim * 3, dim), nn.SiLU(), nn.Linear(dim, 1), nn.Sigmoid())
         self.cond = nn.Sequential(nn.Linear(dim * 2, dim * 3 + 2), nn.SiLU(), nn.Linear(dim * 3 + 2, dim * 2 + 2))
         self.token_self = TokenSelfAttentionBlock(dim, num_heads=num_heads)
         self.ffn = SmallTokenRefine(dim)
-        self.norm = nn.LayerNorm(dim)
+        self.write_out_norm = nn.LayerNorm(dim)
+        self.adaln_norm = nn.LayerNorm(dim)
 
     def forward(self, joint: Tensor, e_d: Tensor, s6_ctx: Tensor) -> Tensor:
         bsz, steps, tokens, dim = joint.shape
         q = joint.reshape(bsz, steps * tokens, dim)
         kv = e_d.reshape(bsz, e_d.shape[1] * e_d.shape[2], dim)
-        delta, _ = self.cross(self.norm(q), self.norm(kv), self.norm(kv), need_weights=False)
+        delta, _ = self.cross(
+            self.cross_q_norm(q),
+            self.cross_kv_norm(kv),
+            self.cross_kv_norm(kv),
+            need_weights=False,
+        )
         pooled_joint = pool_tokens(joint)
         pooled_side = pool_tokens(e_d)
         pooled_state = pool_tokens(s6_ctx)
         write_gate = self.write_gate(torch.cat((pooled_state, pooled_side, pooled_joint), dim=-1)).unsqueeze(1)
-        joint_out = (q + write_gate * delta).reshape(bsz, steps, tokens, dim)
+        joint_out = self.write_out_norm(q + write_gate * delta).reshape(bsz, steps, tokens, dim)
 
         cond = self.cond(torch.cat((pooled_side, pooled_state), dim=-1))
         gamma, beta, g_attn, g_ffn = torch.split(cond, [dim, dim, 1, 1], dim=-1)
@@ -87,10 +95,10 @@ class SideWriteIntoJoint(nn.Module):
         attn_gate = g_attn.unsqueeze(1).expand(-1, steps, -1).reshape(bsz * steps, 1, 1)
         ffn_gate = g_ffn.unsqueeze(1).expand(-1, steps, -1).reshape(bsz * steps, 1, 1)
 
-        mod = ada_layer_norm(flat, gamma_bt, beta_bt, self.norm)
+        mod = ada_layer_norm(flat, gamma_bt, beta_bt, self.adaln_norm)
         attn_delta = self.token_self(mod.reshape(bsz, steps, tokens, dim)).reshape(bsz * steps, tokens, dim) - mod
         flat = flat + attn_gate * attn_delta
-        ffn_in = ada_layer_norm(flat, gamma_bt, beta_bt, self.norm)
+        ffn_in = ada_layer_norm(flat, gamma_bt, beta_bt, self.adaln_norm)
         ffn_delta = self.ffn(ffn_in.reshape(bsz, steps, tokens, dim)).reshape(bsz * steps, tokens, dim) - ffn_in
         flat = flat + ffn_gate * ffn_delta
         return flat.reshape(bsz, steps, tokens, dim)
@@ -100,9 +108,10 @@ class StateQueryJointReader(nn.Module):
     def __init__(self, dim: int, *, num_heads: int) -> None:
         super().__init__()
         self.cross = PerTimeCrossAttention(dim, num_heads=num_heads)
+        self.out_norm = nn.LayerNorm(dim)
 
     def forward(self, s6_ctx: Tensor, joint: Tensor) -> Tensor:
-        return s6_ctx + self.cross(s6_ctx, joint)
+        return self.out_norm(s6_ctx + self.cross(s6_ctx, joint))
 
 
 __all__ = [

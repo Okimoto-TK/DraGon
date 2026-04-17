@@ -18,6 +18,7 @@ class OutputHead(nn.Module):
         self.log_max = float(DEFAULT_LOG_CLAMP_MAX)
         self.log_center = 0.5 * (self.log_max + self.log_min)
         self.log_radius = 0.5 * (self.log_max - self.log_min)
+        self.input_norm = nn.LayerNorm(dim)
         self.stem = nn.Sequential(
             nn.Linear(dim, dim),
             nn.SiLU(),
@@ -34,7 +35,7 @@ class OutputHead(nn.Module):
         return self.log_center + self.log_radius * torch.tanh(raw)
 
     def forward(self, h: Tensor) -> dict[str, Tensor]:
-        head_out = self.stem(h)
+        head_out = self.stem(self.input_norm(h))
         outputs: dict[str, Tensor] = {"head_out": head_out}
         if self.task_label == "ret":
             ret_mu = self.ret_mu(head_out).squeeze(-1)

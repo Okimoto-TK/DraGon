@@ -83,9 +83,15 @@ quantile_set = (0.01, 0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99)
 variance_eps = 1e-6
 variance_log_clamp_min = -12.0
 variance_log_clamp_max = 8.0
-ret_nll_weight = 0.1
-rv_nll_weight = 0.1
-quantile_nll_weight = 0.1
+student_t_nu = 5.0
+# Auxiliary scale-loss weights.
+# ret: main and auxiliary are both Student-T family losses, so keep the extra
+# scale emphasis small to avoid the model "learning scale first".
+ret_nll_weight = 0.05
+# rv / quantile: main loss does not directly train the uncertainty scale branch,
+# so keep a moderate auxiliary weight.
+rv_nll_weight = 0.10
+quantile_nll_weight = 0.10
 
 batch_size = 128
 learning_rate = 1e-3

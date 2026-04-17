@@ -13,7 +13,9 @@ import torch
 import torch.nn.functional as F
 from config.config import trend_ema_alpha as DEFAULT_EMA_ALPHA
 from torch import Tensor, nn
+from torch.utils.data import Subset
 
+from src.models.losses.objectives import pearson_corr
 from src.task_labels import detect_task_from_outputs
 from src.task_labels import task_target_column
 from src.train.utils import grad_norm
@@ -32,14 +34,14 @@ except Exception:  # pragma: no cover - optional dependency
     plt = None  # type: ignore[assignment]
 
 _HOOK_TARGETS = {
-    "E1": "macro_encoder",
-    "E2": "mezzo_encoder",
-    "E3": "micro_encoder",
-    "E4": "side_encoder",
-    "T12": "pairwise_lmf_12",
-    "T23": "pairwise_lmf_23",
-    "H12": "jointnet_12",
-    "H23": "jointnet_23",
+    "macro_return_encoder": "macro_return_encoder",
+    "mezzo_return_encoder": "mezzo_return_encoder",
+    "micro_return_encoder": "micro_return_encoder",
+    "side_gap_encoder": "side_gap_encoder",
+    "mezzo_pair_interaction_grid": "mezzo_pair_interaction_grid",
+    "micro_pair_interaction_grid": "micro_pair_interaction_grid",
+    "mezzo_joint_token_readout": "mezzo_joint_token_readout",
+    "micro_joint_token_readout": "micro_joint_token_readout",
 }
 _REALTIME_KEYS = (
     "loss_total",
@@ -49,23 +51,24 @@ _REALTIME_KEYS = (
     "loss_task/ret",
     "loss_task/rv",
     "loss_task/p90",
+    "corr/ret",
     "mae/ret",
     "mae/rv",
     "mae/p90",
     "unc_mean/ret",
     "unc_mean/rv",
     "unc_mean/p90",
-    "token/M1_norm",
-    "token/M2_norm",
-    "token/S_norm",
-    "fusion/Z0_norm",
-    "fusion/Z1_norm",
-    "fusion/drift_delta",
-    "fusion/diffusion_delta",
-    "summary/z_d_norm",
-    "summary/z_v_norm",
-    "summary/cos_zd_zv",
-    "tfn/feat_norm",
+    "token/macro_joint_norm",
+    "token/mezzo_joint_norm",
+    "token/micro_joint_norm",
+    "fusion/macro_conditioned_mezzo_norm",
+    "fusion/micro_refined_mezzo_norm",
+    "fusion/macro_to_mezzo_delta",
+    "fusion/micro_to_mezzo_delta",
+    "summary/joint_summary_norm",
+    "summary/side_summary_norm",
+    "summary/cos_joint_side",
+    "fusion/joint_side_interaction_norm",
     "decoder/head_out_std",
 )
 _DYNAMIC_REALTIME_PREFIXES = (
@@ -85,7 +88,14 @@ _DYNAMIC_REALTIME_EXACT = {
     "summary/drift_vec_norm",
     "summary/diffusion_vec_norm",
 }
-_ARTIFACT_SAMPLE_LIMIT = 2048
+_REFERENCE_BUCKET_LIMIT = 3
+_TASK_DIAGNOSTIC_SAMPLE_LIMIT = 2048
+_RET_REFERENCE_BUCKETS = (
+    ("ret_le_neg10", None, -10.0),
+    ("ret_neg10_to_neg5", -10.0, -5.0),
+    ("ret_pos5_to_pos10", 5.0, 10.0),
+    ("ret_ge_pos10", 10.0, None),
+)
 
 
 def _tracking_uri(repo: str | Path) -> str:
@@ -253,13 +263,12 @@ class DiagnosticsAccumulator:
 
 
 class EpochStageBuffer:
-    def __init__(self, *, sample_limit: int = _ARTIFACT_SAMPLE_LIMIT) -> None:
+    def __init__(self) -> None:
         self.metrics_sum: dict[str, Tensor] = {}
         self.weight: Tensor | None = None
         self.heatmap_sum: dict[str, Tensor] = {}
         self.heatmap_count: dict[str, Tensor] = {}
-        self.snapshot: dict[str, Any] | None = None
-        self.sample_limit = max(1, int(sample_limit))
+        self.sample_limit = _TASK_DIAGNOSTIC_SAMPLE_LIMIT
         self.sample_task: str | None = None
         self.sample_seen = 0
         self.sample_rng = np.random.default_rng(0)
@@ -342,6 +351,7 @@ class MLflowVisualizer:
         self._features: dict[str, Tensor] = {}
         self._handles: list[Any] = []
         self._epoch_buffers: dict[str, EpochStageBuffer] = {}
+        self._reference_ret_samples: list[dict[str, Any]] = []
 
     def attach(self, model: nn.Module) -> None:
         self.detach()
@@ -374,6 +384,72 @@ class MLflowVisualizer:
     def start_epoch_stage(self, stage: str) -> None:
         self._epoch_buffers[stage] = EpochStageBuffer()
 
+    def _resolve_dataset_index(self, dataset: Any) -> tuple[Any, np.ndarray]:
+        if isinstance(dataset, Subset):
+            base, _ = self._resolve_dataset_index(dataset.dataset)
+            return base, np.asarray(dataset.indices, dtype=np.int64)
+        return dataset, np.arange(len(dataset), dtype=np.int64)
+
+    def _reference_ret_percent(self, label_ret: Tensor) -> float:
+        return float((label_ret.detach().reshape(()).cpu().item() - 1.0) * 100.0)
+
+    def prepare_reference_ret_samples(self, dataset: Any, *, per_bucket: int = _REFERENCE_BUCKET_LIMIT) -> None:
+        base_dataset, local_indices = self._resolve_dataset_index(dataset)
+        sample_index = getattr(base_dataset, "sample_index", None)
+        load_payload = getattr(base_dataset, "_load_payload", None)
+        payload_at = getattr(sample_index, "payload_at", None)
+        if sample_index is None or not callable(load_payload) or not callable(payload_at):
+            self._reference_ret_samples = []
+            return
+
+        per_bucket = max(1, int(per_bucket))
+        index_buckets: dict[str, list[tuple[float, int]]] = {name: [] for name, *_ in _RET_REFERENCE_BUCKETS}
+
+        by_payload: dict[int, list[int]] = defaultdict(list)
+        for dataset_idx in local_indices.tolist():
+            by_payload[int(sample_index.payload_ids[dataset_idx])].append(int(dataset_idx))
+
+        for payload_id, dataset_indices in by_payload.items():
+            payload_name = sample_index.payloadbook[payload_id]
+            payload = load_payload(payload_name)
+            for dataset_idx in dataset_indices:
+                sample_idx = int(sample_index.sample_idx[dataset_idx])
+                ret_pct = self._reference_ret_percent(payload["label"][sample_idx][0])
+                for bucket_name, left, right in _RET_REFERENCE_BUCKETS:
+                    in_left = True if left is None else ret_pct >= left
+                    in_right = True if right is None else ret_pct <= right
+                    if in_left and in_right:
+                        index_buckets[bucket_name].append((ret_pct, dataset_idx))
+                        break
+
+        selected_indices: list[tuple[str, float, int]] = []
+        for bucket_name, _, _ in _RET_REFERENCE_BUCKETS:
+            bucket = sorted(index_buckets[bucket_name], key=lambda item: item[0])
+            if not bucket:
+                continue
+            if len(bucket) <= per_bucket:
+                chosen = bucket
+            else:
+                positions = np.linspace(0, len(bucket) - 1, per_bucket, dtype=int)
+                chosen = [bucket[int(pos)] for pos in positions.tolist()]
+            selected_indices.extend((bucket_name, ret_pct, dataset_idx) for ret_pct, dataset_idx in chosen)
+
+        prepared: list[dict[str, Any]] = []
+        for bucket_name, ret_pct, dataset_idx in selected_indices:
+            item = dataset[int(dataset_idx)]
+            prepared.append(
+                {
+                    "bucket": bucket_name,
+                    "ret_pct": ret_pct,
+                    "date": float(item["date"].detach().reshape(()).cpu().item()),
+                    "macro": item["macro"].detach().cpu(),
+                    "mezzo": item["mezzo"].detach().cpu(),
+                    "micro": item["micro"].detach().cpu(),
+                    "sidechain": item["sidechain"].detach().cpu(),
+                }
+            )
+        self._reference_ret_samples = prepared
+
     def update_epoch_buffer(
         self,
         stage: str,
@@ -385,12 +461,11 @@ class MLflowVisualizer:
         buffer = self._epoch_buffers.setdefault(stage, EpochStageBuffer())
         lightweight = dict(metrics) if metrics is not None else self.collect_batch_metrics(model, outputs, batch, {})
         buffer.update(lightweight, weight=int(batch["macro"].shape[0]))
-
         task = detect_task_from_outputs(outputs)
         target = batch[task_target_column(task)]
         buffer.add_task_samples(task, outputs[f"pred_{task}"], target, outputs[f"unc_{task}"])
 
-        for name in ("H12", "H23"):
+        for name in ("price_relation_tokens", "price_liquidity_pair_grid", "joint_tokens", "side_context_tokens"):
             feature = outputs.get(name)
             if not isinstance(feature, Tensor):
                 feature = self._features.get(name)
@@ -403,43 +478,6 @@ class MLflowVisualizer:
             buffer.heatmap_sum[name].add_(heat)
             buffer.heatmap_count[name].add_(1)
 
-    def capture_epoch_snapshot(
-        self,
-        stage: str,
-        model: nn.Module,
-        outputs: Mapping[str, Tensor],
-        batch: Mapping[str, Tensor],
-    ) -> None:
-        del batch
-        buffer = self._epoch_buffers.setdefault(stage, EpochStageBuffer())
-        snapshot: dict[str, Any] = {
-            "features": {
-                name: _to_cpu_tree(outputs[name]) if name in outputs else _to_cpu_tree(self._features.get(name))
-                for name in ("T12", "T23", "H12", "H23")
-            },
-            "outputs": {
-                name: _to_cpu_tree(outputs[name])
-                for name in ("M1", "M2", "S", "Z0", "Z1", "z_d", "z_v", "tfn_feat", "head_out")
-                if name in outputs
-            },
-        }
-        if stage != "train":
-            for attr, key in (
-                ("drift_fusion", "drift_fusion"),
-                ("diffusion_fusion", "diffusion_fusion"),
-                ("side_resampler", "side_resampler"),
-                ("drift_summary_head", "drift_summary"),
-                ("diffusion_summary_head", "diffusion_summary"),
-                ("decoder_head", "decoder"),
-            ):
-                module = getattr(model, attr, None)
-                getter = getattr(module, "get_last_debug", None)
-                if callable(getter):
-                    debug = _to_cpu_tree(getter())
-                    if _has_tensor_tree(debug):
-                        snapshot[key] = debug
-        buffer.snapshot = snapshot
-
     def _log_figure(self, stage: str, epoch: int, name: str, fig: Any) -> None:
         if fig is None:
             return
@@ -450,27 +488,63 @@ class MLflowVisualizer:
             if plt is not None:
                 plt.close(fig)
 
-    def _plot_joint_maps(self, stage_buffer: EpochStageBuffer) -> Any:
+    def _plot_average_activation_maps(self, stage_buffer: EpochStageBuffer) -> Any:
         if plt is None or not stage_buffer.heatmap_sum:
             return None
 
-        names = [name for name in ("H12", "H23") if name in stage_buffer.heatmap_sum]
+        names = [
+            name
+            for name in ("price_relation_tokens", "price_liquidity_pair_grid", "joint_tokens", "side_context_tokens")
+            if name in stage_buffer.heatmap_sum
+        ]
         if not names:
             return None
 
-        fig, axes = plt.subplots(1, len(names), figsize=(5 * len(names), 4))
-        if len(names) == 1:
-            axes = [axes]
+        cols = 2
+        rows = int(math.ceil(len(names) / cols))
+        fig, axes = plt.subplots(rows, cols, figsize=(6 * cols, 4 * rows))
+        axes = np.asarray(axes).reshape(-1)
         for ax, name in zip(axes, names):
             count = stage_buffer.heatmap_count[name].clamp_min(1).to(dtype=torch.float32)
             mean_map = (stage_buffer.heatmap_sum[name] / count).detach().float().cpu().numpy()
             image = ax.imshow(mean_map, aspect="auto", cmap="magma")
-            ax.set_title(f"{name} Epoch Mean Activation")
-            ax.set_xlabel("Width")
-            ax.set_ylabel("Height")
+            ax.set_title(f"{name} Mean Activation")
+            ax.set_xlabel("Feature Dim")
+            ax.set_ylabel("Semantic Axis")
             fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
+        for ax in axes[len(names) :]:
+            ax.axis("off")
         fig.tight_layout()
         return fig
+
+    def _plot_reference_sample_heatmaps(self, model: nn.Module, device: str) -> Any:
+        if plt is None or not self._reference_ret_samples:
+            return None
+
+        was_training = model.training
+        model.eval()
+        fig, axes = plt.subplots(4, 3, figsize=(15, 14))
+        axes = axes.reshape(-1)
+        try:
+            with torch.no_grad():
+                for ax, sample in zip(axes, self._reference_ret_samples):
+                    macro = sample["macro"].unsqueeze(0).to(device)
+                    mezzo = sample["mezzo"].unsqueeze(0).to(device)
+                    micro = sample["micro"].unsqueeze(0).to(device)
+                    sidechain = sample["sidechain"].unsqueeze(0).to(device)
+                    outputs = model(macro, mezzo, micro, sidechain)
+                    heat = outputs["joint_tokens"][0].detach().float().mean(dim=-1).transpose(0, 1).cpu().numpy()
+                    image = ax.imshow(heat, aspect="auto", cmap="viridis")
+                    ax.set_title(f"{sample['bucket']} | ret={sample['ret_pct']:.2f}%")
+                    ax.set_xlabel("Time")
+                    ax.set_ylabel("Joint Token")
+                    fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
+                for ax in axes[len(self._reference_ret_samples) :]:
+                    ax.axis("off")
+            fig.tight_layout()
+            return fig
+        finally:
+            model.train(was_training)
 
     def _plot_feature_norm_flow(self, metrics: Mapping[str, float]) -> Any:
         if plt is None or not metrics:
@@ -478,9 +552,34 @@ class MLflowVisualizer:
 
         groups = [
             ("Encoders", ("encoder/E1_norm", "encoder/E2_norm", "encoder/E3_norm", "encoder/E4_norm")),
-            ("Maps", ("map/T12_norm", "map/H12_norm", "map/T23_norm", "map/H23_norm")),
-            ("Tokens/Fusion", ("token/M1_norm", "token/M2_norm", "token/S_norm", "fusion/Z0_norm", "fusion/Z1_norm")),
-            ("Summary/Head", ("summary/z_d_norm", "summary/z_v_norm", "tfn/feat_norm", "decoder/head_out_std")),
+            (
+                "Maps",
+                (
+                    "map/price_relation_tokens_norm",
+                    "map/price_liquidity_pair_grid_norm",
+                    "map/liquid_tokens_norm",
+                    "map/joint_tokens_norm",
+                ),
+            ),
+            (
+                "Tokens/Fusion",
+                (
+                    "token/macro_joint_norm",
+                    "token/mezzo_joint_norm",
+                    "token/micro_joint_norm",
+                    "fusion/macro_conditioned_mezzo_norm",
+                    "fusion/micro_refined_mezzo_norm",
+                ),
+            ),
+            (
+                "Summary/Head",
+                (
+                    "summary/joint_summary_norm",
+                    "summary/side_summary_norm",
+                    "fusion/joint_side_interaction_norm",
+                    "decoder/head_out_std",
+                ),
+            ),
         ]
 
         fig, axes = plt.subplots(2, 2, figsize=(14, 8))
@@ -500,6 +599,48 @@ class MLflowVisualizer:
         if rendered == 0:
             plt.close(fig)
             return None
+        fig.tight_layout()
+        return fig
+
+    def _plot_task_diagnostics(self, stage_buffer: EpochStageBuffer) -> Any:
+        if plt is None or stage_buffer.sample_task is None:
+            return None
+
+        task = stage_buffer.sample_task
+        samples = stage_buffer.sample_arrays()
+        pred = samples["pred"]
+        label = samples["label"]
+        unc = samples["unc"]
+        if pred.size == 0 or label.size == 0 or unc.size == 0:
+            return None
+
+        fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+        error = np.abs(pred - label)
+        if pred.size >= 128:
+            axes[0, 0].hexbin(label, pred, gridsize=30, cmap="viridis", mincnt=1)
+        else:
+            axes[0, 0].scatter(label, pred, s=10, alpha=0.35)
+        limits = [float(min(label.min(), pred.min())), float(max(label.max(), pred.max()))]
+        axes[0, 0].plot(limits, limits, linestyle="--", color="tab:gray")
+        axes[0, 0].set_title(f"{task} Prediction vs Label")
+        axes[0, 0].set_xlabel("Label")
+        axes[0, 0].set_ylabel("Prediction")
+
+        axes[0, 1].hist(label, bins=30, alpha=0.55, label="label")
+        axes[0, 1].hist(pred, bins=30, alpha=0.55, label="pred")
+        axes[0, 1].set_title(f"{task} Distribution")
+        axes[0, 1].legend()
+
+        axes[1, 0].hist(unc, bins=30, alpha=0.85, color="tab:orange")
+        axes[1, 0].set_title(f"{task} Uncertainty")
+        axes[1, 0].set_xlabel("Predicted Uncertainty")
+
+        cal_x, cal_y = _quantile_curve(unc, error)
+        if cal_x.size > 0:
+            axes[1, 1].plot(cal_x, cal_y, marker="o")
+        axes[1, 1].set_title("Uncertainty vs Abs Error")
+        axes[1, 1].set_xlabel("Mean Predicted Uncertainty")
+        axes[1, 1].set_ylabel("Mean Absolute Error")
         fig.tight_layout()
         return fig
 
@@ -621,129 +762,14 @@ class MLflowVisualizer:
         fig.tight_layout()
         return fig
 
-    def _plot_task_diagnostics(self, stage_buffer: EpochStageBuffer) -> Any:
-        if plt is None or stage_buffer.sample_task is None:
-            return None
-
-        task = stage_buffer.sample_task
-        samples = stage_buffer.sample_arrays()
-        pred = samples["pred"]
-        label = samples["label"]
-        unc = samples["unc"]
-        if pred.size == 0 or label.size == 0 or unc.size == 0:
-            return None
-
-        fig, axes = plt.subplots(2, 2, figsize=(12, 8))
-        error = np.abs(pred - label)
-        if pred.size >= 128:
-            axes[0, 0].hexbin(label, pred, gridsize=30, cmap="viridis", mincnt=1)
-        else:
-            axes[0, 0].scatter(label, pred, s=10, alpha=0.35)
-        limits = [float(min(label.min(), pred.min())), float(max(label.max(), pred.max()))]
-        axes[0, 0].plot(limits, limits, linestyle="--", color="tab:gray")
-        axes[0, 0].set_title(f"{task} Prediction vs Label")
-        axes[0, 0].set_xlabel("Label")
-        axes[0, 0].set_ylabel("Prediction")
-
-        axes[0, 1].hist(label, bins=30, alpha=0.55, label="label")
-        axes[0, 1].hist(pred, bins=30, alpha=0.55, label="pred")
-        axes[0, 1].set_title(f"{task} Distribution")
-        axes[0, 1].legend()
-
-        axes[1, 0].hist(unc, bins=30, alpha=0.85, color="tab:orange")
-        axes[1, 0].set_title(f"{task} Uncertainty")
-        axes[1, 0].set_xlabel("Predicted Uncertainty")
-
-        cal_x, cal_y = _quantile_curve(unc, error)
-        if cal_x.size > 0:
-            axes[1, 1].plot(cal_x, cal_y, marker="o")
-        axes[1, 1].set_title("Uncertainty vs Abs Error")
-        axes[1, 1].set_xlabel("Mean Predicted Uncertainty")
-        axes[1, 1].set_ylabel("Mean Absolute Error")
-        fig.tight_layout()
-        return fig
-
-    def _plot_drift_cross_attention(self, snapshot: Mapping[str, Any]) -> Any:
-        if plt is None:
-            return None
-        debug = snapshot.get("drift_fusion")
-        if not isinstance(debug, dict):
-            return None
-        x_to_y = [tensor for tensor in debug.get("x_to_y_attn", []) if isinstance(tensor, Tensor)]
-        y_to_x = [tensor for tensor in debug.get("y_to_x_attn", []) if isinstance(tensor, Tensor)]
-        if not x_to_y or not y_to_x:
-            return None
-
-        x_heat = x_to_y[-1].mean(dim=(0, 1)).numpy()
-        y_heat = y_to_x[-1].mean(dim=(0, 1)).numpy()
-        x_entropy = []
-        y_entropy = []
-        for weights in x_to_y:
-            probs = weights.clamp_min(1e-9)
-            x_entropy.append(float((-(probs * probs.log()).sum(dim=-1).mean()).item()))
-        for weights in y_to_x:
-            probs = weights.clamp_min(1e-9)
-            y_entropy.append(float((-(probs * probs.log()).sum(dim=-1).mean()).item()))
-
-        fig, axes = plt.subplots(1, 3, figsize=(15, 4))
-        axes[0].imshow(x_heat, aspect="auto", cmap="viridis")
-        axes[0].set_title("X attends to Y")
-        axes[1].imshow(y_heat, aspect="auto", cmap="viridis")
-        axes[1].set_title("Y attends to X")
-        axes[2].plot(range(1, len(x_entropy) + 1), x_entropy, marker="o", label="X->Y")
-        axes[2].plot(range(1, len(y_entropy) + 1), y_entropy, marker="o", label="Y->X")
-        axes[2].set_title("Attention Entropy")
-        axes[2].set_xlabel("Layer")
-        axes[2].legend()
-        fig.tight_layout()
-        return fig
-
-    def _plot_side_resampler_attention(self, snapshot: Mapping[str, Any]) -> Any:
-        if plt is None:
-            return None
-        debug = snapshot.get("side_resampler")
-        if not isinstance(debug, dict):
-            return None
-        attn = debug.get("cross_attn")
-        if not isinstance(attn, Tensor):
-            return None
-
-        heat = attn.mean(dim=(0, 1)).numpy()
-        fig, ax = plt.subplots(figsize=(8, 4))
-        ax.imshow(heat, aspect="auto", cmap="viridis")
-        ax.set_title("Side Resampler Attention")
-        ax.set_xlabel("Sequence Position")
-        ax.set_ylabel("Latent Query")
-        fig.tight_layout()
-        return fig
-
-    def _plot_summary_attention(self, snapshot: Mapping[str, Any]) -> Any:
-        if plt is None:
-            return None
-        drift = snapshot.get("drift_summary")
-        diffusion = snapshot.get("diffusion_summary")
-        if not isinstance(drift, dict) or not isinstance(diffusion, dict):
-            return None
-
-        drift_layers = [tensor for tensor in drift.get("layer_attn", []) if isinstance(tensor, Tensor)]
-        diffusion_layers = [tensor for tensor in diffusion.get("layer_attn", []) if isinstance(tensor, Tensor)]
-        if not drift_layers or not diffusion_layers:
-            return None
-
-        drift_num_summary = int(drift.get("num_summary_tokens", 2))
-        diffusion_num_summary = int(diffusion.get("num_summary_tokens", 2))
-        drift_heat = drift_layers[-1][:, :, :drift_num_summary, drift_num_summary:].mean(dim=(0, 1)).numpy()
-        diffusion_heat = diffusion_layers[-1][:, :, :diffusion_num_summary, diffusion_num_summary:].mean(dim=(0, 1)).numpy()
-
-        fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-        axes[0].imshow(drift_heat, aspect="auto", cmap="viridis")
-        axes[0].set_title("Drift Summary Attn")
-        axes[1].imshow(diffusion_heat, aspect="auto", cmap="viridis")
-        axes[1].set_title("Diffusion Summary Attn")
-        fig.tight_layout()
-        return fig
-
-    def log_epoch_diagnostics(self, stage: str, epoch: int) -> None:
+    def log_epoch_diagnostics(
+        self,
+        stage: str,
+        epoch: int,
+        *,
+        model: nn.Module | None = None,
+        device: str | None = None,
+    ) -> None:
         buffer = self._epoch_buffers.get(stage)
         if buffer is None:
             return
@@ -760,18 +786,11 @@ class MLflowVisualizer:
         if metrics:
             self.track(stage, metrics, epoch=epoch, subset="epoch_diag")
 
-        self._log_figure(stage, epoch, "jointnet_activation_maps", self._plot_joint_maps(buffer))
-        self._log_figure(stage, epoch, "feature_norm_flow", self._plot_feature_norm_flow(metrics))
-        self._log_figure(stage, epoch, "fusion_internal_diagnostics", self._plot_fusion_internal_diagnostics(metrics))
-        self._log_figure(stage, epoch, "summary_head_diagnostics", self._plot_summary_head_diagnostics(metrics))
+        self._log_figure(stage, epoch, "average_activation_heatmaps", self._plot_average_activation_maps(buffer))
         self._log_figure(stage, epoch, "task_diagnostics", self._plot_task_diagnostics(buffer))
-
-        snapshot = buffer.snapshot
-        if snapshot is None:
-            return
-        self._log_figure(stage, epoch, "drift_cross_attention", self._plot_drift_cross_attention(snapshot))
-        self._log_figure(stage, epoch, "side_resampler_attention", self._plot_side_resampler_attention(snapshot))
-        self._log_figure(stage, epoch, "summary_attention", self._plot_summary_attention(snapshot))
+        self._log_figure(stage, epoch, "feature_norm_flow", self._plot_feature_norm_flow(metrics))
+        if stage == "val" and model is not None and device is not None:
+            self._log_figure(stage, epoch, "reference_ret_sample_heatmaps", self._plot_reference_sample_heatmaps(model, device))
 
     def collect_batch_metrics(
         self,
@@ -793,25 +812,39 @@ class MLflowVisualizer:
                 metrics[key] = _as_scalar_tensor(loss_metrics[key], device)
         pred = outputs[f"pred_{task}"]
         target = batch[task_target_column(task)]
+        if task == "ret":
+            metrics.setdefault("corr/ret", pearson_corr(pred, target, 1e-6).detach().float())
         metrics.setdefault(f"mae/{task}", torch.mean(torch.abs(pred - target)).detach().float())
         metrics.setdefault(f"unc_mean/{task}", outputs[f"unc_{task}"].detach().float().mean())
         loss_key = f"loss_{task}"
         if loss_key in loss_metrics:
             metrics[f"loss_task/{task}"] = _as_scalar_tensor(loss_metrics[loss_key], device)
-        metrics.setdefault("token/M1_norm", _channelwise_l2_mean(outputs["M1"], channel_dim=2))
-        metrics.setdefault("token/M2_norm", _channelwise_l2_mean(outputs["M2"], channel_dim=2))
-        metrics.setdefault("token/S_norm", _channelwise_l2_mean(outputs["S"], channel_dim=2))
-        metrics.setdefault("fusion/Z0_norm", _channelwise_l2_mean(outputs["Z0"], channel_dim=2))
-        metrics.setdefault("fusion/Z1_norm", _channelwise_l2_mean(outputs["Z1"], channel_dim=2))
-        metrics.setdefault("fusion/drift_delta", _mean_abs_delta(outputs["Z0"], outputs["M1"]))
-        metrics.setdefault("fusion/diffusion_delta", _mean_abs_delta(outputs["Z1"], outputs["M2"]))
-        metrics.setdefault("summary/z_d_norm", _channelwise_l2_mean(outputs["z_d"], channel_dim=1))
-        metrics.setdefault("summary/z_v_norm", _channelwise_l2_mean(outputs["z_v"], channel_dim=1))
-        metrics.setdefault("summary/cos_zd_zv", _vector_cosine(outputs["z_d"], outputs["z_v"]))
-        metrics.setdefault("tfn/feat_norm", _channelwise_l2_mean(outputs["tfn_feat"], channel_dim=1))
+        metrics.setdefault("token/macro_joint_norm", _channelwise_l2_mean(outputs["macro_joint_tokens"], channel_dim=2))
+        metrics.setdefault("token/mezzo_joint_norm", _channelwise_l2_mean(outputs["mezzo_joint_tokens"], channel_dim=2))
+        metrics.setdefault("token/micro_joint_norm", _channelwise_l2_mean(outputs["micro_joint_tokens"], channel_dim=2))
+        metrics.setdefault(
+            "fusion/macro_conditioned_mezzo_norm",
+            _channelwise_l2_mean(outputs["macro_conditioned_mezzo_tokens"], channel_dim=2),
+        )
+        metrics.setdefault(
+            "fusion/micro_refined_mezzo_norm",
+            _channelwise_l2_mean(outputs["micro_refined_mezzo_tokens"], channel_dim=2),
+        )
+        metrics.setdefault(
+            "fusion/macro_to_mezzo_delta",
+            _mean_abs_delta(outputs["macro_conditioned_mezzo_tokens"], outputs["mezzo_joint_tokens"]),
+        )
+        metrics.setdefault(
+            "fusion/micro_to_mezzo_delta",
+            _mean_abs_delta(outputs["micro_refined_mezzo_tokens"], outputs["macro_conditioned_mezzo_tokens"]),
+        )
+        metrics.setdefault("summary/joint_summary_norm", _channelwise_l2_mean(outputs["joint_summary"], channel_dim=1))
+        metrics.setdefault("summary/side_summary_norm", _channelwise_l2_mean(outputs["side_summary"], channel_dim=1))
+        metrics.setdefault("summary/cos_joint_side", _vector_cosine(outputs["joint_summary"], outputs["side_summary"]))
+        metrics.setdefault("fusion/joint_side_interaction_norm", _channelwise_l2_mean(outputs["joint_side_interaction"], channel_dim=1))
         metrics.setdefault("decoder/head_out_std", _tensor_std(outputs["head_out"]))
-        metrics.setdefault("token/cos_M1_S", _pooled_cosine(outputs["M1"], outputs["S"]))
-        metrics.setdefault("token/cos_M2_S", _pooled_cosine(outputs["M2"], outputs["S"]))
+        metrics.setdefault("token/cos_macro_micro", _pooled_cosine(outputs["macro_joint_tokens"], outputs["micro_joint_tokens"]))
+        metrics.setdefault("token/cos_mezzo_micro", _pooled_cosine(outputs["mezzo_joint_tokens"], outputs["micro_joint_tokens"]))
         return {key: value.detach() for key, value in metrics.items()}
 
     def collect_low_frequency_metrics(

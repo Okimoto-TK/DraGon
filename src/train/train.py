@@ -90,8 +90,6 @@ def _run_eager_epoch(
         if visualizer is not None:
             diag_metrics = visualizer.collect_batch_metrics(model, outputs, batch, loss_metrics)
             visualizer.update_epoch_buffer("train", model, outputs, batch, metrics=diag_metrics)
-        if visualizer is not None and step_idx == total_steps:
-            visualizer.capture_epoch_snapshot("train", model, outputs, batch)
 
         if amp_enabled and scaler is not None:
             scaler.scale(loss).backward()
@@ -232,8 +230,6 @@ def _run_cuda_graph_epoch(
         if visualizer is not None:
             diag_metrics = visualizer.collect_batch_metrics(model, outputs, batch, loss_metrics)
             visualizer.update_epoch_buffer("train", model, outputs, batch, metrics=diag_metrics)
-        if visualizer is not None and current_step == total_steps:
-            visualizer.capture_epoch_snapshot("train", model, outputs, batch)
 
         loss.backward()
         if grad_clip is not None:
@@ -353,8 +349,6 @@ def _run_cuda_graph_epoch(
             if visualizer is not None:
                 diag_metrics = visualizer.collect_batch_metrics(model, static_outputs, static_batch, static_loss_metrics)
                 visualizer.update_epoch_buffer("train", model, static_outputs, static_batch, metrics=diag_metrics)
-            if visualizer is not None and step_idx == total_steps:
-                visualizer.capture_epoch_snapshot("train", model, static_outputs, static_batch)
 
             batch_size = int(static_batch["macro"].shape[0])
             step_metrics = {
