@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from typing import Any
+import time
 
 import torch
 from torch.amp import GradScaler, autocast
@@ -52,6 +53,7 @@ def train_one_epoch(
     tracker = MetricTracker(device=device)
     window_tracker = MetricTracker(device=device)
     total_steps = max(len(dataloader), 1)
+    last_sync_time = time.perf_counter()
 
     for step_idx, batch in enumerate(dataloader, start=1):
         batch = move_batch_to_device(batch, device)
@@ -102,6 +104,11 @@ def train_one_epoch(
             or step_idx == total_steps
         )
         if should_sync:
+            now = time.perf_counter()
+            elapsed = max(0.0, now - last_sync_time)
+            steps_in_window = log_every if log_every > 0 and step_idx % log_every == 0 else 1
+            step_time_seconds = elapsed / max(steps_in_window, 1)
+            last_sync_time = now
             synced_metrics = window_tracker.compute_and_reset(reset=True)
             if visualizer is not None:
                 lr = float(optimizer.param_groups[0]["lr"]) if optimizer.param_groups else None
@@ -124,6 +131,7 @@ def train_one_epoch(
                         "step": float(step_idx),
                         "total_steps": float(total_steps),
                         "metrics": synced_metrics,
+                        "step_time_seconds": float(step_time_seconds),
                     }
                 )
 

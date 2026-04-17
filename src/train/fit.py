@@ -448,6 +448,7 @@ def fit(
                     step=int(payload["step"]),
                     total_steps=int(payload["total_steps"]),
                     metrics=payload["metrics"],
+                    step_time_seconds=float(payload.get("step_time_seconds", 0.0)),
                 )
 
             train_metrics = train_one_epoch(
