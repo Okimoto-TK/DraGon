@@ -314,6 +314,9 @@ def fit(
     model.to(device)
     criterion.to(device)
 
+    # Set FP32 matmul precision for stability when autocast is enabled.
+    torch.set_float32_matmul_precision("high")
+
     history: dict[str, list[dict[str, float]]] = {"train": [], "val": []}
     best_val_loss = float("inf")
     best_epoch = -1
