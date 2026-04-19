@@ -6,8 +6,8 @@ import os
 import sys
 from datetime import datetime
 
-import config.config as config
-from config.config import log_dir
+import config.data as config
+from config.data import log_dir
 
 
 def vlog(src: str, msg: str, level: str = "INFO") -> None:

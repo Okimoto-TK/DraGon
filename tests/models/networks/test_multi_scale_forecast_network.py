@@ -1,0 +1,107 @@
+from __future__ import annotations
+
+import pytest
+import torch
+import torch.nn as nn
+
+from src.models.arch.networks import MultiScaleForecastNetwork
+
+
+class _TailCropDenoise(nn.Module):
+    def __init__(self, target_len: int) -> None:
+        super().__init__()
+        self.target_len = int(target_len)
+
+    def forward(self, x_long: torch.Tensor) -> torch.Tensor:
+        return x_long[..., -self.target_len :]
+
+
+def _make_batch(batch_size: int = 2) -> dict[str, torch.Tensor]:
+    macro_state = torch.randint(0, 16, (batch_size, 1, 112), dtype=torch.int64)
+    macro_pos = torch.randint(0, 8, (batch_size, 1, 112), dtype=torch.int64)
+    mezzo_state = torch.randint(0, 16, (batch_size, 1, 144), dtype=torch.int64)
+    mezzo_pos = torch.randint(0, 16, (batch_size, 1, 144), dtype=torch.int64)
+    micro_state = torch.randint(0, 16, (batch_size, 1, 192), dtype=torch.int64)
+    micro_pos = torch.randint(0, 64, (batch_size, 1, 192), dtype=torch.int64)
+    return {
+        "macro_float_long": torch.randn(batch_size, 9, 112),
+        "macro_i8_long": torch.cat([macro_state, macro_pos], dim=1),
+        "mezzo_float_long": torch.randn(batch_size, 9, 144),
+        "mezzo_i8_long": torch.cat([mezzo_state, mezzo_pos], dim=1),
+        "micro_float_long": torch.randn(batch_size, 9, 192),
+        "micro_i8_long": torch.cat([micro_state, micro_pos], dim=1),
+        "sidechain_cond": torch.randn(batch_size, 13, 64),
+        "target_ret": torch.randn(batch_size, 1),
+        "target_rv": torch.rand(batch_size, 1).clamp_min(1e-4),
+        "target_q": torch.randn(batch_size, 1),
+    }
+
+
+def _make_model() -> MultiScaleForecastNetwork:
+    model = MultiScaleForecastNetwork()
+    model.denoise_macro = _TailCropDenoise(target_len=64)
+    model.denoise_mezzo = _TailCropDenoise(target_len=96)
+    model.denoise_micro = _TailCropDenoise(target_len=144)
+    return model
+
+
+def test_forward_smoke_outputs_and_shapes() -> None:
+    model = _make_model()
+    out = model(_make_batch())
+    expected_keys = {
+        "pred_mu_ret",
+        "pred_scale_ret_raw",
+        "pred_mean_rv_raw",
+        "pred_shape_rv_raw",
+        "pred_mu_q",
+        "pred_scale_q_raw",
+        "fused_latents",
+        "fused_global",
+    }
+    assert expected_keys.issubset(set(out.keys()))
+    assert out["fused_latents"].shape == (2, 128, 8)
+    assert out["fused_global"].shape == (2, 128)
+
+
+def test_forward_loss_smoke_outputs() -> None:
+    model = _make_model()
+    out = model.forward_loss(_make_batch())
+    assert "loss_total" in out
+    assert "loss_ret" in out
+    assert "loss_rv" in out
+    assert "loss_q" in out
+    assert "nu_ret" in out
+
+
+def test_forward_aux_outputs_present() -> None:
+    model = _make_model()
+    out = model(_make_batch(), return_aux=True)
+    assert "s1" in out and "s2" in out and "s3" in out
+    assert "macro_fused" in out and "mezzo_fused" in out and "micro_fused" in out
+
+
+def test_forward_missing_key_raises_value_error() -> None:
+    model = _make_model()
+    batch = _make_batch()
+    batch.pop("micro_i8_long")
+    with pytest.raises(ValueError, match="Missing required batch key"):
+        _ = model(batch)
+
+
+def test_forward_invalid_shape_raises_value_error() -> None:
+    model = _make_model()
+    batch = _make_batch()
+    batch["macro_float_long"] = torch.randn(2, 9, 111)
+    with pytest.raises(ValueError, match="macro_float_long shape mismatch"):
+        _ = model(batch)
+
+
+def test_forward_train_and_eval_both_run() -> None:
+    model = _make_model()
+    batch = _make_batch()
+    model.train()
+    out_train = model(batch)
+    model.eval()
+    out_eval = model(batch)
+    assert out_train["fused_latents"].shape == (2, 128, 8)
+    assert out_eval["fused_latents"].shape == (2, 128, 8)

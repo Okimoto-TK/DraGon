@@ -5,7 +5,7 @@ import asyncio
 import inspect
 import random
 
-import config.config as config
+import config.data as config
 import httpx
 import polars as pl
 import polars.selectors as ps

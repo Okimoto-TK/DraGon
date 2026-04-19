@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from operator import attrgetter
 
-from config.config import raw_path
+from config.data import raw_path
 
 from src.data.models import RawParams
 from src.data.providers.api.mairui import MairuiApi

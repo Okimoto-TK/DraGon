@@ -8,10 +8,10 @@ from typing import Literal
 
 import polars as pl
 from config.api import MairuiConfig, TushareConfig
-from config.config import DEFAULT_EXCHANGE, DEFAULT_STATUS
+from config.data import DEFAULT_EXCHANGE, DEFAULT_STATUS
 from tqdm import tqdm
 
-from config.config import assembled_dir
+from config.data import assembled_dir
 from src.data.assembler.assemble import assemble_all
 from src.data.models import Query, TableSchema, ProcessedParams
 from src.data.registry.processed import PROCESSED_PARAM_MAP
@@ -200,7 +200,7 @@ class ProcessedPipeline:
         from glob import glob
         from datetime import date
         import shutil
-        from config.config import cache_dir
+        from config.data import cache_dir
         from src.data.registry.processor import CHUNK_DAYS, CHUNK_TAIL_BARS, CHUNK_TAIL_DAYS
 
         chunk_days = CHUNK_DAYS
@@ -245,6 +245,25 @@ class ProcessedPipeline:
             new_5min = read_parquet_by_dates(raw_5min_dir, current_dates)
             new_adj = read_parquet_by_dates(raw_adj_dir, current_dates)
             new_limit = read_parquet_by_dates(raw_limit_dir, current_dates)
+
+            if not new_5min.is_empty():
+                new_5min = new_5min.join(
+                    index_dates,
+                    on=["code", "trade_date"],
+                    how="semi",
+                )
+            if not new_adj.is_empty():
+                new_adj = new_adj.join(
+                    index_dates,
+                    on=["code", "trade_date"],
+                    how="semi",
+                )
+            if not new_limit.is_empty():
+                new_limit = new_limit.join(
+                    index_dates,
+                    on=["code", "trade_date"],
+                    how="semi",
+                )
 
             if new_5min.is_empty():
                 continue
@@ -291,37 +310,20 @@ class ProcessedPipeline:
                     bucket_chunk_files[bucket].append(chunk_file)
                 del bucketed_res
 
-            # Update tail state using only index-valid trading dates.
-            valid_chunk_5min = chunk_5min.join(
-                index_dates,
-                on=["code", "trade_date"],
-                how="semi",
-            )
-            valid_chunk_adj = chunk_adj.join(
-                index_dates,
-                on=["code", "trade_date"],
-                how="semi",
-            )
-            valid_chunk_limit = chunk_limit.join(
-                index_dates,
-                on=["code", "trade_date"],
-                how="semi",
-            )
-
             tail_5min = (
-                valid_chunk_5min
+                chunk_5min
                 .sort(["code", "trade_date", "time"])
                 .group_by("code", maintain_order=True)
                 .tail(CHUNK_TAIL_BARS)
             )
             tail_adj = (
-                valid_chunk_adj
+                chunk_adj
                 .sort(["code", "trade_date"])
                 .group_by("code", maintain_order=True)
                 .tail(CHUNK_TAIL_DAYS)
             )
             tail_limit = (
-                valid_chunk_limit
+                chunk_limit
                 .sort(["code", "trade_date"])
                 .group_by("code", maintain_order=True)
                 .tail(CHUNK_TAIL_DAYS)
@@ -330,9 +332,6 @@ class ProcessedPipeline:
             del chunk_5min
             del chunk_adj
             del chunk_limit
-            del valid_chunk_5min
-            del valid_chunk_adj
-            del valid_chunk_limit
             del res
             del final_res
             if ((i // chunk_days) + 1) % 4 == 0:

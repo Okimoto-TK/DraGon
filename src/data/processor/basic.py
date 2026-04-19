@@ -1,7 +1,7 @@
 """Basic processed-data builders for logical index and filter mask."""
 from __future__ import annotations
 
-import config.config as config
+import config.data as config
 import polars as pl
 from tqdm import tqdm
 

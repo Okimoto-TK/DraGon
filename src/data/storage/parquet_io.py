@@ -4,7 +4,7 @@ from __future__ import annotations
 from glob import glob
 from pathlib import Path
 
-import config.config as config
+import config.data as config
 import polars as pl
 from tqdm import tqdm
 

@@ -1,4 +1,6 @@
-"""Training package."""
-from __future__ import annotations
+"""Training entrypoints and trainer orchestration."""
 
-__all__: list[str] = []
+from .train_entry import run_training
+from .trainer import Trainer
+
+__all__ = ["Trainer", "run_training"]

@@ -1,2 +1,0 @@
-"""Trunk building blocks."""
-

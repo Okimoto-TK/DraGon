@@ -1,18 +1,17 @@
 """Project command-line entrypoints."""
+
 from __future__ import annotations
 
 import argparse
 from collections.abc import Iterable
 from typing import Sequence
 
-from config.config import checkpoint_dir as DEFAULT_CHECKPOINT_DIR
-from config.config import mlflow_dir as DEFAULT_MLFLOW_DIR
+from config.data import checkpoint_dir as DEFAULT_CHECKPOINT_ROOT
 from src.data.models import Query
 from src.data.pipelines import AssembledPipeline, ProcessedPipeline, RawPipeline
 from src.data.registry.processed import PROCESSED_PARAM_MAP
 from src.data.registry.raw import PARAM_MAP
-from src.task_labels import TASK_LABELS
-from src.train.fit import run_training
+from src.train import run_training
 
 
 def _parse_field_list(values: Iterable[str]) -> list[str]:
@@ -59,17 +58,53 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="dragon")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    train_parser = subparsers.add_parser("train", help="Train one label-specific model")
-    train_parser.add_argument("label", choices=TASK_LABELS, help="Label to train")
-    mode_group = train_parser.add_mutually_exclusive_group(required=True)
-    mode_group.add_argument("-n", "--name", dest="run_name", help="Run name used for MLflow metadata and checkpoint folder")
-    mode_group.add_argument("-l", "--load", dest="load_checkpoint", help="Checkpoint path or checkpoint directory to resume from")
+    train_parser = subparsers.add_parser("train", help="Train the forecast model")
+    mode_group = train_parser.add_mutually_exclusive_group(required=False)
+    mode_group.add_argument(
+        "-n",
+        "--name",
+        dest="run_name",
+        help="Create a new checkpoint directory under models/checkpoints/<name>.",
+    )
+    mode_group.add_argument(
+        "-l",
+        "--load",
+        dest="load_name",
+        help="Resume from models/checkpoints/<name>/latest.pt.",
+    )
+    mode_group.add_argument(
+        "-c",
+        "--checkpoint",
+        dest="checkpoint",
+        help="Resume from an explicit checkpoint file or checkpoint directory.",
+    )
 
-    prepare_parser = subparsers.add_parser("prepare", help="Fetch raw data, build processed features, or assemble packed tensors")
-    prepare_parser.add_argument("layer", choices=("raw", "processed", "assembled"), help="Pipeline layer to prepare")
-    prepare_parser.add_argument("fields", nargs="*", help="Comma-separated or space-separated field names")
-    prepare_parser.add_argument("-s", "--start", dest="start_date", help="Start date for raw fetching, format YYYYMMDD")
-    prepare_parser.add_argument("-e", "--end", dest="end_date", help="End date for raw fetching, format YYYYMMDD")
+    prepare_parser = subparsers.add_parser(
+        "prepare",
+        help="Fetch raw data, build processed features, or assemble packed tensors",
+    )
+    prepare_parser.add_argument(
+        "layer",
+        choices=("raw", "processed", "assembled"),
+        help="Pipeline layer to prepare",
+    )
+    prepare_parser.add_argument(
+        "fields",
+        nargs="*",
+        help="Comma-separated or space-separated field names",
+    )
+    prepare_parser.add_argument(
+        "-s",
+        "--start",
+        dest="start_date",
+        help="Start date for raw fetching, format YYYYMMDD",
+    )
+    prepare_parser.add_argument(
+        "-e",
+        "--end",
+        dest="end_date",
+        help="End date for raw fetching, format YYYYMMDD",
+    )
     return parser
 
 
@@ -79,11 +114,10 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     if args.command == "train":
         result = run_training(
-            label=args.label,
-            run_name=args.run_name,
-            load_checkpoint=args.load_checkpoint,
-            checkpoint_dir=DEFAULT_CHECKPOINT_DIR,
-            mlflow_repo=DEFAULT_MLFLOW_DIR,
+            name=args.run_name,
+            load_name=args.load_name,
+            checkpoint=args.checkpoint,
+            checkpoint_root=DEFAULT_CHECKPOINT_ROOT,
         )
         print(result)
         return

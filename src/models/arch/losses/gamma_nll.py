@@ -1,0 +1,62 @@
+from __future__ import annotations
+
+import torch
+import torch.nn as nn
+
+
+class GammaNLLLoss(nn.Module):
+    """Gamma negative log-likelihood under mean-shape parameterization."""
+
+    def __init__(
+        self,
+        _eps: float = 1e-6,
+    ) -> None:
+        super().__init__()
+        if _eps <= 0:
+            raise ValueError(
+                f"_eps must be > 0, got {_eps}. Valid range: (0, +inf)."
+            )
+
+        self._eps = float(_eps)
+
+    def forward(
+        self,
+        target: torch.Tensor,
+        mean: torch.Tensor,
+        shape: torch.Tensor,
+    ) -> torch.Tensor:
+        _validate_column_tensor("target", target)
+        _validate_column_tensor("mean", mean)
+        _validate_column_tensor("shape", shape)
+
+        if target.shape != mean.shape or target.shape != shape.shape:
+            raise ValueError(
+                "target, mean, and shape must share the same shape, "
+                f"got target={tuple(target.shape)}, mean={tuple(mean.shape)}, shape={tuple(shape.shape)}. "
+                "Valid shape: [B, 1] with a shared batch size."
+            )
+        if torch.any(mean <= 0):
+            raise ValueError(
+                f"mean must be strictly positive, got min={mean.min().item()}. Valid range: (0, +inf)."
+            )
+        if torch.any(shape <= 0):
+            raise ValueError(
+                f"shape must be strictly positive, got min={shape.min().item()}. Valid range: (0, +inf)."
+            )
+
+        target_safe = target.clamp_min(self._eps)
+        nll = (
+            shape * (target_safe / mean)
+            + shape * torch.log(mean)
+            - shape * torch.log(shape)
+            + torch.lgamma(shape)
+            - (shape - 1.0) * torch.log(target_safe)
+        )
+        return nll.mean()
+
+
+def _validate_column_tensor(name: str, value: torch.Tensor) -> None:
+    if value.ndim != 2 or value.shape[1] != 1:
+        raise ValueError(
+            f"{name} must have shape [B, 1], got shape={tuple(value.shape)}. Valid shape: [B, 1]."
+        )

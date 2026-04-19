@@ -1,7 +1,7 @@
 """Processed pipeline parameter registry."""
 from __future__ import annotations
 
-from config.config import processed_path
+from config.data import diff_d, processed_path
 
 from src.data.models import ProcessedParams
 from src.data.processor.basic import process_index, process_mask
@@ -60,6 +60,7 @@ PROCESSED_PARAM_MAP: dict[str, ProcessedParams] = {
         schema=PROCESSED_MACRO_SCHEMA,
         desc="macro",
         raw_deps={"daily_df": "daily", "adj_factor_df": "adj_factor", "limit_df": "limit"},
+        processor_kwargs={"diff_d": diff_d},
     ),
     "mezzo": ProcessedParams(
         processor=process_mezzo,
@@ -71,6 +72,7 @@ PROCESSED_PARAM_MAP: dict[str, ProcessedParams] = {
         schema=PROCESSED_MEZZO_SCHEMA,
         desc="mezzo",
         raw_deps={},
+        processor_kwargs={"diff_d": diff_d},
     ),
     "micro": ProcessedParams(
         processor=process_micro,
@@ -82,6 +84,7 @@ PROCESSED_PARAM_MAP: dict[str, ProcessedParams] = {
         schema=PROCESSED_MICRO_SCHEMA,
         desc="micro",
         raw_deps={},
+        processor_kwargs={"diff_d": diff_d},
     ),
     "sidechain": ProcessedParams(
         processor=process_sidechain,
@@ -93,6 +96,7 @@ PROCESSED_PARAM_MAP: dict[str, ProcessedParams] = {
         schema=PROCESSED_SIDECHAIN_SCHEMA,
         desc="sidechain",
         raw_deps={"daily_df": "daily", "adj_factor_df": "adj_factor", "moneyflow_df": "moneyflow"},
+        processor_kwargs={"diff_d": diff_d},
     ),
     "label": ProcessedParams(
         processor=process_label,

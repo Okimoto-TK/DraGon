@@ -1,2 +1,0 @@
-"""Readout modules."""
-

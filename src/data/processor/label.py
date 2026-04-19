@@ -1,6 +1,8 @@
 """Label builders for future return and volatility targets."""
 from __future__ import annotations
 
+import math
+
 import polars as pl
 from tqdm import tqdm
 
@@ -9,6 +11,7 @@ from src.data.schemas.processed import PROCESSED_LABEL_SCHEMA
 from src.data.validators import validate_table
 
 _NUMERIC_EPS = 1e-6
+_PARKINSON_DENOM = 4.0 * math.log(2.0)
 
 
 def process_label(
@@ -18,6 +21,11 @@ def process_label(
     **_kwargs,
 ) -> pl.DataFrame:
     """Process daily adjusted prices into ret / rv labels."""
+    if LABEL_WINDOW < 2:
+        raise ValueError(
+            f"LABEL_WINDOW must be >= 2 to build label_ret, got {LABEL_WINDOW}."
+        )
+
     required_cols = {"high", "low", "open"}
     missing = required_cols.difference(daily_df.columns)
     if missing:
@@ -53,16 +61,16 @@ def process_label(
 
     df = df.with_columns(open_exprs)
 
-    future_open_mean = (
-        pl.col("_open_2")
-        + pl.col("_open_3")
-        + pl.col("_open_4")
-    ) / 3.0
+    future_open_mean = pl.sum_horizontal(
+        [pl.col(f"_open_{k}") for k in range(2, LABEL_WINDOW + 1)]
+    ) / float(LABEL_WINDOW - 1)
     entry_open = pl.col("_open_1")
-    rv_expr = (sum(rv_terms) / float(LABEL_WINDOW)).sqrt()
+    rv_expr = (sum(rv_terms) / float(LABEL_WINDOW * _PARKINSON_DENOM)).sqrt()
 
     df = df.with_columns([
-        (future_open_mean / entry_open.clip(lower_bound=_NUMERIC_EPS)).alias("label_ret"),
+        (
+            future_open_mean / entry_open.clip(lower_bound=_NUMERIC_EPS) - 1.0
+        ).alias("label_ret"),
         rv_expr.alias("label_rv"),
     ])
 

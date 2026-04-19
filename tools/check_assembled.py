@@ -1,6 +1,6 @@
 import numpy as np
 
-from config.config import assembled_dir
+from config.data import assembled_dir
 
 # 替换成你实际的文件路径
 file_path = assembled_dir / (input("Input file path: ") + ".npy")

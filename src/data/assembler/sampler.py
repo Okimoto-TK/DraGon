@@ -6,18 +6,21 @@ from pathlib import Path
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
 
-from config.config import assembled_dir
+from config.data import assembled_dir
 from src.data.assembler.assemble import (
     LABEL_COLS,
     MACRO_FEATURES,
     MEZZO_FEATURES,
     MICRO_FEATURES,
     SIDECHAIN_FEATURES,
+    MEZZO_BARS_PER_DAY,
+    MICRO_BARS_PER_DAY,
 )
 from src.data.registry.dataset import (
     MACRO_LOOKBACK,
     MEZZO_LOOKBACK,
     MICRO_LOOKBACK,
+    WARMUP_BARS,
 )
 from src.data.storage.npy_io import read_npy
 
@@ -26,10 +29,20 @@ IS_VALID_IDX = 1
 LABEL_SLICE = slice(2, 2 + len(LABEL_COLS))
 MACRO_SLICE = slice(LABEL_SLICE.stop, LABEL_SLICE.stop + len(MACRO_FEATURES))
 SIDECHAIN_SLICE = slice(MACRO_SLICE.stop, MACRO_SLICE.stop + len(SIDECHAIN_FEATURES))
-MEZZO_SLICE = slice(SIDECHAIN_SLICE.stop, SIDECHAIN_SLICE.stop + len(MEZZO_FEATURES) * 8)
+MEZZO_SLICE = slice(SIDECHAIN_SLICE.stop, SIDECHAIN_SLICE.stop + len(MEZZO_FEATURES) * MEZZO_BARS_PER_DAY)
 MICRO_USED_FEATURES = MICRO_FEATURES
-FULL_MICRO_SLICE = slice(MEZZO_SLICE.stop, MEZZO_SLICE.stop + len(MICRO_FEATURES) * 48)
-MICRO_SLICE = slice(MEZZO_SLICE.stop, MEZZO_SLICE.stop + len(MICRO_USED_FEATURES) * 48)
+FULL_MICRO_SLICE = slice(MEZZO_SLICE.stop, MEZZO_SLICE.stop + len(MICRO_FEATURES) * MICRO_BARS_PER_DAY)
+MICRO_SLICE = slice(MEZZO_SLICE.stop, MEZZO_SLICE.stop + len(MICRO_USED_FEATURES) * MICRO_BARS_PER_DAY)
+
+# Daily window sizes (lookback + warmup, expressed in days)
+MACRO_WINDOW_DAYS = MACRO_LOOKBACK + WARMUP_BARS
+MEZZO_WINDOW_DAYS = MEZZO_LOOKBACK // MEZZO_BARS_PER_DAY + (WARMUP_BARS + MEZZO_BARS_PER_DAY - 1) // MEZZO_BARS_PER_DAY
+MICRO_WINDOW_DAYS = MICRO_LOOKBACK // MICRO_BARS_PER_DAY + (WARMUP_BARS + MICRO_BARS_PER_DAY - 1) // MICRO_BARS_PER_DAY
+
+# Total bar counts per scale
+MACRO_TOTAL_BARS = MACRO_WINDOW_DAYS
+MEZZO_TOTAL_BARS = MEZZO_WINDOW_DAYS * MEZZO_BARS_PER_DAY
+MICRO_TOTAL_BARS = MICRO_WINDOW_DAYS * MICRO_BARS_PER_DAY
 
 
 def _resolve_path(code: str) -> Path:
@@ -50,21 +63,19 @@ def _validate_layout(data: np.ndarray) -> None:
 
 
 def _window_spec() -> tuple[int, int, int]:
-    mezzo_days = MEZZO_LOOKBACK // 8
-    micro_days = MICRO_LOOKBACK // 48
-    start_idx = max(MACRO_LOOKBACK, mezzo_days, micro_days) - 1
-    return mezzo_days, micro_days, start_idx
+    start_idx = max(MACRO_WINDOW_DAYS, MEZZO_WINDOW_DAYS, MICRO_WINDOW_DAYS) - 1
+    return MEZZO_WINDOW_DAYS, MICRO_WINDOW_DAYS, start_idx
 
 
 def _compute_sample_valid(step_valid: np.ndarray) -> np.ndarray:
-    mezzo_days, micro_days, start_idx = _window_spec()
-    macro_valid = sliding_window_view(step_valid, MACRO_LOOKBACK).all(axis=-1)
-    mezzo_valid = sliding_window_view(step_valid, mezzo_days).all(axis=-1)
-    micro_valid = sliding_window_view(step_valid, micro_days).all(axis=-1)
+    macro_valid = sliding_window_view(step_valid, MACRO_WINDOW_DAYS).all(axis=-1)
+    mezzo_valid = sliding_window_view(step_valid, MEZZO_WINDOW_DAYS).all(axis=-1)
+    micro_valid = sliding_window_view(step_valid, MICRO_WINDOW_DAYS).all(axis=-1)
+    start_idx = max(MACRO_WINDOW_DAYS, MEZZO_WINDOW_DAYS, MICRO_WINDOW_DAYS) - 1
     return (
-        macro_valid[start_idx - MACRO_LOOKBACK + 1 :]
-        & mezzo_valid[start_idx - mezzo_days + 1 :]
-        & micro_valid[start_idx - micro_days + 1 :]
+        macro_valid[start_idx - MACRO_WINDOW_DAYS + 1 :]
+        & mezzo_valid[start_idx - MEZZO_WINDOW_DAYS + 1 :]
+        & micro_valid[start_idx - MICRO_WINDOW_DAYS + 1 :]
     )
 
 
@@ -99,17 +110,16 @@ def build_sample_index_for_code(code: str) -> dict[str, np.ndarray]:
 
 
 def _extract_sample_from_array(data: np.ndarray, t: int) -> dict[str, np.ndarray]:
-    mezzo_days, micro_days, _ = _window_spec()
     return {
         "date": np.asarray(data[t, DATE_IDX], dtype=np.float32),
         "label": np.asarray(data[t, LABEL_SLICE], dtype=np.float32),
-        "macro": np.asarray(data[t - MACRO_LOOKBACK + 1 : t + 1, MACRO_SLICE], dtype=np.float32),
+        "macro": np.asarray(data[t - MACRO_WINDOW_DAYS + 1 : t + 1, MACRO_SLICE], dtype=np.float32),
         "sidechain": np.asarray(
-            data[t - MACRO_LOOKBACK + 1 : t + 1, SIDECHAIN_SLICE],
+            data[t - MACRO_WINDOW_DAYS + 1 : t + 1, SIDECHAIN_SLICE],
             dtype=np.float32,
         ),
-        "mezzo": np.asarray(data[t - mezzo_days + 1 : t + 1, MEZZO_SLICE], dtype=np.float32),
-        "micro": np.asarray(data[t - micro_days + 1 : t + 1, MICRO_SLICE], dtype=np.float32),
+        "mezzo": np.asarray(data[t - MEZZO_WINDOW_DAYS + 1 : t + 1, MEZZO_SLICE], dtype=np.float32),
+        "micro": np.asarray(data[t - MICRO_WINDOW_DAYS + 1 : t + 1, MICRO_SLICE], dtype=np.float32),
     }
 
 
@@ -126,10 +136,10 @@ def get_samples(code: str) -> dict[str, np.ndarray]:
     """Load ``code.npy`` and assemble rolling samples for model consumption.
 
     Sampling spec:
-    - macro window: last ``MACRO_LOOKBACK`` rows of macro features
-    - sidechain window: last ``MACRO_LOOKBACK`` rows of sidechain features
-    - mezzo window: last ``MEZZO_LOOKBACK / 8`` rows of per-day mezzo payload
-    - micro window: last ``MICRO_LOOKBACK / 48`` rows of per-day micro payload
+    - macro window: last ``MACRO_WINDOW_DAYS`` rows of macro features (MACRO_TOTAL_BARS bars)
+    - sidechain window: last ``MACRO_WINDOW_DAYS`` rows of sidechain features
+    - mezzo window: last ``MEZZO_WINDOW_DAYS`` rows of per-day mezzo payload (MEZZO_TOTAL_BARS bars)
+    - micro window: last ``MICRO_WINDOW_DAYS`` rows of per-day micro payload (MICRO_TOTAL_BARS bars)
     - sample validity: AND over ``is_valid_step`` across the daily window
     - label: current row label
     """
@@ -147,8 +157,8 @@ def get_samples(code: str) -> dict[str, np.ndarray]:
             "date": np.empty((0,), dtype=np.float32),
             "is_valid": np.empty((0,), dtype=bool),
             "label": np.empty((0, len(LABEL_COLS)), dtype=np.float32),
-            "macro": np.empty((0, MACRO_LOOKBACK, macro_width), dtype=np.float32),
-            "sidechain": np.empty((0, MACRO_LOOKBACK, sidechain_width), dtype=np.float32),
+            "macro": np.empty((0, MACRO_TOTAL_BARS, macro_width), dtype=np.float32),
+            "sidechain": np.empty((0, MACRO_TOTAL_BARS, sidechain_width), dtype=np.float32),
             "mezzo": np.empty((0, mezzo_days, mezzo_width), dtype=np.float32),
             "micro": np.empty((0, micro_days, micro_width), dtype=np.float32),
         }

@@ -24,6 +24,7 @@ DType: TypeAlias = (
     | type[pl.Float32]
     | type[pl.Int64]
     | type[pl.Int32]
+    | type[pl.Int8]
     | type[pl.Boolean]
     | type[pl.Date]
     | type[pl.Time]

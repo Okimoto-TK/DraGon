@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import warnings
 
-import config.config as config
+import config.data as config
 import polars as pl
 
 from src.data.models import TableSchema

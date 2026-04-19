@@ -1,0 +1,43 @@
+"""Model-side configuration package."""
+
+from .hparams import (
+    CONDITIONING_ENCODER_HPARAMS,
+    CROSS_SCALE_FUSION_HPARAMS,
+    EXOGENOUS_BRIDGE_FUSION_HPARAMS,
+    MULTI_SCALE_FORECAST_NETWORK_HPARAMS,
+    MULTI_TASK_HEADS_HPARAMS,
+    MULTI_TASK_LOSS_HPARAMS,
+    MODERN_TCN_FILM_ENCODER_HPARAMS,
+    MultiScaleForecastNetworkHParams,
+    CrossScaleFusionHParams,
+    ConditioningEncoderHParams,
+    ExogenousBridgeFusionHParams,
+    MultiTaskHeadsHParams,
+    MultiTaskLossHParams,
+    WithinScaleSTARFusionHParams,
+    WITHIN_SCALE_STAR_FUSION_HPARAMS,
+    WAVELET_DENOISE_HPARAMS,
+    ModernTCNFiLMEncoderHParams,
+    WaveletDenoiseHParams,
+)
+
+__all__ = [
+    "WaveletDenoiseHParams",
+    "WAVELET_DENOISE_HPARAMS",
+    "ModernTCNFiLMEncoderHParams",
+    "MODERN_TCN_FILM_ENCODER_HPARAMS",
+    "ConditioningEncoderHParams",
+    "CONDITIONING_ENCODER_HPARAMS",
+    "CrossScaleFusionHParams",
+    "CROSS_SCALE_FUSION_HPARAMS",
+    "MultiTaskHeadsHParams",
+    "MULTI_TASK_HEADS_HPARAMS",
+    "MultiTaskLossHParams",
+    "MULTI_TASK_LOSS_HPARAMS",
+    "MultiScaleForecastNetworkHParams",
+    "MULTI_SCALE_FORECAST_NETWORK_HPARAMS",
+    "ExogenousBridgeFusionHParams",
+    "EXOGENOUS_BRIDGE_FUSION_HPARAMS",
+    "WithinScaleSTARFusionHParams",
+    "WITHIN_SCALE_STAR_FUSION_HPARAMS",
+]

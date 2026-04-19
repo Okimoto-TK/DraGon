@@ -5,7 +5,7 @@ import copy
 import inspect
 from collections.abc import Callable, Sequence
 
-import config.config as config
+import config.data as config
 import polars as pl
 import polars.selectors as cs
 import tushare as ts
