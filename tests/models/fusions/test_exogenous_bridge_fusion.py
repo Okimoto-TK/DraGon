@@ -105,3 +105,17 @@ def test_exogenous_bridge_fusion_train_and_eval_forward() -> None:
     endo_fused_eval, bridge_global_eval = fusion(endo, exo, exo_g)
     assert endo_fused_eval.shape == (2, 128, 16)
     assert bridge_global_eval.shape == (2, 128)
+
+
+def test_exogenous_bridge_fusion_gate_respects_floor_in_debug_mode() -> None:
+    endo = torch.randn(2, 128, 24)
+    exo = torch.randn(2, 32, 12)
+    exo_g = torch.randn(2, 32) * 100.0
+    gate_floor = 0.1
+    fusion = ExogenousBridgeFusion(_gate_floor=gate_floor)
+
+    _, _, debug = fusion(endo, exo, exo_g, return_debug=True)
+
+    gate = debug["gate"]
+    assert gate.shape == (2, 128)
+    assert float(gate.detach().min()) >= gate_floor - 1e-6

@@ -89,6 +89,8 @@ class MultiTaskHeads(nn.Module):
         self,
         fused_latents: torch.Tensor,
         fused_global: torch.Tensor,
+        *,
+        return_debug: bool = False,
     ) -> dict[str, torch.Tensor]:
         if fused_latents.ndim != 3:
             raise ValueError(
@@ -128,9 +130,34 @@ class MultiTaskHeads(nn.Module):
                 "Valid range: both batch sizes must be equal."
             )
 
-        h_ret = self.ret_tower(fused_latents, fused_global)
-        h_rv = self.rv_tower(fused_latents, fused_global)
-        h_q = self.q_tower(fused_latents, fused_global)
+        debug: dict[str, torch.Tensor] = {}
+        if return_debug:
+            h_ret, ret_debug = self.ret_tower(
+                fused_latents,
+                fused_global,
+                return_debug=True,
+            )
+            h_rv, rv_debug = self.rv_tower(
+                fused_latents,
+                fused_global,
+                return_debug=True,
+            )
+            h_q, q_debug = self.q_tower(
+                fused_latents,
+                fused_global,
+                return_debug=True,
+            )
+            for prefix, tower_debug in (
+                ("ret", ret_debug),
+                ("rv", rv_debug),
+                ("q", q_debug),
+            ):
+                for key, value in tower_debug.items():
+                    debug[f"{prefix}_{key}"] = value
+        else:
+            h_ret = self.ret_tower(fused_latents, fused_global)
+            h_rv = self.rv_tower(fused_latents, fused_global)
+            h_q = self.q_tower(fused_latents, fused_global)
 
         pred_mu_ret = self.ret_value_head(h_ret)
         pred_scale_ret_raw = self.ret_uncertainty_head(h_ret)
@@ -141,7 +168,7 @@ class MultiTaskHeads(nn.Module):
         pred_mu_q = self.q_value_head(h_q)
         pred_scale_q_raw = self.q_uncertainty_head(h_q)
 
-        return {
+        out = {
             "pred_mu_ret": pred_mu_ret,
             "pred_scale_ret_raw": pred_scale_ret_raw,
             "pred_mean_rv_raw": pred_mean_rv_raw,
@@ -149,3 +176,6 @@ class MultiTaskHeads(nn.Module):
             "pred_mu_q": pred_mu_q,
             "pred_scale_q_raw": pred_scale_q_raw,
         }
+        if return_debug:
+            out["_debug"] = debug
+        return out

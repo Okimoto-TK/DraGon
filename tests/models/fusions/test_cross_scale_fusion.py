@@ -86,3 +86,17 @@ def test_cross_scale_fusion_train_and_eval_forward() -> None:
     fused_latents_eval, fused_global_eval = fusion(macro, mezzo, micro)
     assert fused_latents_eval.shape == (2, 128, 8)
     assert fused_global_eval.shape == (2, 128)
+
+
+def test_cross_scale_fusion_breaks_latent_symmetry_in_debug_norms() -> None:
+    torch.manual_seed(0)
+    macro = torch.zeros(2, 128, 16)
+    mezzo = torch.zeros(2, 128, 24)
+    micro = torch.zeros(2, 128, 36)
+    fusion = CrossScaleFusion()
+
+    _, _, debug = fusion(macro, mezzo, micro, return_debug=True)
+
+    latent_norms = debug["latent_norms"]
+    assert latent_norms.shape == (2, 8)
+    assert not torch.allclose(latent_norms[:, 0], latent_norms[:, 1])

@@ -9,7 +9,10 @@ from typing import Any, Sequence
 import torch
 
 from config.data import assembled_dir, checkpoint_dir as DEFAULT_CHECKPOINT_ROOT
+from config.data import train_seed as default_train_seed
+from config.models import multi_scale_forecast_network, multi_task_loss
 from config.train import training
+from src.models.config.hparams import MULTI_SCALE_FORECAST_NETWORK_HPARAMS
 
 from .checkpoint import load_checkpoint
 from .console import EpochConsoleLogger
@@ -20,9 +23,11 @@ from .runtime import (
     build_optimizer,
     build_scheduler,
     configure_training_backends,
-    maybe_compile_model,
+    maybe_compile_loss_fn,
+    maybe_prefetch_loader,
 )
 from .trainer import Trainer
+from .wandb_logger import WandbLoggerConfig, WandbVisualizationLogger
 
 
 def _default_file_split() -> tuple[list[str], list[str]]:
@@ -84,6 +89,34 @@ def _resolve_checkpoint_runtime(
     return run_name, checkpoint_dir, None
 
 
+def _build_wandb_run_config(
+    *,
+    batch_size: int,
+    lr: float,
+    weight_decay: float,
+    max_grad_norm: float,
+    compile_model: bool,
+) -> dict[str, object]:
+    return {
+        "model.hidden_dim": multi_scale_forecast_network.hidden_dim,
+        "model.cond_dim": multi_scale_forecast_network.cond_dim,
+        "model.num_latents": multi_scale_forecast_network.num_latents,
+        "model.q_tau": multi_task_loss.q_tau,
+        "data.macro_len": MULTI_SCALE_FORECAST_NETWORK_HPARAMS._macro_target_len,
+        "data.mezzo_len": MULTI_SCALE_FORECAST_NETWORK_HPARAMS._mezzo_target_len,
+        "data.micro_len": MULTI_SCALE_FORECAST_NETWORK_HPARAMS._micro_target_len,
+        "train.batch_size": batch_size,
+        "train.lr": lr,
+        "train.weight_decay": weight_decay,
+        "train.grad_clip": max_grad_norm,
+        "train.compile": compile_model,
+        "train.seed": default_train_seed,
+        "loss.ret_weight": multi_task_loss.ret_loss_weight,
+        "loss.rv_weight": multi_task_loss.rv_loss_weight,
+        "loss.q_weight": multi_task_loss.q_loss_weight,
+    }
+
+
 def run_training(
     train_files: Sequence[str] | None = None,
     val_files: Sequence[str] | None = None,
@@ -99,10 +132,17 @@ def run_training(
     weight_decay: float = training.weight_decay,
     max_grad_norm: float = training.max_grad_norm,
     log_every: int = training.log_every,
+    hist_every: int = training.hist_every,
+    viz_every: int = training.viz_every,
     num_epochs: int = training.num_epochs,
     save_every: int = training.save_every,
     compile_model: bool = training.compile_model,
+    compile_mode: str = training.compile_mode,
     amp_dtype: str = training.amp_dtype,
+    enable_wandb: bool = training.enable_wandb,
+    wandb_project: str | None = training.wandb_project,
+    wandb_run_group: str | None = training.wandb_run_group,
+    wandb_base_url: str | None = training.wandb_base_url,
     device: str | torch.device | None = None,
     use_amp: bool = True,
     mmap_mode: str | None = training.mmap_mode,
@@ -152,11 +192,46 @@ def run_training(
         if device is not None
         else torch.device("cuda" if torch.cuda.is_available() else "cpu")
     )
-    configure_training_backends(device=resolved_device)
+    configure_training_backends(
+        device=resolved_device,
+        compile_mode=compile_mode,
+    )
+    # CUDA graph capture in torch.compile can be invalidated by our explicit
+    # prefetch stream issuing overlapping H2D copies on another stream.
+    prefetch_enabled = not compile_model
+    train_loader = maybe_prefetch_loader(
+        train_loader,
+        device=resolved_device,
+        enabled=prefetch_enabled,
+    )
+    val_loader = maybe_prefetch_loader(
+        val_loader,
+        device=resolved_device,
+        enabled=prefetch_enabled,
+    )
     model = build_model().to(resolved_device)
     optimizer = build_optimizer(model, lr=lr, weight_decay=weight_decay)
     scheduler = build_scheduler(optimizer)
     console_logger = EpochConsoleLogger(log_every=log_every, enabled=enable_console)
+    wandb_logger = WandbVisualizationLogger(
+        config=WandbLoggerConfig(
+            enabled=enable_wandb,
+            log_every=log_every,
+            hist_every=hist_every,
+            viz_every=viz_every,
+            project=wandb_project,
+            group=wandb_run_group,
+            base_url=wandb_base_url,
+        ),
+        run_name=resolved_run_name,
+        run_config=_build_wandb_run_config(
+            batch_size=batch_size,
+            lr=lr,
+            weight_decay=weight_decay,
+            max_grad_norm=max_grad_norm,
+            compile_model=compile_model,
+        ),
+    )
     trainer = Trainer(
         model=model,
         optimizer=optimizer,
@@ -170,6 +245,7 @@ def run_training(
         log_every=log_every,
         save_every=save_every,
         console_logger=console_logger,
+        wandb_logger=wandb_logger,
     )
     trainer.checkpoint_dir = resolved_checkpoint_dir
     trainer.checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -187,7 +263,11 @@ def run_training(
         trainer.start_epoch = int(state["epoch"]) + 1
         trainer.global_step = int(state["global_step"])
 
-    trainer.model = maybe_compile_model(trainer.model, enabled=compile_model)
+    trainer.forward_loss = maybe_compile_loss_fn(
+        trainer.model,
+        enabled=compile_model,
+        mode=compile_mode,
+    )
     trainer.fit(num_epochs=num_epochs)
     best_val_loss = min(
         (row["val"]["loss_total"] for row in trainer.history),

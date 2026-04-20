@@ -6,7 +6,13 @@ import math
 import polars as pl
 import pytest
 
-from src.data.processor.ohlcv import _aggregate_30min, _process_ohlcv, process_macro
+from src.data.processor.ohlcv import (
+    _AMIHUD_CLAMP,
+    _VOL_FRACDIFF_CLAMP,
+    _aggregate_30min,
+    _process_ohlcv,
+    process_macro,
+)
 from src.data.processor.utils import fracdiff_weights
 
 
@@ -234,3 +240,58 @@ def test_aggregate_30min_keeps_bar_order_and_amount_sum() -> None:
     assert out["high"].to_list() == [16.0, 26.0]
     assert out["low"].to_list() == [9.0, 19.0]
     assert out["amount"].to_list() == [21.0, 210.0]
+
+
+def test_intraday_outlier_features_are_clamped() -> None:
+    days = [date(2026, 1, 5), date(2026, 1, 6), date(2026, 1, 7), date(2026, 1, 8)]
+    index_df = _index_df(days)
+    limit_df = _limit_df(days)
+
+    rows: list[dict[str, object]] = []
+    amount_map = {
+        (date(2026, 1, 5), 1): 0.0,
+        (date(2026, 1, 5), 2): 100.0,
+        (date(2026, 1, 6), 1): 0.0,
+        (date(2026, 1, 6), 2): 100.0,
+        (date(2026, 1, 7), 1): 0.0,
+        (date(2026, 1, 7), 2): 100.0,
+        (date(2026, 1, 8), 1): 1.0,
+        (date(2026, 1, 8), 2): 0.0,
+    }
+    for d in days:
+        for slot in [1, 2]:
+            close = 12.0 if (d == date(2026, 1, 8) and slot == 2) else 10.5
+            rows.append(
+                {
+                    "code": "000001.SZ",
+                    "trade_date": d,
+                    "time_index": slot,
+                    "open": 10.0,
+                    "high": 12.0,
+                    "low": 9.0,
+                    "close": close,
+                    "amount": amount_map[(d, slot)],
+                }
+            )
+
+    out = _process_ohlcv(
+        index_df=index_df,
+        ohlcv_df=pl.DataFrame(rows),
+        limit_df=limit_df,
+        freq="micro",
+        diff_d=0.5,
+    )
+    row_slot1 = out.filter(
+        (pl.col("code") == "000001.SZ")
+        & (pl.col("trade_date") == date(2026, 1, 8))
+        & (pl.col("time_index") == 1)
+    ).row(0, named=True)
+    row_slot2 = out.filter(
+        (pl.col("code") == "000001.SZ")
+        & (pl.col("trade_date") == date(2026, 1, 8))
+        & (pl.col("time_index") == 2)
+    ).row(0, named=True)
+
+    assert row_slot1["f9"] == pytest.approx(_VOL_FRACDIFF_CLAMP)
+    assert row_slot1["f10"] == pytest.approx(-_VOL_FRACDIFF_CLAMP)
+    assert row_slot2["f5"] == pytest.approx(_AMIHUD_CLAMP)

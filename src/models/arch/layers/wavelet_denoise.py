@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -16,6 +18,16 @@ def _require_ptwt():
             "WaveletDenoise1D requires 'ptwt'. Install it with `pip install ptwt`."
         ) from exc
     return ptwt
+
+
+def _disable_for_compile(fn):
+    compiler = getattr(torch, "compiler", None)
+    if compiler is not None and hasattr(compiler, "disable"):
+        return compiler.disable(fn)
+    dynamo = getattr(torch, "_dynamo", None)
+    if dynamo is not None and hasattr(dynamo, "disable"):
+        return dynamo.disable(fn)
+    return fn
 
 
 class WaveletDenoise1D(nn.Module):
@@ -67,6 +79,7 @@ class WaveletDenoise1D(nn.Module):
     def _soft_threshold(x: torch.Tensor, thr: torch.Tensor) -> torch.Tensor:
         return torch.sign(x) * F.relu(x.abs() - thr)
 
+    @_disable_for_compile
     def forward(self, x_long: torch.Tensor) -> torch.Tensor:
         if x_long.ndim != 3:
             raise ValueError(
@@ -87,43 +100,55 @@ class WaveletDenoise1D(nn.Module):
 
         ptwt = _require_ptwt()
 
-        coeffs = ptwt.wavedec(
-            x_long,
-            self._wavelet,
-            mode="zero",
-            level=self._level,
-            axis=-1,
+        # Keep wavelet math in fp32/TF32 while the rest of the model stays on bf16.
+        autocast_context = (
+            torch.autocast(device_type=x_long.device.type, enabled=False)
+            if x_long.device.type in {"cpu", "cuda"}
+            else nullcontext()
         )
-        approximation = coeffs[0]
-        details = list(coeffs[1:])
-
-        if len(details) != self._level:
-            raise ValueError(
-                f"DWT detail level mismatch: expected {self._level}, got {len(details)}."
+        with autocast_context:
+            x_long_fp32 = x_long.float()
+            coeffs = ptwt.wavedec(
+                x_long_fp32,
+                self._wavelet,
+                mode="zero",
+                level=self._level,
+                axis=-1,
             )
+            approximation = coeffs[0]
+            details = list(coeffs[1:])
 
-        new_details: list[torch.Tensor] = []
-        for level_idx, detail in enumerate(details):
-            sigma = self._rms(detail, self._eps)
+            if len(details) != self._level:
+                raise ValueError(
+                    f"DWT detail level mismatch: expected {self._level}, got {len(details)}."
+                )
 
-            tau = F.softplus(self.theta_detail[level_idx]).view(1, self.n_channels, 1)
-            alpha = torch.sigmoid(self.phi_detail[level_idx]).view(
-                1, self.n_channels, 1
-            )
-            rho = torch.sigmoid(self.psi_detail[level_idx]).view(1, self.n_channels, 1)
+            new_details: list[torch.Tensor] = []
+            for level_idx, detail in enumerate(details):
+                sigma = self._rms(detail, self._eps)
 
-            threshold = tau * sigma
-            detail_shrunk = self._soft_threshold(detail, threshold)
-            detail_out = rho * detail + (1.0 - rho) * (alpha * detail_shrunk)
-            new_details.append(detail_out)
+                tau = F.softplus(self.theta_detail[level_idx]).view(
+                    1, self.n_channels, 1
+                )
+                alpha = torch.sigmoid(self.phi_detail[level_idx]).view(
+                    1, self.n_channels, 1
+                )
+                rho = torch.sigmoid(self.psi_detail[level_idx]).view(
+                    1, self.n_channels, 1
+                )
 
-        y_long = ptwt.waverec([approximation] + new_details, self._wavelet, axis=-1)
-        if y_long.shape[-1] < expected_t:
-            raise ValueError(
-                "Reconstructed length is shorter than expected: "
-                f"got {y_long.shape[-1]}, expected at least {expected_t}."
-            )
+                threshold = tau * sigma
+                detail_shrunk = self._soft_threshold(detail, threshold)
+                detail_out = rho * detail + (1.0 - rho) * (alpha * detail_shrunk)
+                new_details.append(detail_out)
 
-        y_long = y_long[..., -expected_t:]
-        y = y_long[..., -self.target_len:]
+            y_long = ptwt.waverec([approximation] + new_details, self._wavelet, axis=-1)
+            if y_long.shape[-1] < expected_t:
+                raise ValueError(
+                    "Reconstructed length is shorter than expected: "
+                    f"got {y_long.shape[-1]}, expected at least {expected_t}."
+                )
+
+            y_long = y_long[..., -expected_t:]
+            y = y_long[..., -self.target_len:]
         return y.to(device=x_long.device, dtype=x_long.dtype)

@@ -180,11 +180,15 @@ class ConditioningEncoder(nn.Module):
                 "x_cond device mismatch: "
                 f"input device={x_cond.device}, module device={ref_param.device}."
             )
-        if x_cond.dtype != ref_param.dtype:
+        allowed_amp_dtypes = {torch.float16, torch.bfloat16, torch.float32}
+        if x_cond.dtype != ref_param.dtype and not (
+            ref_param.dtype == torch.float32 and x_cond.dtype in allowed_amp_dtypes
+        ):
             raise ValueError(
                 "x_cond dtype mismatch: "
                 f"input dtype={x_cond.dtype}, module dtype={ref_param.dtype}. "
-                "Move the module with `.to(...)` before calling forward."
+                "Expected matching dtypes, or an AMP/autocast input in "
+                "{torch.float16, torch.bfloat16, torch.float32} for float32 modules."
             )
 
         x = x_cond.transpose(1, 2)

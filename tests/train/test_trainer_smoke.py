@@ -15,6 +15,7 @@ from src.train.dataset import AssembledNPZDataset
 from src.train.runtime import build_optimizer, build_scheduler, maybe_compile_model
 from src.train.train_entry import _resolve_checkpoint_runtime
 from src.train.trainer import Trainer
+from src.train.wandb_logger import _loss_shares
 
 
 def _write_minimal_npz(path: Path, samples: int = 4) -> Path:
@@ -90,6 +91,51 @@ class _TinyTrainModel(nn.Module):
         }
 
 
+class _FakeWandbLogger:
+    def __init__(self) -> None:
+        self.train_logs = 0
+        self.val_logs = 0
+        self.val_snapshots = 0
+        self.captured = False
+        self.fixed_val_batches: dict[str, dict[str, torch.Tensor]] = {}
+
+    def capture_fixed_val_batch(self, loader) -> None:
+        self.captured = True
+        base_loader = loader.loader if hasattr(loader, "loader") else loader
+        sample = base_loader.dataset[0]
+        batch = base_loader.collate_fn([sample])
+        self.fixed_val_batches = {
+            "ret_le_neg10": batch,
+            "ret_neg10_to_neg5": batch,
+            "ret_5_to_10": batch,
+            "ret_ge_10": batch,
+        }
+
+    def get_fixed_val_batch(self) -> dict[str, torch.Tensor] | None:
+        return None
+
+    def get_fixed_val_batches(self) -> dict[str, dict[str, torch.Tensor]]:
+        return self.fixed_val_batches
+
+    def should_log_histograms(self, global_step: int) -> bool:
+        return global_step % 2 == 0
+
+    def should_log_visuals(self, global_step: int) -> bool:
+        return global_step % 2 == 0
+
+    def log_train_step(self, **_: object) -> None:
+        self.train_logs += 1
+
+    def log_val_epoch(self, **_: object) -> None:
+        self.val_logs += 1
+
+    def log_fixed_val_snapshot(self, **_: object) -> None:
+        self.val_snapshots += 1
+
+    def finish(self) -> None:
+        return None
+
+
 def test_dataset_can_read_and_adapt(tmp_path: Path) -> None:
     path = _write_minimal_npz(tmp_path / "000001.SZ.npz", samples=3)
     dataset = AssembledNPZDataset([str(path)], mmap_mode=None)
@@ -117,12 +163,18 @@ def test_collate_network_batch_shapes_and_dtypes(tmp_path: Path) -> None:
     assert batch["macro_i8_long"].dtype == torch.int64
 
 
+def test_loss_shares_use_absolute_contributions_for_negative_nlls() -> None:
+    shares = _loss_shares(-2.0, -3.0, -5.0)
+
+    assert shares == pytest.approx((0.2, 0.3, 0.5), rel=1e-6, abs=1e-6)
+
+
 def test_train_loader_uses_drop_last_true(tmp_path: Path) -> None:
     path = _write_minimal_npz(tmp_path / "000001.SZ.npz", samples=5)
     dataset = AssembledNPZDataset([str(path)], mmap_mode=None)
     loader = build_train_dataloader(dataset, batch_size=2, num_workers=0)
 
-    assert loader.drop_last is True
+    assert loader.batch_sampler.drop_last is True
 
 
 def test_train_step_smoke_runs(tmp_path: Path) -> None:
@@ -179,20 +231,81 @@ def test_val_step_smoke_runs_without_backward(tmp_path: Path) -> None:
     assert all(param.grad is None for param in model.parameters())
 
 
-def test_compile_path_uses_max_autotune(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_trainer_wandb_debug_fallback_does_not_require_model_support(tmp_path: Path) -> None:
+    path = _write_minimal_npz(tmp_path / "000001.SZ.npz", samples=4)
+    dataset = AssembledNPZDataset([str(path)], mmap_mode=None)
+    train_loader = build_train_dataloader(dataset, batch_size=2, num_workers=0)
+    val_loader = build_val_dataloader(dataset, batch_size=2, num_workers=0)
+
+    model = _TinyTrainModel()
+    optimizer = build_optimizer(model, lr=1e-3, weight_decay=0.0)
+    scheduler = build_scheduler(optimizer)
+    wandb_logger = _FakeWandbLogger()
+    trainer = Trainer(
+        model=model,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        device=torch.device("cpu"),
+        use_amp=False,
+        log_every=1,
+        console_logger=EpochConsoleLogger(log_every=1, enabled=False),
+        wandb_logger=wandb_logger,
+    )
+
+    trainer.fit(num_epochs=1)
+
+    assert wandb_logger.captured is True
+    assert wandb_logger.train_logs >= 1
+    assert wandb_logger.val_logs == 1
+    assert wandb_logger.val_snapshots == 4
+
+
+def test_trainer_logs_one_val_snapshot_per_epoch(tmp_path: Path) -> None:
+    path = _write_minimal_npz(tmp_path / "000001.SZ.npz", samples=4)
+    dataset = AssembledNPZDataset([str(path)], mmap_mode=None)
+    train_loader = build_train_dataloader(dataset, batch_size=2, num_workers=0)
+    val_loader = build_val_dataloader(dataset, batch_size=2, num_workers=0)
+
+    model = _TinyTrainModel()
+    optimizer = build_optimizer(model, lr=1e-3, weight_decay=0.0)
+    scheduler = build_scheduler(optimizer)
+    wandb_logger = _FakeWandbLogger()
+    trainer = Trainer(
+        model=model,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        device=torch.device("cpu"),
+        use_amp=False,
+        log_every=1,
+        console_logger=EpochConsoleLogger(log_every=1, enabled=False),
+        wandb_logger=wandb_logger,
+    )
+
+    trainer.fit(num_epochs=2)
+
+    assert wandb_logger.val_logs == 2
+    assert wandb_logger.val_snapshots == 8
+
+
+def test_compile_path_uses_reduce_overhead(monkeypatch: pytest.MonkeyPatch) -> None:
     model = nn.Linear(4, 2)
     recorded: dict[str, object] = {}
 
-    def _fake_compile(module: nn.Module, *, mode: str) -> nn.Module:
+    def _fake_compile(module: nn.Module, *, mode: str, **kwargs) -> nn.Module:
         recorded["module"] = module
         recorded["mode"] = mode
+        recorded["kwargs"] = kwargs
         return module
 
     monkeypatch.setattr(torch, "compile", _fake_compile)
     compiled = maybe_compile_model(model, enabled=True)
 
     assert compiled is model
-    assert recorded["mode"] == "max-autotune"
+    assert recorded["mode"] == "reduce-overhead"
 
 
 def test_checkpoint_save_and_load_round_trip(tmp_path: Path) -> None:

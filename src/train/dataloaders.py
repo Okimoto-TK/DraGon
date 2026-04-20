@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import partial
 import random
 
 from torch.utils.data import BatchSampler, DataLoader, Dataset
@@ -9,11 +10,30 @@ from torch.utils.data import BatchSampler, DataLoader, Dataset
 from config.train import training
 from .dataset import AssembledNPZDataset
 
-from .collate import collate_network_batch
+from .collate import collate_network_batch, resolve_collate_chunk_size
+
+
+def _resolve_loader_parallelism(
+    *,
+    batch_size: int,
+    num_workers: int,
+    prefetch_factor: int,
+) -> tuple[int, int]:
+    """Keep host-side prefetch bounded when the batch itself is already large."""
+
+    if num_workers <= 0:
+        return 0, prefetch_factor
+    if batch_size >= 4096:
+        return min(num_workers, 4), 1
+    if batch_size >= 2048:
+        return min(num_workers, 6), 1
+    if batch_size >= 1024:
+        return min(num_workers, 8), min(prefetch_factor, 2)
+    return num_workers, prefetch_factor
 
 
 class FileLocalityBatchSampler(BatchSampler):
-    """Shuffle by file, then by sample within file, to keep batches I/O-local."""
+    """Build mostly sequential batches while allowing file boundaries to fill leftovers."""
 
     def __init__(
         self,
@@ -41,12 +61,18 @@ class FileLocalityBatchSampler(BatchSampler):
             start, end = self._file_ranges[file_id]
             file_indices = list(range(start, end))
             if self.shuffle:
-                random.shuffle(file_indices)
-            for sample_index in file_indices:
-                batch.append(sample_index)
-                if len(batch) == self.batch_size:
-                    yield batch
-                    batch = []
+                chunk_starts = list(range(0, len(file_indices), self.batch_size))
+                random.shuffle(chunk_starts)
+                shuffled_indices: list[int] = []
+                for chunk_start in chunk_starts:
+                    chunk_end = min(chunk_start + self.batch_size, len(file_indices))
+                    shuffled_indices.extend(file_indices[chunk_start:chunk_end])
+                file_indices = shuffled_indices
+
+            batch.extend(file_indices)
+            while len(batch) >= self.batch_size:
+                yield batch[: self.batch_size]
+                batch = batch[self.batch_size :]
 
         if batch and not self.drop_last:
             yield batch
@@ -67,12 +93,20 @@ def _build_loader(
     num_workers: int,
     prefetch_factor: int,
 ) -> DataLoader:
+    resolved_num_workers, resolved_prefetch_factor = _resolve_loader_parallelism(
+        batch_size=batch_size,
+        num_workers=num_workers,
+        prefetch_factor=prefetch_factor,
+    )
     loader_kwargs: dict[str, object] = {
         "dataset": dataset,
-        "num_workers": num_workers,
+        "num_workers": resolved_num_workers,
         "pin_memory": training.pin_memory,
-        "persistent_workers": training.persistent_workers and num_workers > 0,
-        "collate_fn": collate_network_batch,
+        "persistent_workers": training.persistent_workers and resolved_num_workers > 0,
+        "collate_fn": partial(
+            collate_network_batch,
+            chunk_size=resolve_collate_chunk_size(batch_size=batch_size),
+        ),
     }
     if isinstance(dataset, AssembledNPZDataset):
         loader_kwargs["batch_sampler"] = FileLocalityBatchSampler(
@@ -85,8 +119,8 @@ def _build_loader(
         loader_kwargs["batch_size"] = batch_size
         loader_kwargs["shuffle"] = shuffle
         loader_kwargs["drop_last"] = drop_last
-    if num_workers > 0:
-        loader_kwargs["prefetch_factor"] = prefetch_factor
+    if resolved_num_workers > 0:
+        loader_kwargs["prefetch_factor"] = resolved_prefetch_factor
     return DataLoader(**loader_kwargs)
 
 
@@ -101,7 +135,7 @@ def build_train_dataloader(
     return _build_loader(
         dataset,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=False,
         drop_last=True,
         num_workers=num_workers,
         prefetch_factor=training.prefetch_factor_train,

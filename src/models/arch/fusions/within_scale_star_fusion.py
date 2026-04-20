@@ -168,11 +168,15 @@ class WithinScaleSTARFusion(nn.Module):
                 "z_scale device mismatch: "
                 f"input device={z_scale.device}, module device={ref_param.device}."
             )
-        if z_scale.dtype != ref_param.dtype:
+        allowed_amp_dtypes = {torch.float16, torch.bfloat16, torch.float32}
+        if z_scale.dtype != ref_param.dtype and not (
+            ref_param.dtype == torch.float32 and z_scale.dtype in allowed_amp_dtypes
+        ):
             raise ValueError(
                 "z_scale dtype mismatch: "
                 f"input dtype={z_scale.dtype}, module dtype={ref_param.dtype}. "
-                "Move the module with `.to(...)` before calling forward."
+                "Expected matching dtypes, or an AMP/autocast input in "
+                "{torch.float16, torch.bfloat16, torch.float32} for float32 modules."
             )
 
         z = z_scale.permute(0, 3, 1, 2)

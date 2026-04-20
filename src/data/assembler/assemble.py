@@ -1,13 +1,22 @@
 import os
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor
+from pathlib import Path
 import zlib
 
 import numpy as np
 import polars as pl
 from numpy.lib.stride_tricks import sliding_window_view
 
-from config.data import assembled_dir, debug, label_schema_version as PACKED_LABEL_SCHEMA_VERSION, packed_min_files_per_code, processed_path, train_seed
+from config.data import (
+    assembled_dir,
+    assembled_target_shard_samples,
+    debug,
+    label_schema_version as PACKED_LABEL_SCHEMA_VERSION,
+    packed_min_files_per_code,
+    processed_path,
+    train_seed,
+)
 from src.data.registry.dataset import MACRO_LOOKBACK, MEZZO_LOOKBACK, MICRO_LOOKBACK, WARMUP_BARS
 
 
@@ -58,6 +67,18 @@ MEZZO_TOTAL_BARS = MEZZO_WINDOW_DAYS * MEZZO_BARS_PER_DAY                 # 16 *
 MICRO_TOTAL_BARS = MICRO_WINDOW_DAYS * MICRO_BARS_PER_DAY                 # 4 * 48 = 192
 
 _LABEL_NAMES_ARRAY = np.asarray(LABEL_COLS, dtype="<U32")
+_PACKED_DATA_KEYS = (
+    "date",
+    "label",
+    "macro",
+    "sidechain",
+    "mezzo",
+    "micro",
+    "macro_i8",
+    "mezzo_i8",
+    "micro_i8",
+)
+_MERGED_SHARD_PREFIX = "shard_"
 
 
 def _compute_sample_valid(step_valid: np.ndarray) -> np.ndarray:
@@ -254,6 +275,117 @@ def _write_packed_samples(code: str, float_data: np.ndarray, int8_data: np.ndarr
             mezzo_i8=payload["mezzo_i8"][order],
             micro_i8=payload["micro_i8"][order],
         )
+
+
+def _iter_source_packed_files() -> list[Path]:
+    return sorted(
+        path
+        for path in assembled_dir.glob("*.npz")
+        if not path.name.startswith(_MERGED_SHARD_PREFIX)
+    )
+
+
+def _clear_merged_shards() -> None:
+    for path in assembled_dir.glob(f"{_MERGED_SHARD_PREFIX}*.npz"):
+        path.unlink()
+
+
+def _read_packed_sample_count(path: Path) -> int:
+    with np.load(path, allow_pickle=False) as archive:
+        return int(np.asarray(archive["label"]).shape[0])
+
+
+def _write_merged_shard(shard_idx: int, shard_paths: list[str]) -> None:
+    buffer: dict[str, list[np.ndarray]] = {key: [] for key in _PACKED_DATA_KEYS}
+    sample_count = 0
+    for path_str in shard_paths:
+        path = Path(path_str)
+        with np.load(path, allow_pickle=False) as archive:
+            payload = {key: np.asarray(archive[key]) for key in _PACKED_DATA_KEYS}
+        count = int(payload["date"].shape[0])
+        if count <= 0:
+            path.unlink()
+            continue
+        for key, value in payload.items():
+            buffer[key].append(value)
+        sample_count += count
+        path.unlink()
+
+    if sample_count <= 0:
+        return
+
+    merged = {
+        key: np.concatenate(parts, axis=0) if len(parts) > 1 else parts[0]
+        for key, parts in buffer.items()
+    }
+    rng = np.random.default_rng(np.uint64(train_seed + shard_idx))
+    order = rng.permutation(sample_count)
+    shard_path = assembled_dir / f"{_MERGED_SHARD_PREFIX}{shard_idx:05d}.npz"
+    np.savez(
+        shard_path,
+        label_schema_version=np.asarray(PACKED_LABEL_SCHEMA_VERSION, dtype=np.int32),
+        label_names=_LABEL_NAMES_ARRAY,
+        **{key: value[order] for key, value in merged.items()},
+    )
+
+
+def _build_merged_shard_groups(
+    *,
+    source_paths: list[Path],
+    shard_target: int,
+) -> list[list[str]]:
+    rng = np.random.default_rng(train_seed)
+    shuffled_paths = [source_paths[idx] for idx in rng.permutation(len(source_paths))]
+    groups: list[list[str]] = []
+    current_group: list[str] = []
+    current_count = 0
+
+    for path in shuffled_paths:
+        sample_count = _read_packed_sample_count(path)
+        if sample_count <= 0:
+            path.unlink()
+            continue
+        if current_group and current_count + sample_count > shard_target:
+            groups.append(current_group)
+            current_group = []
+            current_count = 0
+        current_group.append(str(path))
+        current_count += sample_count
+
+    if current_group:
+        groups.append(current_group)
+    return groups
+
+
+def _merge_packed_files_into_shards(*, max_workers: int) -> None:
+    source_paths = _iter_source_packed_files()
+    _clear_merged_shards()
+    if not source_paths:
+        return
+
+    shard_target = max(1, int(assembled_target_shard_samples))
+    shard_groups = _build_merged_shard_groups(
+        source_paths=source_paths,
+        shard_target=shard_target,
+    )
+    if not shard_groups:
+        return
+
+    if debug or max_workers <= 1:
+        for shard_idx, shard_paths in enumerate(shard_groups):
+            _write_merged_shard(shard_idx, shard_paths)
+        return
+
+    ctx = mp.get_context("spawn")
+    worker_count = min(max_workers, len(shard_groups))
+    with ProcessPoolExecutor(max_workers=worker_count, mp_context=ctx) as executor:
+        for _ in executor.map(
+            _write_merged_shard,
+            range(len(shard_groups)),
+            shard_groups,
+            chunksize=1,
+        ):
+            pass
 
 
 def _scan_parquet(path: str | os.PathLike[str], columns: list[str]) -> pl.LazyFrame:
@@ -471,17 +603,17 @@ def assemble_all() -> None:
     if debug or max_workers <= 1:
         for code in all_codes:
             process_single_stock(code)
-        return
+    else:
+        from tqdm import tqdm
 
-    from tqdm import tqdm
-
-    ctx = mp.get_context("spawn")
-    chunksize = max(1, min(64, len(all_codes) // (max_workers * 4) or 1))
-    with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as executor:
-        for _ in tqdm(
-            executor.map(process_single_stock, all_codes, chunksize=chunksize),
-            total=len(all_codes),
-            desc="Assembling",
-            disable=debug,
-        ):
-            pass
+        ctx = mp.get_context("spawn")
+        chunksize = max(1, min(64, len(all_codes) // (max_workers * 4) or 1))
+        with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as executor:
+            for _ in tqdm(
+                executor.map(process_single_stock, all_codes, chunksize=chunksize),
+                total=len(all_codes),
+                desc="Assembling",
+                disable=debug,
+            ):
+                pass
+    _merge_packed_files_into_shards(max_workers=max_workers)

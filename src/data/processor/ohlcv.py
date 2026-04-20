@@ -15,6 +15,8 @@ from src.data.validators import validate_table
 _EPS = 1e-8
 _LIMIT_TOL = 1e-4
 _FEATURE_COUNT = 11
+_AMIHUD_CLAMP = 1e-3
+_VOL_FRACDIFF_CLAMP = 10.0
 
 
 def process_macro(
@@ -180,7 +182,7 @@ def _process_ohlcv(
         .clip(0.0, 1.0)
         .alias("f3_raw"),
         (pl.col("amount") / (amount_ma5 + _EPS)).clip(0.0, 10.0).alias("f4_raw"),
-        amihud_expr.alias("f5_raw"),
+        amihud_expr.clip(-_AMIHUD_CLAMP, _AMIHUD_CLAMP).alias("f5_raw"),
         ((pl.col("amount") + _EPS).log() - (amount_prev + _EPS).log()).alias(
             "_vol_ratio_log_raw"
         ),
@@ -246,8 +248,8 @@ def _process_ohlcv(
 
     df = df.with_columns([
         ret_fracdiff.alias("f8_raw"),
-        vol_fracdiff.alias("f9_raw"),
-        (ret_fracdiff - vol_fracdiff).alias("f10_raw"),
+        vol_fracdiff.clip(-_VOL_FRACDIFF_CLAMP, _VOL_FRACDIFF_CLAMP).alias("f9_raw"),
+        (ret_fracdiff - vol_fracdiff).clip(-_VOL_FRACDIFF_CLAMP, _VOL_FRACDIFF_CLAMP).alias("f10_raw"),
     ])
 
     cols_to_drop = [

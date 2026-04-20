@@ -278,11 +278,15 @@ class ModernTCNFiLMEncoder(nn.Module):
                 "x_float device mismatch: "
                 f"input device={x_float.device}, module device={ref_param.device}."
             )
-        if x_float.dtype != ref_param.dtype:
+        allowed_amp_dtypes = {torch.float16, torch.bfloat16, torch.float32}
+        if x_float.dtype != ref_param.dtype and not (
+            ref_param.dtype == torch.float32 and x_float.dtype in allowed_amp_dtypes
+        ):
             raise ValueError(
                 "x_float dtype mismatch: "
                 f"input dtype={x_float.dtype}, module dtype={ref_param.dtype}. "
-                "Move the module with `.to(...)` before calling forward."
+                "Expected matching dtypes, or an AMP/autocast input in "
+                "{torch.float16, torch.bfloat16, torch.float32} for float32 modules."
             )
         if x_state.device != ref_param.device:
             raise ValueError(

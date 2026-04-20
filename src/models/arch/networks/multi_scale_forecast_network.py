@@ -217,6 +217,7 @@ class MultiScaleForecastNetwork(nn.Module):
         self,
         batch: dict[str, torch.Tensor],
         return_aux: bool | None = None,
+        return_debug: bool = False,
     ) -> dict[str, torch.Tensor]:
         (
             macro_float_long,
@@ -243,23 +244,100 @@ class MultiScaleForecastNetwork(nn.Module):
         z_mezzo = self.encoder_mezzo(mezzo_float, mezzo_state, mezzo_pos)
         z_micro = self.encoder_micro(micro_float, micro_state, micro_pos)
 
-        _, scale_seq_macro = self.star_macro(z_macro)
-        _, scale_seq_mezzo = self.star_mezzo(z_mezzo)
-        _, scale_seq_micro = self.star_micro(z_micro)
+        z_macro_fused, scale_seq_macro = self.star_macro(z_macro)
+        z_mezzo_fused, scale_seq_mezzo = self.star_mezzo(z_mezzo)
+        z_micro_fused, scale_seq_micro = self.star_micro(z_micro)
 
         cond_seq, cond_global = self.conditioning_encoder(sidechain_cond)
         s1, g1, s2, g2, s3, g3 = self.side_memory_hierarchy(cond_seq, cond_global)
 
-        macro_fused, _ = self.bridge_macro(scale_seq_macro, s1, g1)
-        mezzo_fused, _ = self.bridge_mezzo(scale_seq_mezzo, s2, g2)
-        micro_fused, _ = self.bridge_micro(scale_seq_micro, s3, g3)
+        debug: dict[str, object] = {}
+        if return_debug:
+            macro_fused, _, bridge_macro_debug = self.bridge_macro(
+                scale_seq_macro,
+                s1,
+                g1,
+                return_debug=True,
+            )
+            mezzo_fused, _, bridge_mezzo_debug = self.bridge_mezzo(
+                scale_seq_mezzo,
+                s2,
+                g2,
+                return_debug=True,
+            )
+            micro_fused, _, bridge_micro_debug = self.bridge_micro(
+                scale_seq_micro,
+                s3,
+                g3,
+                return_debug=True,
+            )
+            debug["wavelet"] = {
+                "macro_raw_tail": macro_float_long[:, :, -64:],
+                "macro_denoised": macro_float,
+                "mezzo_raw_tail": mezzo_float_long[:, :, -96:],
+                "mezzo_denoised": mezzo_float,
+                "micro_raw_tail": micro_float_long[:, :, -144:],
+                "micro_denoised": micro_float,
+            }
+            debug["encoder"] = {
+                "macro": z_macro,
+                "mezzo": z_mezzo,
+                "micro": z_micro,
+            }
+            debug["within_scale"] = {
+                "macro_pre": z_macro,
+                "macro_post": z_macro_fused,
+                "macro_seq": scale_seq_macro,
+                "mezzo_pre": z_mezzo,
+                "mezzo_post": z_mezzo_fused,
+                "mezzo_seq": scale_seq_mezzo,
+                "micro_pre": z_micro,
+                "micro_post": z_micro_fused,
+                "micro_seq": scale_seq_micro,
+            }
+            debug["conditioning"] = {
+                "cond_seq": cond_seq,
+                "cond_global": cond_global,
+            }
+            debug["side_memory"] = {
+                "s1": s1,
+                "g1": g1,
+                "s2": s2,
+                "g2": g2,
+                "s3": s3,
+                "g3": g3,
+            }
+            debug["bridge"] = {
+                "macro": bridge_macro_debug,
+                "mezzo": bridge_mezzo_debug,
+                "micro": bridge_micro_debug,
+            }
+        else:
+            macro_fused, _ = self.bridge_macro(scale_seq_macro, s1, g1)
+            mezzo_fused, _ = self.bridge_mezzo(scale_seq_mezzo, s2, g2)
+            micro_fused, _ = self.bridge_micro(scale_seq_micro, s3, g3)
 
-        fused_latents, fused_global = self.cross_scale_fusion(
-            macro_seq=macro_fused,
-            mezzo_seq=mezzo_fused,
-            micro_seq=micro_fused,
-        )
-        pred_dict = self.multi_task_heads(fused_latents, fused_global)
+        if return_debug:
+            fused_latents, fused_global, cross_scale_debug = self.cross_scale_fusion(
+                macro_seq=macro_fused,
+                mezzo_seq=mezzo_fused,
+                micro_seq=micro_fused,
+                return_debug=True,
+            )
+            pred_dict = self.multi_task_heads(
+                fused_latents,
+                fused_global,
+                return_debug=True,
+            )
+            debug["cross_scale"] = cross_scale_debug
+            debug["heads"] = pred_dict.pop("_debug", {})
+        else:
+            fused_latents, fused_global = self.cross_scale_fusion(
+                macro_seq=macro_fused,
+                mezzo_seq=mezzo_fused,
+                micro_seq=micro_fused,
+            )
+            pred_dict = self.multi_task_heads(fused_latents, fused_global)
         out: dict[str, torch.Tensor] = {
             **pred_dict,
             "fused_latents": fused_latents,
@@ -284,14 +362,21 @@ class MultiScaleForecastNetwork(nn.Module):
                     "micro_fused": micro_fused,
                 }
             )
+        if return_debug:
+            out["_debug"] = debug
         return out
 
     def forward_loss(
         self,
         batch: dict[str, torch.Tensor],
         return_aux: bool = False,
+        return_debug: bool = False,
     ) -> dict[str, torch.Tensor]:
-        pred = self.forward(batch, return_aux=return_aux)
+        pred = self.forward(
+            batch,
+            return_aux=return_aux,
+            return_debug=return_debug,
+        )
         target_ret = self._require_key(batch, "target_ret")
         target_rv = self._require_key(batch, "target_rv")
         target_q = self._require_key(batch, "target_q")
@@ -312,18 +397,17 @@ class MultiScaleForecastNetwork(nn.Module):
             "pred_mu_ret": pred["pred_mu_ret"],
             "pred_mean_rv_raw": pred["pred_mean_rv_raw"],
             "pred_mu_q": pred["pred_mu_q"],
+            "pred_scale_ret_raw": pred["pred_scale_ret_raw"],
+            "pred_shape_rv_raw": pred["pred_shape_rv_raw"],
+            "pred_scale_q_raw": pred["pred_scale_q_raw"],
         }
         if return_aux:
             out.update(
                 {
                     "fused_latents": pred["fused_latents"],
                     "fused_global": pred["fused_global"],
-                    "s1": pred["s1"],
-                    "s2": pred["s2"],
-                    "s3": pred["s3"],
-                    "macro_fused": pred["macro_fused"],
-                    "mezzo_fused": pred["mezzo_fused"],
-                    "micro_fused": pred["micro_fused"],
                 }
             )
+        if return_debug and "_debug" in pred:
+            out["_debug"] = pred["_debug"]
         return out

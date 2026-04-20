@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import OrderedDict
 from pathlib import Path
 
 import numpy as np
@@ -57,16 +56,6 @@ def _validate_network_sample(sample: dict[str, np.ndarray]) -> None:
 
     for key, expected in NETWORK_SAMPLE_SHAPES.items():
         _ensure_shape(key, sample[key], expected)
-
-
-def _extract_sample_array(
-    archive: np.lib.npyio.NpzFile,
-    key: str,
-    local_index: int,
-) -> np.ndarray:
-    if key not in archive:
-        raise ValueError(f"Missing assembled key {key!r} in NPZ file.")
-    return np.asarray(archive[key][local_index])
 
 
 def _adapt_scale_float(
@@ -177,7 +166,8 @@ class AssembledNPZDataset(torch.utils.data.Dataset):
         self.mmap_mode = mmap_mode
         self.validate_shapes = bool(validate_shapes)
         self.max_open_archives = int(max_open_archives)
-        self._archive_cache: OrderedDict[int, np.lib.npyio.NpzFile] = OrderedDict()
+        self._loaded_file_id: int | None = None
+        self._loaded_payload: dict[str, np.ndarray] | None = None
         self._sample_index, self._file_sample_ranges = self._build_sample_index()
 
     def _build_sample_index(self) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
@@ -196,40 +186,40 @@ class AssembledNPZDataset(torch.utils.data.Dataset):
             raise ValueError("AssembledNPZDataset found zero samples.")
         return index, file_sample_ranges
 
-    def _get_archive(self, file_id: int) -> np.lib.npyio.NpzFile:
-        archive = self._archive_cache.get(file_id)
-        if archive is not None:
-            self._archive_cache.move_to_end(file_id)
-            return archive
+    def _load_file_payload(self, file_id: int) -> dict[str, np.ndarray]:
+        if self._loaded_file_id == file_id and self._loaded_payload is not None:
+            return self._loaded_payload
 
-        archive = np.load(
-            self.file_paths[file_id],
+        path = self.file_paths[file_id]
+        with np.load(
+            path,
             mmap_mode=self.mmap_mode,
             allow_pickle=False,
-        )
-        self._archive_cache[file_id] = archive
-        if len(self._archive_cache) > self.max_open_archives:
-            _, evicted = self._archive_cache.popitem(last=False)
-            evicted.close()
-        return archive
+        ) as archive:
+            payload = {
+                key: np.asarray(archive[key])
+                for key in REQUIRED_RAW_KEYS
+            }
+        self._loaded_file_id = file_id
+        self._loaded_payload = payload
+        return payload
 
     @property
     def file_sample_ranges(self) -> list[tuple[int, int]]:
         return list(self._file_sample_ranges)
 
     def close(self) -> None:
-        while self._archive_cache:
-            _, archive = self._archive_cache.popitem(last=False)
-            archive.close()
+        self._loaded_file_id = None
+        self._loaded_payload = None
 
     def __len__(self) -> int:
         return len(self._sample_index)
 
     def __getitem__(self, index: int) -> dict[str, np.ndarray]:
         file_id, local_index = self._sample_index[index]
-        archive = self._get_archive(file_id)
+        payload = self._load_file_payload(file_id)
         raw_sample = {
-            key: _extract_sample_array(archive, key, local_index) for key in REQUIRED_RAW_KEYS
+            key: np.asarray(payload[key][local_index]) for key in REQUIRED_RAW_KEYS
         }
 
         macro_float_long, macro_i8_long = _adapt_macro(raw_sample)

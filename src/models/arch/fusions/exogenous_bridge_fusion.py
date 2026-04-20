@@ -17,6 +17,7 @@ class ExogenousBridgeBlock(nn.Module):
         ffn_ratio: float,
         dropout: float = 0.0,
         _norm_eps: float = 1e-6,
+        _gate_floor: float = 0.1,
     ) -> None:
         super().__init__()
         if hidden_dim <= 0:
@@ -49,6 +50,10 @@ class ExogenousBridgeBlock(nn.Module):
             raise ValueError(
                 f"_norm_eps must be > 0, got {_norm_eps}. Valid range: (0, +inf)."
             )
+        if _gate_floor < 0 or _gate_floor >= 1:
+            raise ValueError(
+                f"_gate_floor must satisfy 0 <= _gate_floor < 1, got {_gate_floor}. Valid range: [0, 1)."
+            )
 
         self.hidden_dim = int(hidden_dim)
         self.exogenous_dim = int(exogenous_dim)
@@ -56,6 +61,7 @@ class ExogenousBridgeBlock(nn.Module):
         self.ffn_ratio = float(ffn_ratio)
         self.dropout = float(dropout)
         self._norm_eps = float(_norm_eps)
+        self._gate_floor = float(_gate_floor)
 
         self.exo_proj = nn.Linear(self.exogenous_dim, self.hidden_dim)
         self.exo_norm = nn.LayerNorm(self.hidden_dim, eps=self._norm_eps)
@@ -69,6 +75,7 @@ class ExogenousBridgeBlock(nn.Module):
             batch_first=True,
         )
 
+        self.global_gate_norm = nn.LayerNorm(self.exogenous_dim, eps=self._norm_eps)
         self.global_gate = nn.Linear(self.exogenous_dim, self.hidden_dim)
 
         _ffn_dim = int(self.hidden_dim * self.ffn_ratio)
@@ -86,7 +93,11 @@ class ExogenousBridgeBlock(nn.Module):
         endogenous_tokens: torch.Tensor,
         exogenous_tokens: torch.Tensor,
         exogenous_global: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        *,
+        return_debug: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor] | tuple[
+        torch.Tensor, torch.Tensor, dict[str, torch.Tensor]
+    ]:
         exo = self.exo_proj(exogenous_tokens)
         exo = self.exo_norm(exo)
 
@@ -94,10 +105,19 @@ class ExogenousBridgeBlock(nn.Module):
         bridge0 = endo_mean + self.bridge_token
 
         q = self.bridge_norm(bridge0)
-        bridge_delta, _ = self.cross_attn(q, exo, exo, need_weights=False)
+        bridge_delta, bridge_attn = self.cross_attn(
+            q,
+            exo,
+            exo,
+            need_weights=return_debug,
+            average_attn_weights=False,
+        )
         bridge1 = bridge0 + bridge_delta
 
-        gate = torch.sigmoid(self.global_gate(exogenous_global)).unsqueeze(1)
+        gate_logits = self.global_gate(self.global_gate_norm(exogenous_global))
+        gate = torch.sigmoid(gate_logits)
+        gate = self._gate_floor + (1.0 - self._gate_floor) * gate
+        gate = gate.unsqueeze(1)
 
         bridge_rep = bridge1.expand(-1, endogenous_tokens.shape[1], -1)
         fuse_in = torch.cat([endogenous_tokens, bridge_rep], dim=-1)
@@ -106,7 +126,18 @@ class ExogenousBridgeBlock(nn.Module):
         endogenous_out = endogenous_tokens + delta
 
         bridge_global = bridge1.squeeze(1)
-        return endogenous_out, bridge_global
+        if not return_debug:
+            return endogenous_out, bridge_global
+
+        debug = {
+            "bridge_token": bridge_global,
+            "gate": gate.squeeze(1),
+            "bridge_delta": bridge_delta.squeeze(1),
+            "fusion_delta": delta,
+        }
+        if bridge_attn is not None:
+            debug["bridge_attn_weights"] = bridge_attn.squeeze(2)
+        return endogenous_out, bridge_global, debug
 
 
 class ExogenousBridgeFusion(nn.Module):
@@ -121,6 +152,7 @@ class ExogenousBridgeFusion(nn.Module):
         num_layers: int = 1,
         dropout: float = 0.0,
         _norm_eps: float = 1e-6,
+        _gate_floor: float = 0.1,
     ) -> None:
         super().__init__()
         if hidden_dim <= 0:
@@ -157,6 +189,10 @@ class ExogenousBridgeFusion(nn.Module):
             raise ValueError(
                 f"_norm_eps must be > 0, got {_norm_eps}. Valid range: (0, +inf)."
             )
+        if _gate_floor < 0 or _gate_floor >= 1:
+            raise ValueError(
+                f"_gate_floor must satisfy 0 <= _gate_floor < 1, got {_gate_floor}. Valid range: [0, 1)."
+            )
 
         self.hidden_dim = int(hidden_dim)
         self.exogenous_dim = int(exogenous_dim)
@@ -165,6 +201,7 @@ class ExogenousBridgeFusion(nn.Module):
         self.num_layers = int(num_layers)
         self.dropout = float(dropout)
         self._norm_eps = float(_norm_eps)
+        self._gate_floor = float(_gate_floor)
 
         self.blocks = nn.ModuleList(
             [
@@ -175,6 +212,7 @@ class ExogenousBridgeFusion(nn.Module):
                     ffn_ratio=self.ffn_ratio,
                     dropout=self.dropout,
                     _norm_eps=self._norm_eps,
+                    _gate_floor=self._gate_floor,
                 )
                 for _ in range(self.num_layers)
             ]
@@ -185,7 +223,11 @@ class ExogenousBridgeFusion(nn.Module):
         endogenous_seq: torch.Tensor,
         exogenous_seq: torch.Tensor,
         exogenous_global: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        *,
+        return_debug: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor] | tuple[
+        torch.Tensor, torch.Tensor, dict[str, torch.Tensor]
+    ]:
         if endogenous_seq.ndim != 3:
             raise ValueError(
                 "endogenous_seq must have ndim == 3, "
@@ -242,12 +284,24 @@ class ExogenousBridgeFusion(nn.Module):
         endo = endogenous_seq.transpose(1, 2)
         exo = exogenous_seq.transpose(1, 2)
 
+        last_debug: dict[str, torch.Tensor] | None = None
         for block in self.blocks:
-            endo, bridge_global = block(
-                endogenous_tokens=endo,
-                exogenous_tokens=exo,
-                exogenous_global=exogenous_global,
-            )
+            if return_debug:
+                endo, bridge_global, last_debug = block(
+                    endogenous_tokens=endo,
+                    exogenous_tokens=exo,
+                    exogenous_global=exogenous_global,
+                    return_debug=True,
+                )
+            else:
+                endo, bridge_global = block(
+                    endogenous_tokens=endo,
+                    exogenous_tokens=exo,
+                    exogenous_global=exogenous_global,
+                )
 
         endogenous_fused = endo.transpose(1, 2)
-        return endogenous_fused, bridge_global
+        if not return_debug:
+            return endogenous_fused, bridge_global
+
+        return endogenous_fused, bridge_global, last_debug or {}

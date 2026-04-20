@@ -80,10 +80,16 @@ class CrossScaleFusionBlock(nn.Module):
         self,
         latents: torch.Tensor,
         scale_tokens: torch.Tensor,
-    ) -> torch.Tensor:
+        *,
+        return_debug: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
         q_cross = self.cross_norm(latents)
-        cross_delta, _ = self.cross_attn(
-            q_cross, scale_tokens, scale_tokens, need_weights=False
+        cross_delta, cross_attn_weights = self.cross_attn(
+            q_cross,
+            scale_tokens,
+            scale_tokens,
+            need_weights=return_debug,
+            average_attn_weights=False,
         )
         latents = latents + cross_delta
 
@@ -92,7 +98,15 @@ class CrossScaleFusionBlock(nn.Module):
         latents = latents + self_delta
 
         latents = latents + self.ffn(latents)
-        return latents
+        if not return_debug:
+            return latents
+
+        debug = {
+            "cross_attn_weights": cross_attn_weights,
+            "cross_delta": cross_delta,
+            "self_delta": self_delta,
+        }
+        return latents, debug
 
 
 class CrossScaleFusion(nn.Module):
@@ -151,10 +165,11 @@ class CrossScaleFusion(nn.Module):
         self.dropout = float(dropout)
         self._norm_eps = float(_norm_eps)
 
-        self.macro_scale_embedding = nn.Parameter(torch.zeros(1, 1, self.hidden_dim))
-        self.mezzo_scale_embedding = nn.Parameter(torch.zeros(1, 1, self.hidden_dim))
-        self.micro_scale_embedding = nn.Parameter(torch.zeros(1, 1, self.hidden_dim))
-        self.latents = nn.Parameter(torch.zeros(1, self.num_latents, self.hidden_dim))
+        self.macro_scale_embedding = nn.Parameter(torch.empty(1, 1, self.hidden_dim))
+        self.mezzo_scale_embedding = nn.Parameter(torch.empty(1, 1, self.hidden_dim))
+        self.micro_scale_embedding = nn.Parameter(torch.empty(1, 1, self.hidden_dim))
+        self.latents = nn.Parameter(torch.empty(1, self.num_latents, self.hidden_dim))
+        self.latent_id_embedding = nn.Parameter(torch.empty(1, self.num_latents, self.hidden_dim))
 
         self.blocks = nn.ModuleList(
             [
@@ -168,13 +183,26 @@ class CrossScaleFusion(nn.Module):
                 for _ in range(self.num_layers)
             ]
         )
+        self._reset_parameters()
+
+    def _reset_parameters(self) -> None:
+        init_std = 0.02
+        nn.init.normal_(self.macro_scale_embedding, mean=0.0, std=init_std)
+        nn.init.normal_(self.mezzo_scale_embedding, mean=0.0, std=init_std)
+        nn.init.normal_(self.micro_scale_embedding, mean=0.0, std=init_std)
+        nn.init.normal_(self.latents, mean=0.0, std=init_std)
+        nn.init.normal_(self.latent_id_embedding, mean=0.0, std=init_std)
 
     def forward(
         self,
         macro_seq: torch.Tensor,
         mezzo_seq: torch.Tensor,
         micro_seq: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        *,
+        return_debug: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor] | tuple[
+        torch.Tensor, torch.Tensor, dict[str, torch.Tensor]
+    ]:
         if macro_seq.ndim != 3:
             raise ValueError(
                 "macro_seq must have ndim == 3, "
@@ -245,10 +273,29 @@ class CrossScaleFusion(nn.Module):
 
         scale_tokens = torch.cat([macro, mezzo, micro], dim=1)
 
-        latents = self.latents.expand(scale_tokens.shape[0], -1, -1)
+        latents = self.latents + self.latent_id_embedding
+        latents = latents.expand(scale_tokens.shape[0], -1, -1)
+        last_debug: dict[str, torch.Tensor] | None = None
         for block in self.blocks:
-            latents = block(latents, scale_tokens)
+            if return_debug:
+                latents, last_debug = block(
+                    latents,
+                    scale_tokens,
+                    return_debug=True,
+                )
+            else:
+                latents = block(latents, scale_tokens)
 
         fused_latents = latents.transpose(1, 2)
         fused_global = latents.mean(dim=1)
-        return fused_latents, fused_global
+        if not return_debug:
+            return fused_latents, fused_global
+
+        debug = {
+            "latent_norms": latents.norm(dim=-1),
+            "scale_tokens": scale_tokens,
+            "scale_token_lengths": latents.new_tensor([n_macro, n_mezzo, n_micro]),
+        }
+        if last_debug is not None:
+            debug.update(last_debug)
+        return fused_latents, fused_global, debug

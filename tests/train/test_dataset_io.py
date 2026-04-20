@@ -32,7 +32,7 @@ class _FakeArchive:
         self.close()
 
 
-def test_dataset_lru_cache_closes_evicted_archives(monkeypatch) -> None:
+def test_dataset_keeps_only_current_file_payload(monkeypatch) -> None:
     sample_counts = {
         "a.npz": 2,
         "b.npz": 3,
@@ -53,18 +53,19 @@ def test_dataset_lru_cache_closes_evicted_archives(monkeypatch) -> None:
         max_open_archives=2,
     )
 
-    archive_a = dataset._get_archive(0)
-    archive_b = dataset._get_archive(1)
-    archive_c = dataset._get_archive(2)
+    payload_a = dataset._load_file_payload(0)
+    payload_b = dataset._load_file_payload(1)
+    payload_c = dataset._load_file_payload(2)
 
-    assert archive_a.closed is True
-    assert archive_b.closed is False
-    assert archive_c.closed is False
-    assert list(dataset._archive_cache) == [1, 2]
+    assert payload_a["label"].shape == (2, 2)
+    assert payload_b["label"].shape == (3, 2)
+    assert payload_c["label"].shape == (4, 2)
+    assert dataset._loaded_file_id == 2
+    assert dataset._loaded_payload is payload_c
 
     dataset.close()
-    assert archive_b.closed is True
-    assert archive_c.closed is True
+    assert dataset._loaded_file_id is None
+    assert dataset._loaded_payload is None
 
 
 def test_file_locality_batch_sampler_groups_indices_by_file_ranges() -> None:
@@ -85,3 +86,23 @@ def test_file_locality_batch_sampler_groups_indices_by_file_ranges() -> None:
     )
 
     assert list(sampler) == [[0, 1, 2, 3], [4, 5, 6, 7], [8]]
+
+
+def test_file_locality_batch_sampler_preserves_file_order_for_train_shards() -> None:
+    dataset = type(
+        "DummyDataset",
+        (),
+        {
+            "file_sample_ranges": [(0, 2), (2, 5), (5, 7)],
+            "__len__": lambda self: 7,
+        },
+    )()
+
+    sampler = FileLocalityBatchSampler(
+        dataset,
+        batch_size=3,
+        shuffle=False,
+        drop_last=True,
+    )
+
+    assert list(sampler) == [[0, 1, 2], [3, 4, 5]]

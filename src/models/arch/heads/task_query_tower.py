@@ -73,7 +73,9 @@ class TaskQueryTower(nn.Module):
         self,
         fused_latents: torch.Tensor,
         fused_global: torch.Tensor,
-    ) -> torch.Tensor:
+        *,
+        return_debug: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
         if fused_latents.ndim != 3:
             raise ValueError(
                 "fused_latents must have ndim == 3, "
@@ -114,7 +116,23 @@ class TaskQueryTower(nn.Module):
 
         q = self.q_norm(q0)
         kv = self.kv_norm(latents)
-        delta_attn, _ = self.cross_attn(q, kv, kv, need_weights=False)
+        delta_attn, attn_weights = self.cross_attn(
+            q,
+            kv,
+            kv,
+            need_weights=return_debug,
+            average_attn_weights=False,
+        )
         q1 = q0 + delta_attn
         q2 = q1 + self.ffn(self.ffn_norm(q1))
-        return q2.squeeze(1)
+        task_repr = q2.squeeze(1)
+        if not return_debug:
+            return task_repr
+
+        debug = {
+            "task_repr": task_repr,
+            "task_delta_attn": delta_attn.squeeze(1),
+        }
+        if attn_weights is not None:
+            debug["task_attn_weights"] = attn_weights.squeeze(2)
+        return task_repr, debug

@@ -80,6 +80,17 @@ def test_forward_aux_outputs_present() -> None:
     assert "macro_fused" in out and "mezzo_fused" in out and "micro_fused" in out
 
 
+def test_forward_loss_debug_outputs_present() -> None:
+    model = _make_model()
+    out = model.forward_loss(_make_batch(), return_debug=True)
+    assert "_debug" in out
+    debug = out["_debug"]
+    assert "wavelet" in debug
+    assert "bridge" in debug
+    assert "cross_scale" in debug
+    assert "heads" in debug
+
+
 def test_forward_missing_key_raises_value_error() -> None:
     model = _make_model()
     batch = _make_batch()
