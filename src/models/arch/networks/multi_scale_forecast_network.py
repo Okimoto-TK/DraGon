@@ -7,24 +7,24 @@ import torch.nn as nn
 
 from config.models import (
     conditioning_encoder,
-    cross_scale_fusion,
     exogenous_bridge_fusion,
     modern_tcn_film_encoder,
     multi_scale_forecast_network,
-    multi_task_heads,
-    multi_task_loss,
+    scale_context_bridge_fusion,
+    single_task_head,
+    single_task_loss,
     within_scale_star_fusion,
 )
 from src.models.arch.encoders import ConditioningEncoder
 from src.models.arch.encoders.modern_tcn_film_encoder import ModernTCNFiLMEncoder
 from src.models.arch.fusions import (
-    CrossScaleFusion,
     ExogenousBridgeFusion,
+    ScaleContextBridgeFusion,
     WithinScaleSTARFusion,
 )
-from src.models.arch.heads import MultiTaskHeads
+from src.models.arch.heads import SingleTaskHead
 from src.models.arch.layers.wavelet_denoise import WaveletDenoise1D
-from src.models.arch.losses import MultiTaskDistributionLoss
+from src.models.arch.losses import SingleTaskDistributionLoss
 from src.models.arch.networks.side_memory_hierarchy import SideMemoryHierarchy
 from src.models.config.hparams import (
     MULTI_SCALE_FORECAST_NETWORK_HPARAMS,
@@ -40,6 +40,7 @@ class MultiScaleForecastNetwork(nn.Module):
         hidden_dim: int = multi_scale_forecast_network.hidden_dim,
         cond_dim: int = multi_scale_forecast_network.cond_dim,
         num_latents: int = multi_scale_forecast_network.num_latents,
+        task: str = multi_scale_forecast_network.task,
         return_aux_default: bool = False,
     ) -> None:
         super().__init__()
@@ -53,6 +54,7 @@ class MultiScaleForecastNetwork(nn.Module):
         self.hidden_dim = int(hidden_dim)
         self.cond_dim = int(cond_dim)
         self.num_latents = int(num_latents)
+        self.task = task
         self.return_aux_default = bool(return_aux_default)
         self._hparams = MULTI_SCALE_FORECAST_NETWORK_HPARAMS
 
@@ -140,26 +142,23 @@ class MultiScaleForecastNetwork(nn.Module):
             dropout=exogenous_bridge_fusion.dropout,
         )
 
-        self.cross_scale_fusion = CrossScaleFusion(
+        self.cross_scale_fusion = ScaleContextBridgeFusion(
             hidden_dim=self.hidden_dim,
-            num_latents=self.num_latents,
-            num_heads=cross_scale_fusion.num_heads,
-            ffn_ratio=cross_scale_fusion.ffn_ratio,
-            num_layers=cross_scale_fusion.num_layers,
-            dropout=cross_scale_fusion.dropout,
+            num_heads=scale_context_bridge_fusion.num_heads,
+            ffn_ratio=scale_context_bridge_fusion.ffn_ratio,
+            num_layers=scale_context_bridge_fusion.num_layers,
+            dropout=scale_context_bridge_fusion.dropout,
         )
-        self.multi_task_heads = MultiTaskHeads(
+        self.single_task_head = SingleTaskHead(
+            task=self.task,
             hidden_dim=self.hidden_dim,
-            num_latents=self.num_latents,
-            tower_num_heads=multi_task_heads.tower_num_heads,
-            tower_ffn_ratio=multi_task_heads.tower_ffn_ratio,
-            tower_dropout=multi_task_heads.tower_dropout,
+            num_heads=single_task_head.num_heads,
+            ffn_ratio=single_task_head.ffn_ratio,
+            dropout=single_task_head.dropout,
         )
-        self.loss_fn = MultiTaskDistributionLoss(
-            q_tau=multi_task_loss.q_tau,
-            ret_loss_weight=multi_task_loss.ret_loss_weight,
-            rv_loss_weight=multi_task_loss.rv_loss_weight,
-            q_loss_weight=multi_task_loss.q_loss_weight,
+        self.loss_fn = SingleTaskDistributionLoss(
+            task=self.task,
+            q_tau=single_task_loss.q_tau,
             _eps=MULTI_TASK_LOSS_HPARAMS._eps,
             _nu_ret_init=MULTI_TASK_LOSS_HPARAMS._nu_ret_init,
             _nu_ret_min=MULTI_TASK_LOSS_HPARAMS._nu_ret_min,
@@ -318,30 +317,38 @@ class MultiScaleForecastNetwork(nn.Module):
             micro_fused, _ = self.bridge_micro(scale_seq_micro, s3, g3)
 
         if return_debug:
-            fused_latents, fused_global, cross_scale_debug = self.cross_scale_fusion(
+            micro_td, macro_ctx, mezzo_ctx, micro_ctx, cross_scale_debug = self.cross_scale_fusion(
                 macro_seq=macro_fused,
                 mezzo_seq=mezzo_fused,
                 micro_seq=micro_fused,
                 return_debug=True,
             )
-            pred_dict = self.multi_task_heads(
-                fused_latents,
-                fused_global,
+            pred_dict = self.single_task_head(
+                micro_td,
+                mezzo_ctx,
+                macro_ctx,
                 return_debug=True,
             )
             debug["cross_scale"] = cross_scale_debug
             debug["heads"] = pred_dict.pop("_debug", {})
         else:
-            fused_latents, fused_global = self.cross_scale_fusion(
+            micro_td, macro_ctx, mezzo_ctx, micro_ctx = self.cross_scale_fusion(
                 macro_seq=macro_fused,
                 mezzo_seq=mezzo_fused,
                 micro_seq=micro_fused,
             )
-            pred_dict = self.multi_task_heads(fused_latents, fused_global)
+            pred_dict = self.single_task_head(
+                micro_td,
+                mezzo_ctx,
+                macro_ctx,
+            )
         out: dict[str, torch.Tensor] = {
             **pred_dict,
-            "fused_latents": fused_latents,
-            "fused_global": fused_global,
+            "fused_latents": micro_td,
+            "fused_global": pred_dict["head_context"],
+            "macro_ctx": macro_ctx,
+            "mezzo_ctx": mezzo_ctx,
+            "micro_ctx": micro_ctx,
         }
 
         use_aux = self.return_aux_default if return_aux is None else bool(return_aux)
@@ -360,6 +367,7 @@ class MultiScaleForecastNetwork(nn.Module):
                     "macro_fused": macro_fused,
                     "mezzo_fused": mezzo_fused,
                     "micro_fused": micro_fused,
+                    "micro_td": micro_td,
                 }
             )
         if return_debug:
@@ -377,35 +385,44 @@ class MultiScaleForecastNetwork(nn.Module):
             return_aux=return_aux,
             return_debug=return_debug,
         )
-        target_ret = self._require_key(batch, "target_ret")
-        target_rv = self._require_key(batch, "target_rv")
-        target_q = self._require_key(batch, "target_q")
+        target_key = {
+            "ret": "target_ret",
+            "rv": "target_rv",
+            "q": "target_q",
+        }[self.task]
+        target = self._require_key(batch, target_key)
 
         loss = self.loss_fn(
-            target_ret=target_ret,
-            pred_mu_ret=pred["pred_mu_ret"],
-            pred_scale_ret_raw=pred["pred_scale_ret_raw"],
-            target_rv=target_rv,
-            pred_mean_rv_raw=pred["pred_mean_rv_raw"],
-            pred_shape_rv_raw=pred["pred_shape_rv_raw"],
-            target_q=target_q,
-            pred_mu_q=pred["pred_mu_q"],
-            pred_scale_q_raw=pred["pred_scale_q_raw"],
+            target=target,
+            pred_primary=pred["pred_primary"],
+            pred_aux_raw=pred["pred_aux_raw"],
         )
         out = {
             **loss,
-            "pred_mu_ret": pred["pred_mu_ret"],
-            "pred_mean_rv_raw": pred["pred_mean_rv_raw"],
-            "pred_mu_q": pred["pred_mu_q"],
-            "pred_scale_ret_raw": pred["pred_scale_ret_raw"],
-            "pred_shape_rv_raw": pred["pred_shape_rv_raw"],
-            "pred_scale_q_raw": pred["pred_scale_q_raw"],
+            "pred_primary": pred["pred_primary"],
+            "pred_aux_raw": pred["pred_aux_raw"],
+            "fused_latents": pred["fused_latents"],
+            "fused_global": pred["fused_global"],
+            "macro_ctx": pred["macro_ctx"],
+            "mezzo_ctx": pred["mezzo_ctx"],
+            "micro_ctx": pred["micro_ctx"],
         }
+        for name in (
+            "pred_mu_ret",
+            "pred_scale_ret_raw",
+            "pred_mean_rv_raw",
+            "pred_shape_rv_raw",
+            "pred_mu_q",
+            "pred_scale_q_raw",
+            "task_repr",
+            "head_context",
+        ):
+            if name in pred:
+                out[name] = pred[name]
         if return_aux:
             out.update(
                 {
-                    "fused_latents": pred["fused_latents"],
-                    "fused_global": pred["fused_global"],
+                    "micro_td": pred["fused_latents"],
                 }
             )
         if return_debug and "_debug" in pred:

@@ -32,6 +32,7 @@ class TrainingConfig:
     lr: float = 3e-4
     weight_decay: float = 1e-4
     max_grad_norm: float = 1.0
+    task: str = "ret"
     log_every: int = 50
     hist_every: int = 500
     viz_every: int = 1000

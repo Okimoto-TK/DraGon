@@ -97,13 +97,16 @@ def _compile_target(target, *, mode: str):
     )
 
 
-def build_model() -> torch.nn.Module:
+def build_model(
+    *,
+    task: str = multi_scale_forecast_network.task,
+) -> torch.nn.Module:
     """Instantiate the full forecast network with configured open parameters."""
 
     return MultiScaleForecastNetwork(
         hidden_dim=multi_scale_forecast_network.hidden_dim,
         cond_dim=multi_scale_forecast_network.cond_dim,
-        num_latents=multi_scale_forecast_network.num_latents,
+        task=task,
     )
 
 

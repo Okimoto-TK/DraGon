@@ -29,6 +29,7 @@ class Trainer:
         use_amp: bool = True,
         amp_dtype: str = "bfloat16",
         max_grad_norm: float = 1.0,
+        task: str = "ret",
         log_every: int = 50,
         save_every: int = 1,
         console_logger=None,
@@ -45,12 +46,14 @@ class Trainer:
         self.amp_dtype_name = amp_dtype
         self.amp_dtype = resolve_amp_dtype(amp_dtype)
         self.max_grad_norm = float(max_grad_norm)
+        self.task = getattr(model, "task", task)
         self.log_every = int(log_every)
         if save_every <= 0:
             raise ValueError(f"save_every must be > 0, got {save_every}.")
         self.save_every = int(save_every)
         self.console_logger = console_logger or EpochConsoleLogger(
-            log_every=self.log_every
+            log_every=self.log_every,
+            task=self.task,
         )
         self.wandb_logger = wandb_logger
 
@@ -108,11 +111,17 @@ class Trainer:
         self,
         output: dict[str, torch.Tensor],
     ) -> dict[str, float]:
+        task_loss = output.get("loss_task")
+        if task_loss is None:
+            legacy_key = f"loss_{self.task}"
+            if legacy_key not in output:
+                raise KeyError(
+                    f"Expected 'loss_task' or {legacy_key!r} in model output, got keys={tuple(output.keys())}."
+                )
+            task_loss = output[legacy_key]
         return {
             "loss_total": float(output["loss_total"].detach().float().cpu()),
-            "loss_ret": float(output["loss_ret"].detach().float().cpu()),
-            "loss_rv": float(output["loss_rv"].detach().float().cpu()),
-            "loss_q": float(output["loss_q"].detach().float().cpu()),
+            "loss_task": float(task_loss.detach().float().cpu()),
         }
 
     def _run_phase(
@@ -126,9 +135,7 @@ class Trainer:
         if loader is None:
             return {
                 "loss_total": float("nan"),
-                "loss_ret": float("nan"),
-                "loss_rv": float("nan"),
-                "loss_q": float("nan"),
+                "loss_task": float("nan"),
             }
 
         total_steps = len(loader)
@@ -142,9 +149,7 @@ class Trainer:
 
         aggregate = {
             "loss_total": torch.zeros((), device=self.device, dtype=torch.float32),
-            "loss_ret": torch.zeros((), device=self.device, dtype=torch.float32),
-            "loss_rv": torch.zeros((), device=self.device, dtype=torch.float32),
-            "loss_q": torch.zeros((), device=self.device, dtype=torch.float32),
+            "loss_task": torch.zeros((), device=self.device, dtype=torch.float32),
         }
 
         last_batch_end = time.perf_counter()

@@ -17,12 +17,38 @@ class WandbLoggerConfig:
     """Runtime knobs for W&B logging frequency and connectivity."""
 
     enabled: bool = False
+    task: str = "ret"
     log_every: int = 50
     hist_every: int = 500
     viz_every: int = 1000
     project: str | None = None
     group: str | None = None
     base_url: str | None = None
+
+
+@dataclass(frozen=True)
+class _FixedValBucketSpec:
+    name: str
+    title: str
+    lower_pct: float | None = None
+    upper_pct: float | None = None
+    lower_inclusive: bool = True
+    upper_inclusive: bool = False
+
+    def matches(self, value_pct: float) -> bool:
+        if self.lower_pct is not None:
+            if self.lower_inclusive:
+                if value_pct < self.lower_pct:
+                    return False
+            elif value_pct <= self.lower_pct:
+                return False
+        if self.upper_pct is not None:
+            if self.upper_inclusive:
+                if value_pct > self.upper_pct:
+                    return False
+            elif value_pct >= self.upper_pct:
+                return False
+        return True
 
 
 def _detach_float_tensor(value: torch.Tensor) -> torch.Tensor:
@@ -126,6 +152,61 @@ def _cosine(a: torch.Tensor, b: torch.Tensor, eps: float = 1e-6) -> float:
 class WandbVisualizationLogger:
     """Structured W&B logger with scalar, histogram, and low-frequency visual logs."""
 
+    _RET_FIXED_VAL_BUCKETS = (
+        _FixedValBucketSpec(
+            name="ret_le_neg10",
+            title="RET <= -10%",
+            upper_pct=-10.0,
+            upper_inclusive=True,
+        ),
+        _FixedValBucketSpec(
+            name="ret_neg10_to_neg5",
+            title="-10% < RET <= -5%",
+            lower_pct=-10.0,
+            lower_inclusive=False,
+            upper_pct=-5.0,
+            upper_inclusive=True,
+        ),
+        _FixedValBucketSpec(
+            name="ret_5_to_10",
+            title="5% <= RET < 10%",
+            lower_pct=5.0,
+            upper_pct=10.0,
+        ),
+        _FixedValBucketSpec(
+            name="ret_ge_10",
+            title="RET >= 10%",
+            lower_pct=10.0,
+        ),
+    )
+
+    # Default validation RV quartiles are roughly 1.53%, 2.13%, and 3.01%.
+    _RV_FIXED_VAL_BUCKETS = (
+        _FixedValBucketSpec(
+            name="rv_0_to_1_5",
+            title="0% <= RV < 1.5%",
+            lower_pct=0.0,
+            upper_pct=1.5,
+        ),
+        _FixedValBucketSpec(
+            name="rv_1_5_to_2_1",
+            title="1.5% <= RV < 2.1%",
+            lower_pct=1.5,
+            upper_pct=2.1,
+        ),
+        _FixedValBucketSpec(
+            name="rv_2_1_to_3_0",
+            title="2.1% <= RV < 3.0%",
+            lower_pct=2.1,
+            upper_pct=3.0,
+        ),
+        _FixedValBucketSpec(
+            name="rv_ge_3_0",
+            title="RV >= 3.0%",
+            lower_pct=3.0,
+        ),
+    )
+
     def __init__(
         self,
         *,
@@ -176,27 +257,68 @@ class WandbVisualizationLogger:
     def viz_every(self) -> int:
         return max(int(self.config.viz_every), int(self.hist_every))
 
-    @staticmethod
-    def _ret_bucket_name(ret_pct: float) -> str | None:
-        if ret_pct <= -10.0:
-            return "ret_le_neg10"
-        if -10.0 < ret_pct <= -5.0:
-            return "ret_neg10_to_neg5"
-        if 5.0 <= ret_pct < 10.0:
-            return "ret_5_to_10"
-        if ret_pct >= 10.0:
-            return "ret_ge_10"
+    @property
+    def task(self) -> str:
+        return str(self.config.task)
+
+    def _task_target_key(self) -> str:
+        return {
+            "ret": "target_ret",
+            "rv": "target_rv",
+            "q": "target_q",
+        }[self.task]
+
+    def _task_loss_metric_name(self) -> str:
+        return f"{self.task}_nll"
+
+    def _task_prediction_tensor(self, output: Mapping[str, torch.Tensor]) -> torch.Tensor | None:
+        if self.task == "ret":
+            value = output.get("pred_mu_ret")
+            if isinstance(value, torch.Tensor):
+                return value
+            value = output.get("pred_primary")
+            return value if isinstance(value, torch.Tensor) else None
+        if self.task == "rv":
+            value = output.get("pred_mean_rv_raw")
+            if not isinstance(value, torch.Tensor):
+                value = output.get("pred_primary")
+            if isinstance(value, torch.Tensor):
+                return F.softplus(value)
+            return None
+        value = output.get("pred_mu_q")
+        if isinstance(value, torch.Tensor):
+            return value
+        value = output.get("pred_primary")
+        return value if isinstance(value, torch.Tensor) else None
+
+    def _fixed_val_bucket_specs(self) -> tuple[_FixedValBucketSpec, ...]:
+        if self.task == "rv":
+            return self._RV_FIXED_VAL_BUCKETS
+        return self._RET_FIXED_VAL_BUCKETS
+
+    def _fixed_val_bucket_value_pct(self, sample: Mapping[str, object]) -> float | None:
+        key = "target_rv" if self.task == "rv" else "target_ret"
+        value = sample.get(key)
+        if value is None:
+            return None
+        return float(np.asarray(value, dtype=np.float32).reshape(-1)[0] * 100.0)
+
+    def _fixed_val_bucket_name(self, sample: Mapping[str, object]) -> str | None:
+        value_pct = self._fixed_val_bucket_value_pct(sample)
+        if value_pct is None:
+            return None
+        for spec in self._fixed_val_bucket_specs():
+            if spec.matches(value_pct):
+                return spec.name
         return None
 
-    @staticmethod
-    def _ret_bucket_title(bucket_name: str) -> str:
-        titles = {
-            "ret_le_neg10": "RET <= -10%",
-            "ret_neg10_to_neg5": "-10% < RET <= -5%",
-            "ret_5_to_10": "5% <= RET < 10%",
-            "ret_ge_10": "RET >= 10%",
-        }
-        return titles.get(bucket_name, bucket_name)
+    def _fixed_val_bucket_title(self, bucket_name: str) -> str:
+        if bucket_name == "fixed_val":
+            return "Fixed Val"
+        for spec in (*self._RET_FIXED_VAL_BUCKETS, *self._RV_FIXED_VAL_BUCKETS):
+            if spec.name == bucket_name:
+                return spec.title
+        return bucket_name
 
     @staticmethod
     def _unwrap_loader(loader):
@@ -228,18 +350,13 @@ class WandbVisualizationLogger:
         batch_size = int(batch_size or 1)
         if dataset is None or collate_fn is None:
             return
-
-        bucket_samples: dict[str, list[dict[str, np.ndarray]]] = {
-            "ret_le_neg10": [],
-            "ret_neg10_to_neg5": [],
-            "ret_5_to_10": [],
-            "ret_ge_10": [],
+        bucket_samples: dict[str, list[dict[str, object]]] = {
+            spec.name: [] for spec in self._fixed_val_bucket_specs()
         }
 
         for index in range(len(dataset)):
             sample = dataset[index]
-            ret_pct = float(np.asarray(sample["target_ret"]).reshape(-1)[0] * 100.0)
-            bucket_name = self._ret_bucket_name(ret_pct)
+            bucket_name = self._fixed_val_bucket_name(sample)
             if bucket_name is None:
                 continue
             if len(bucket_samples[bucket_name]) >= batch_size:
@@ -253,6 +370,16 @@ class WandbVisualizationLogger:
                 continue
             collated = collate_fn(samples)
             self._fixed_val_batches[bucket_name] = self._clone_batch_to_cpu(collated)
+
+        if self._fixed_val_batches:
+            return
+
+        sample_count = min(len(dataset), batch_size)
+        if sample_count <= 0:
+            return
+        fallback_samples = [dataset[index] for index in range(sample_count)]
+        fallback_batch = collate_fn(fallback_samples)
+        self._fixed_val_batches["fixed_val"] = self._clone_batch_to_cpu(fallback_batch)
 
     def get_fixed_val_batch(self) -> dict[str, torch.Tensor] | None:
         return None
@@ -393,17 +520,9 @@ class WandbVisualizationLogger:
         gpu_mem_alloc_mb: float,
     ) -> None:
         payload[_metric_key(split, "loss", name="total")] = _scalar(output["loss_total"])
-        payload[_metric_key(split, "loss", name="ret_nll")] = _scalar(output["loss_ret"])
-        payload[_metric_key(split, "loss", name="rv_nll")] = _scalar(output["loss_rv"])
-        payload[_metric_key(split, "loss", name="q_nll")] = _scalar(output["loss_q"])
-        share_ret, share_rv, share_q = _loss_shares(
-            output["loss_ret"],
-            output["loss_rv"],
-            output["loss_q"],
-        )
-        payload[_metric_key(split, "loss_share", name="ret")] = share_ret
-        payload[_metric_key(split, "loss_share", name="rv")] = share_rv
-        payload[_metric_key(split, "loss_share", name="q")] = share_q
+        task_loss = output.get("loss_task")
+        if isinstance(task_loss, torch.Tensor):
+            payload[_metric_key(split, "loss", name=self._task_loss_metric_name())] = _scalar(task_loss)
         payload[_metric_key(split, "optimizer", name="lr")] = lr
         payload[_metric_key(split, "health", name="global_param_norm")] = param_norm
         if grad_norm is not None:
@@ -438,12 +557,25 @@ class WandbVisualizationLogger:
             include_minmax=True,
         )
 
-        self._add_stats(payload, prefix=_section_name(split, "loss_params", "ret_sigma"), value=output["sigma_ret_pred"])
-        self._add_stats(payload, prefix=_section_name(split, "loss_params", "rv_sigma"), value=output["sigma_rv_pred"])
-        self._add_stats(payload, prefix=_section_name(split, "loss_params", "q_sigma"), value=output["sigma_q_pred"])
-        payload[_metric_key(split, "loss_params", name="ret_nu")] = _scalar(output["nu_ret"])
+        sigma_pred = output.get("sigma_pred")
+        if isinstance(sigma_pred, torch.Tensor):
+            self._add_stats(
+                payload,
+                prefix=_section_name(split, "loss_params", f"{self.task}_sigma"),
+                value=sigma_pred,
+            )
+        if "nu_ret" in output:
+            payload[_metric_key(split, "loss_params", name="ret_nu")] = _scalar(output["nu_ret"])
+        if "shape_rv" in output:
+            self._add_stats(
+                payload,
+                prefix=_section_name(split, "loss_params", "rv_shape"),
+                value=output["shape_rv"],
+            )
 
         for name in (
+            "pred_primary",
+            "pred_aux_raw",
             "pred_mu_ret",
             "pred_scale_ret_raw",
             "pred_mean_rv_raw",
@@ -559,38 +691,44 @@ class WandbVisualizationLogger:
 
         cross_scale = debug.get("cross_scale")
         if isinstance(cross_scale, Mapping):
-            cross_attn = cross_scale.get("cross_attn_weights")
-            latent_norms = cross_scale.get("latent_norms")
-            if isinstance(latent_norms, torch.Tensor):
-                for idx in range(latent_norms.shape[1]):
-                    payload[_metric_key(split, "cross_scale", name=f"latent_{idx:02d}_norm")] = _scalar(
-                        latent_norms[:, idx]
+            for name in ("macro_ctx", "mezzo_ctx", "micro_ctx"):
+                value = cross_scale.get(name)
+                if isinstance(value, torch.Tensor):
+                    payload[_metric_key(split, "cross_scale", name=f"{name}_l2_mean")] = _scalar(
+                        value.detach().float().norm(dim=-1)
                     )
-            if isinstance(cross_attn, torch.Tensor):
-                attn_mean = cross_attn.detach().float().mean(dim=(0, 1, 2))
-                payload[_metric_key(split, "cross_scale", name="latent_attn_to_macro")] = float(attn_mean[:16].sum().cpu())
-                payload[_metric_key(split, "cross_scale", name="latent_attn_to_mezzo")] = float(attn_mean[16:40].sum().cpu())
-                payload[_metric_key(split, "cross_scale", name="latent_attn_to_micro")] = float(attn_mean[40:].sum().cpu())
-                usage = cross_attn.detach().float().mean(dim=(0, 1, 3))
-                payload[_metric_key(split, "cross_scale", name="latent_usage_entropy")] = _distribution_entropy(
-                    usage / usage.sum().clamp_min(1e-12)
-                )
-                payload[_metric_key(split, "cross_scale", name="latent_usage_gini")] = _gini(usage)
+            for stage in ("macro_to_mezzo", "mezzo_to_micro"):
+                stage_debug = cross_scale.get(stage)
+                if not isinstance(stage_debug, Mapping):
+                    continue
+                gate = stage_debug.get("gate")
+                bridge_token = stage_debug.get("bridge_token")
+                fusion_delta = stage_debug.get("fusion_delta")
+                if isinstance(bridge_token, torch.Tensor):
+                    payload[_metric_key(split, "cross_scale", stage, name="bridge_token_l2_mean")] = _scalar(
+                        bridge_token.detach().float().norm(dim=-1)
+                    )
+                if isinstance(gate, torch.Tensor):
+                    payload[_metric_key(split, "cross_scale", stage, name="gate_mean")] = _scalar(gate)
+                    payload[_metric_key(split, "cross_scale", stage, name="gate_std")] = _std(gate)
+                    payload[_metric_key(split, "cross_scale", stage, name="gate_entropy")] = _binary_entropy(gate)
+                if isinstance(fusion_delta, torch.Tensor):
+                    payload[_metric_key(split, "cross_scale", stage, name="delta_l2")] = _scalar(
+                        fusion_delta.detach().float().norm(dim=-1)
+                    )
 
         heads = debug.get("heads")
         if isinstance(heads, Mapping):
-            reprs: dict[str, torch.Tensor] = {}
-            for task in ("ret", "rv", "q"):
-                task_repr = heads.get(f"{task}_task_repr")
-                if isinstance(task_repr, torch.Tensor):
-                    reprs[task] = task_repr
-                    payload[_metric_key(split, "heads", name=f"task_repr_{task}_l2")] = _scalar(
-                        task_repr.detach().float().norm(dim=-1)
-                    )
-            if len(reprs) == 3:
-                payload[_metric_key(split, "heads", name="cos_task_repr_ret_rv")] = _cosine(reprs["ret"], reprs["rv"])
-                payload[_metric_key(split, "heads", name="cos_task_repr_ret_q")] = _cosine(reprs["ret"], reprs["q"])
-                payload[_metric_key(split, "heads", name="cos_task_repr_rv_q")] = _cosine(reprs["rv"], reprs["q"])
+            task_repr = heads.get("task_repr")
+            if isinstance(task_repr, torch.Tensor):
+                payload[_metric_key(split, "heads", name=f"task_repr_{self.task}_l2")] = _scalar(
+                    task_repr.detach().float().norm(dim=-1)
+                )
+            head_context = heads.get("head_context")
+            if isinstance(head_context, torch.Tensor):
+                payload[_metric_key(split, "heads", name="head_context_l2")] = _scalar(
+                    head_context.detach().float().norm(dim=-1)
+                )
 
     def log_train_step(
         self,
@@ -638,15 +776,15 @@ class WandbVisualizationLogger:
 
         if self.should_log_histograms(global_step):
             for name in (
+                "pred_primary",
+                "pred_aux_raw",
                 "pred_mu_ret",
                 "pred_scale_ret_raw",
                 "pred_mean_rv_raw",
                 "pred_shape_rv_raw",
                 "pred_mu_q",
                 "pred_scale_q_raw",
-                "sigma_ret_pred",
-                "sigma_rv_pred",
-                "sigma_q_pred",
+                "sigma_pred",
             ):
                 if name in output:
                     hist = _histogram_bins(output[name])
@@ -670,19 +808,9 @@ class WandbVisualizationLogger:
         payload = {
             "trainer/epoch": epoch,
             _metric_key("val", "loss", name="total"): float(metrics["loss_total"]),
-            _metric_key("val", "loss", name="ret_nll"): float(metrics["loss_ret"]),
-            _metric_key("val", "loss", name="rv_nll"): float(metrics["loss_rv"]),
-            _metric_key("val", "loss", name="q_nll"): float(metrics["loss_q"]),
+            _metric_key("val", "loss", name=self._task_loss_metric_name()): float(metrics["loss_task"]),
             _metric_key("val", "optimizer", name="lr"): lr,
         }
-        share_ret, share_rv, share_q = _loss_shares(
-            float(metrics["loss_ret"]),
-            float(metrics["loss_rv"]),
-            float(metrics["loss_q"]),
-        )
-        payload[_metric_key("val", "loss_share", name="ret")] = share_ret
-        payload[_metric_key("val", "loss_share", name="rv")] = share_rv
-        payload[_metric_key("val", "loss_share", name="q")] = share_q
         self._log(payload, global_step=global_step)
 
     def log_fixed_val_snapshot(
@@ -698,7 +826,7 @@ class WandbVisualizationLogger:
             return
 
         payload: dict[str, object] = {"trainer/epoch": epoch}
-        bucket_title = self._ret_bucket_title(bucket_name)
+        bucket_title = self._fixed_val_bucket_title(bucket_name)
 
         def _to_np(value: torch.Tensor) -> np.ndarray:
             return value.detach().float().cpu().numpy()
@@ -773,76 +901,48 @@ class WandbVisualizationLogger:
 
             cross_scale = debug.get("cross_scale")
             if isinstance(cross_scale, Mapping):
-                cross_attn = cross_scale.get("cross_attn_weights")
-                lengths = cross_scale.get("scale_token_lengths")
-                if isinstance(cross_attn, torch.Tensor):
-                    attn = _to_np(cross_attn[sample_idx])
-                    rows = attn.reshape(attn.shape[0] * attn.shape[1], attn.shape[2])
-                    xticks = None
-                    xticklabels = None
-                    if isinstance(lengths, torch.Tensor):
-                        lens = lengths.detach().cpu().tolist()
-                        edges = np.cumsum([0, *[int(v) for v in lens]])
-                        xticks = [0, edges[1], edges[2], edges[3] - 1]
-                        xticklabels = ["macro", "mezzo", "micro", "end"]
-                    payload[_metric_key("viz", bucket_name, "cross_scale", name="latent_attention_heatmap")] = self._wandb.Image(
-                        self._build_heatmap_image(
-                            rows,
-                            title=f"{bucket_title} | Cross-Scale Latent Attention",
-                            xlabel="source token",
-                            ylabel="head x latent",
-                            xticks=xticks,
-                            xticklabels=xticklabels,
+                for stage in ("macro_to_mezzo", "mezzo_to_micro"):
+                    stage_debug = cross_scale.get(stage)
+                    if not isinstance(stage_debug, Mapping):
+                        continue
+                    gate = stage_debug.get("gate")
+                    if isinstance(gate, torch.Tensor):
+                        matrix = _to_np(gate[sample_idx].unsqueeze(1))
+                        payload[_metric_key("viz", bucket_name, "cross_scale", stage, name="gate_heatmap")] = self._wandb.Image(
+                            self._build_heatmap_image(
+                                matrix,
+                                title=f"{bucket_title} | {stage.replace('_', ' ').title()} Gate",
+                                xlabel="gate",
+                                ylabel="channel",
+                            )
                         )
-                    )
 
             heads = debug.get("heads")
             if isinstance(heads, Mapping):
-                task_rows: list[np.ndarray] = []
-                row_labels: list[str] = []
-                for task in ("ret", "rv", "q"):
-                    weights = heads.get(f"{task}_task_attn_weights")
-                    if isinstance(weights, torch.Tensor):
-                        task_attn = _to_np(weights[sample_idx].squeeze(1))
-                        task_rows.append(task_attn)
-                        row_labels.extend([f"{task}_h{idx}" for idx in range(task_attn.shape[0])])
-                if task_rows:
-                    matrix = np.concatenate(task_rows, axis=0)
+                weights = heads.get("task_attn_weights")
+                if isinstance(weights, torch.Tensor):
+                    task_attn = _to_np(weights[sample_idx].squeeze(1))
+                    row_labels = [f"{self.task}_h{idx}" for idx in range(task_attn.shape[0])]
                     payload[_metric_key("viz", bucket_name, "heads", name="task_attention_heatmap")] = self._wandb.Image(
                         self._build_heatmap_image(
-                            matrix,
+                            task_attn,
                             title=f"{bucket_title} | Task Query Attention",
-                            xlabel="latent",
-                            ylabel="task x head",
+                            xlabel="micro token",
+                            ylabel="head",
                             yticks=list(range(len(row_labels))),
                             yticklabels=row_labels,
                         )
                     )
 
-        ret_pred = _to_np(output["pred_mu_ret"])
-        rv_pred = _to_np(F.softplus(output["pred_mean_rv_raw"]))
-        q_pred = _to_np(output["pred_mu_q"])
-        payload[_metric_key("viz", bucket_name, "pred_ret", name="density_heatmap")] = self._wandb.Image(
-            self._build_density_scatter_image(
-                ret_pred,
-                _to_np(batch["target_ret"]),
-                title=f"{bucket_title} | RET Pred vs Target",
+        pred_tensor = self._task_prediction_tensor(output)
+        if isinstance(pred_tensor, torch.Tensor):
+            payload[_metric_key("viz", bucket_name, f"pred_{self.task}", name="density_heatmap")] = self._wandb.Image(
+                self._build_density_scatter_image(
+                    _to_np(pred_tensor),
+                    _to_np(batch[self._task_target_key()]),
+                    title=f"{bucket_title} | {self.task.upper()} Pred vs Target",
+                )
             )
-        )
-        payload[_metric_key("viz", bucket_name, "pred_rv", name="density_heatmap")] = self._wandb.Image(
-            self._build_density_scatter_image(
-                rv_pred,
-                _to_np(batch["target_rv"]),
-                title=f"{bucket_title} | RV Pred vs Target",
-            )
-        )
-        payload[_metric_key("viz", bucket_name, "pred_q", name="density_heatmap")] = self._wandb.Image(
-            self._build_density_scatter_image(
-                q_pred,
-                _to_np(batch["target_q"]),
-                title=f"{bucket_title} | Q Pred vs Target",
-            )
-        )
 
         self._log(payload, global_step=global_step)
 

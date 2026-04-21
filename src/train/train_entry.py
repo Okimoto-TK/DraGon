@@ -10,7 +10,7 @@ import torch
 
 from config.data import assembled_dir, checkpoint_dir as DEFAULT_CHECKPOINT_ROOT
 from config.data import train_seed as default_train_seed
-from config.models import multi_scale_forecast_network, multi_task_loss
+from config.models import multi_scale_forecast_network, single_task_loss
 from config.train import training
 from src.models.config.hparams import MULTI_SCALE_FORECAST_NETWORK_HPARAMS
 
@@ -91,6 +91,7 @@ def _resolve_checkpoint_runtime(
 
 def _build_wandb_run_config(
     *,
+    task: str,
     batch_size: int,
     lr: float,
     weight_decay: float,
@@ -98,10 +99,10 @@ def _build_wandb_run_config(
     compile_model: bool,
 ) -> dict[str, object]:
     return {
+        "model.task": task,
         "model.hidden_dim": multi_scale_forecast_network.hidden_dim,
         "model.cond_dim": multi_scale_forecast_network.cond_dim,
-        "model.num_latents": multi_scale_forecast_network.num_latents,
-        "model.q_tau": multi_task_loss.q_tau,
+        "model.q_tau": single_task_loss.q_tau,
         "data.macro_len": MULTI_SCALE_FORECAST_NETWORK_HPARAMS._macro_target_len,
         "data.mezzo_len": MULTI_SCALE_FORECAST_NETWORK_HPARAMS._mezzo_target_len,
         "data.micro_len": MULTI_SCALE_FORECAST_NETWORK_HPARAMS._micro_target_len,
@@ -111,9 +112,6 @@ def _build_wandb_run_config(
         "train.grad_clip": max_grad_norm,
         "train.compile": compile_model,
         "train.seed": default_train_seed,
-        "loss.ret_weight": multi_task_loss.ret_loss_weight,
-        "loss.rv_weight": multi_task_loss.rv_loss_weight,
-        "loss.q_weight": multi_task_loss.q_loss_weight,
     }
 
 
@@ -131,6 +129,7 @@ def run_training(
     lr: float = training.lr,
     weight_decay: float = training.weight_decay,
     max_grad_norm: float = training.max_grad_norm,
+    task: str = training.task,
     log_every: int = training.log_every,
     hist_every: int = training.hist_every,
     viz_every: int = training.viz_every,
@@ -150,6 +149,8 @@ def run_training(
     enable_console: bool = True,
 ) -> dict[str, Any]:
     """Run end-to-end training over assembled NPZ inputs."""
+
+    selected_task = task or training.task
 
     if train_files is None or val_files is None:
         default_train_files, default_val_files = _default_file_split()
@@ -209,13 +210,18 @@ def run_training(
         device=resolved_device,
         enabled=prefetch_enabled,
     )
-    model = build_model().to(resolved_device)
+    model = build_model(task=selected_task).to(resolved_device)
     optimizer = build_optimizer(model, lr=lr, weight_decay=weight_decay)
     scheduler = build_scheduler(optimizer)
-    console_logger = EpochConsoleLogger(log_every=log_every, enabled=enable_console)
+    console_logger = EpochConsoleLogger(
+        log_every=log_every,
+        enabled=enable_console,
+        task=selected_task,
+    )
     wandb_logger = WandbVisualizationLogger(
         config=WandbLoggerConfig(
             enabled=enable_wandb,
+            task=selected_task,
             log_every=log_every,
             hist_every=hist_every,
             viz_every=viz_every,
@@ -225,6 +231,7 @@ def run_training(
         ),
         run_name=resolved_run_name,
         run_config=_build_wandb_run_config(
+            task=selected_task,
             batch_size=batch_size,
             lr=lr,
             weight_decay=weight_decay,
@@ -242,6 +249,7 @@ def run_training(
         use_amp=use_amp,
         amp_dtype=amp_dtype,
         max_grad_norm=max_grad_norm,
+        task=selected_task,
         log_every=log_every,
         save_every=save_every,
         console_logger=console_logger,
@@ -281,4 +289,5 @@ def run_training(
         "global_step": trainer.global_step,
         "epochs_completed": len(trainer.history),
         "device": str(resolved_device),
+        "task": selected_task,
     }

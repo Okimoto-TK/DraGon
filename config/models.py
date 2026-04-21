@@ -78,6 +78,20 @@ cross_scale_fusion_hparams = CROSS_SCALE_FUSION_HPARAMS
 
 
 @dataclass(frozen=True)
+class ScaleContextBridgeFusionConfig:
+    """Open tuning parameters for macro -> mezzo -> micro context bridging."""
+
+    hidden_dim: int = 128
+    num_heads: int = 4
+    ffn_ratio: float = 2.0
+    num_layers: int = 1
+    dropout: float = 0.0
+
+
+scale_context_bridge_fusion = ScaleContextBridgeFusionConfig()
+
+
+@dataclass(frozen=True)
 class MultiTaskHeadsConfig:
     """Open tuning parameters for MultiTaskHeads."""
 
@@ -90,6 +104,19 @@ class MultiTaskHeadsConfig:
 
 multi_task_heads = MultiTaskHeadsConfig()
 multi_task_heads_hparams = MULTI_TASK_HEADS_HPARAMS
+
+
+@dataclass(frozen=True)
+class SingleTaskHeadConfig:
+    """Open tuning parameters for the selected task head."""
+
+    hidden_dim: int = 128
+    num_heads: int = 4
+    ffn_ratio: float = 2.0
+    dropout: float = 0.0
+
+
+single_task_head = SingleTaskHeadConfig()
 
 
 @dataclass(frozen=True)
@@ -107,12 +134,23 @@ multi_task_loss_hparams = MULTI_TASK_LOSS_HPARAMS
 
 
 @dataclass(frozen=True)
+class SingleTaskLossConfig:
+    """Open tuning parameters for SingleTaskDistributionLoss."""
+
+    q_tau: float = 0.05
+
+
+single_task_loss = SingleTaskLossConfig()
+
+
+@dataclass(frozen=True)
 class MultiScaleForecastNetworkConfig:
     """Open tuning parameters for MultiScaleForecastNetwork."""
 
     hidden_dim: int = 128
     cond_dim: int = 32
     num_latents: int = 8
+    task: str = "ret"
 
 
 multi_scale_forecast_network = MultiScaleForecastNetworkConfig()

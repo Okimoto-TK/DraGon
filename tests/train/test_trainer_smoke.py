@@ -68,7 +68,8 @@ def _write_minimal_npz(path: Path, samples: int = 4) -> Path:
 class _TinyTrainModel(nn.Module):
     def __init__(self) -> None:
         super().__init__()
-        self.proj = nn.Linear(1, 3)
+        self.task = "ret"
+        self.proj = nn.Linear(1, 2)
 
     def forward_loss(
         self,
@@ -77,17 +78,15 @@ class _TinyTrainModel(nn.Module):
     ) -> dict[str, torch.Tensor]:
         x = batch["macro_float_long"].mean(dim=(1, 2), keepdim=True)
         pred = self.proj(x.view(-1, 1))
-        pred_ret = pred[:, 0:1]
-        pred_rv = pred[:, 1:2]
-        pred_q = pred[:, 2:3]
-        loss_ret = ((pred_ret - batch["target_ret"]) ** 2).mean()
-        loss_rv = ((pred_rv - batch["target_rv"]) ** 2).mean()
-        loss_q = ((pred_q - batch["target_q"]) ** 2).mean()
+        pred_primary = pred[:, 0:1]
+        pred_aux_raw = pred[:, 1:2]
+        loss_task = ((pred_primary - batch["target_ret"]) ** 2).mean()
         return {
-            "loss_total": loss_ret + loss_rv + loss_q,
-            "loss_ret": loss_ret,
-            "loss_rv": loss_rv,
-            "loss_q": loss_q,
+            "loss_total": loss_task,
+            "loss_task": loss_task,
+            "pred_primary": pred_primary,
+            "pred_aux_raw": pred_aux_raw,
+            "fused_latents": batch["micro_float_long"],
         }
 
 
@@ -104,12 +103,7 @@ class _FakeWandbLogger:
         base_loader = loader.loader if hasattr(loader, "loader") else loader
         sample = base_loader.dataset[0]
         batch = base_loader.collate_fn([sample])
-        self.fixed_val_batches = {
-            "ret_le_neg10": batch,
-            "ret_neg10_to_neg5": batch,
-            "ret_5_to_10": batch,
-            "ret_ge_10": batch,
-        }
+        self.fixed_val_batches = {"fixed_val": batch}
 
     def get_fixed_val_batch(self) -> dict[str, torch.Tensor] | None:
         return None
@@ -259,7 +253,7 @@ def test_trainer_wandb_debug_fallback_does_not_require_model_support(tmp_path: P
     assert wandb_logger.captured is True
     assert wandb_logger.train_logs >= 1
     assert wandb_logger.val_logs == 1
-    assert wandb_logger.val_snapshots == 4
+    assert wandb_logger.val_snapshots == 1
 
 
 def test_trainer_logs_one_val_snapshot_per_epoch(tmp_path: Path) -> None:
@@ -288,7 +282,7 @@ def test_trainer_logs_one_val_snapshot_per_epoch(tmp_path: Path) -> None:
     trainer.fit(num_epochs=2)
 
     assert wandb_logger.val_logs == 2
-    assert wandb_logger.val_snapshots == 8
+    assert wandb_logger.val_snapshots == 2
 
 
 def test_compile_path_uses_reduce_overhead(monkeypatch: pytest.MonkeyPatch) -> None:

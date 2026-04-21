@@ -33,10 +33,12 @@ class EpochConsoleLogger:
         self,
         *,
         log_every: int,
+        task: str = "ret",
         enabled: bool = True,
         console: Console | None = None,
     ) -> None:
         self.log_every = int(log_every)
+        self.task = task
         self.enabled = bool(enabled)
         self.console = console or Console()
         self.progress = Progress(
@@ -114,9 +116,7 @@ class EpochConsoleLogger:
 
         metric_text = (
             f"loss={losses['loss_total']:.4f} "
-            f"ret={losses['loss_ret']:.4f} "
-            f"rv={losses['loss_rv']:.4f} "
-            f"q={losses['loss_q']:.4f} "
+            f"{self.task}={losses['loss_task']:.4f} "
             f"lr={lr:.2e}"
         )
         self.progress.update(
@@ -128,9 +128,7 @@ class EpochConsoleLogger:
             self.console.log(
                 f"phase={phase} epoch={epoch} step={step}/{total_steps} "
                 f"loss_total={losses['loss_total']:.6f} "
-                f"loss_ret={losses['loss_ret']:.6f} "
-                f"loss_rv={losses['loss_rv']:.6f} "
-                f"loss_q={losses['loss_q']:.6f} "
+                f"loss_{self.task}={losses['loss_task']:.6f} "
                 f"lr={lr:.6e} eta={_format_seconds(eta_seconds)}"
             )
 

@@ -78,6 +78,12 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="checkpoint",
         help="Resume from an explicit checkpoint file or checkpoint directory.",
     )
+    train_parser.add_argument(
+        "-t",
+        "--task",
+        choices=("ret", "rv", "q"),
+        help="Train a single selected task head: ret, rv, or q.",
+    )
 
     prepare_parser = subparsers.add_parser(
         "prepare",
@@ -118,6 +124,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             load_name=args.load_name,
             checkpoint=args.checkpoint,
             checkpoint_root=DEFAULT_CHECKPOINT_ROOT,
+            task=args.task,
         )
         print(result)
         return
