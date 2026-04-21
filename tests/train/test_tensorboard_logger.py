@@ -89,5 +89,5 @@ def test_tensorboard_logger_writes_grouped_scalars_without_sidechain_merge(
     assert "debug_train/head_head_context_l2_mean" in scalar_tags
     assert "debug_train/loss_sigma_pred_mean" in scalar_tags
     assert "debug_train/head_pred_primary_hist" in histogram_tags
-    assert "debug_train/feature_macro_activation_hist" in image_tags
+    assert "debug_train/feature_macro_activation_heatmap" in image_tags
     assert all("sidechain_merge" not in tag for tag in all_tags)

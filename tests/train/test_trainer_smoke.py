@@ -414,3 +414,48 @@ def test_resolve_checkpoint_runtime_for_name_and_load(tmp_path: Path) -> None:
     assert run_name == "resume"
     assert checkpoint_dir == checkpoint_root / "resume"
     assert resume_from == checkpoint_root / "resume" / "latest.pt"
+
+    run_name, checkpoint_dir, resume_from = _resolve_checkpoint_runtime(
+        checkpoint_root=checkpoint_root,
+        name="migrated",
+        load_name="resume",
+        checkpoint=None,
+    )
+    assert run_name == "migrated"
+    assert checkpoint_dir == checkpoint_root / "migrated"
+    assert resume_from == checkpoint_root / "resume" / "latest.pt"
+
+
+def test_resolve_checkpoint_runtime_for_name_and_checkpoint(tmp_path: Path) -> None:
+    checkpoint_root = tmp_path / "models" / "checkpoints"
+    source_dir = checkpoint_root / "source"
+    source_dir.mkdir(parents=True)
+    source_checkpoint = source_dir / "latest.pt"
+    source_checkpoint.write_bytes(b"ckpt")
+
+    run_name, checkpoint_dir, resume_from = _resolve_checkpoint_runtime(
+        checkpoint_root=checkpoint_root,
+        name="migrated",
+        load_name=None,
+        checkpoint=source_checkpoint,
+    )
+    assert run_name == "migrated"
+    assert checkpoint_dir == checkpoint_root / "migrated"
+    assert resume_from == source_checkpoint
+
+
+def test_resolve_checkpoint_runtime_rejects_load_and_checkpoint_together(
+    tmp_path: Path,
+) -> None:
+    checkpoint_root = tmp_path / "models" / "checkpoints"
+    checkpoint_path = checkpoint_root / "source" / "latest.pt"
+    checkpoint_path.parent.mkdir(parents=True)
+    checkpoint_path.write_bytes(b"ckpt")
+
+    with pytest.raises(ValueError, match="Only one of load_name or checkpoint"):
+        _resolve_checkpoint_runtime(
+            checkpoint_root=checkpoint_root,
+            name="migrated",
+            load_name="resume",
+            checkpoint=checkpoint_path,
+        )

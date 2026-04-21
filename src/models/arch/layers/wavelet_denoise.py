@@ -39,6 +39,7 @@ class WaveletDenoise1D(nn.Module):
         wavelet: str = WAVELET_DENOISE_HPARAMS._wavelet,
         level: int = WAVELET_DENOISE_HPARAMS._level,
         eps: float = WAVELET_DENOISE_HPARAMS._eps,
+        allow_backward: bool = True,
     ) -> None:
         super().__init__()
         if n_channels <= 0:
@@ -64,6 +65,7 @@ class WaveletDenoise1D(nn.Module):
         self._wavelet = str(wavelet)
         self._level = int(level)
         self._eps = float(eps)
+        self.allow_backward = bool(allow_backward)
 
         self.theta_detail = nn.Parameter(torch.zeros(self._level, self.n_channels))
         self.phi_detail = nn.Parameter(torch.zeros(self._level, self.n_channels))
@@ -77,8 +79,7 @@ class WaveletDenoise1D(nn.Module):
     def _soft_threshold(x: torch.Tensor, thr: torch.Tensor) -> torch.Tensor:
         return torch.sign(x) * F.relu(x.abs() - thr)
 
-    @_disable_for_compile
-    def forward(self, x_long: torch.Tensor) -> torch.Tensor:
+    def _forward_impl(self, x_long: torch.Tensor) -> torch.Tensor:
         if x_long.ndim != 3:
             raise ValueError(
                 f"x_long must have shape [B, C, T], got ndim={x_long.ndim}, "
@@ -148,3 +149,10 @@ class WaveletDenoise1D(nn.Module):
         y_long = y_long[..., -expected_t:]
         y = y_long[..., -self.target_len:]
         return y.to(device=x_long.device, dtype=compute_dtype)
+
+    @_disable_for_compile
+    def forward(self, x_long: torch.Tensor) -> torch.Tensor:
+        if self.allow_backward:
+            return self._forward_impl(x_long)
+        with torch.no_grad():
+            return self._forward_impl(x_long).detach()

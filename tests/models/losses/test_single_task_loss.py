@@ -47,6 +47,14 @@ def test_single_task_distribution_loss_uses_fp32_loss_math_only() -> None:
     assert out["loss_ret_weighted_nll"].dtype == torch.float32
 
 
+def test_single_task_distribution_loss_keeps_nu_ret_param_fp32_after_bf16_cast() -> None:
+    loss_fn = SingleTaskDistributionLoss(task="ret", q_tau=0.05)
+
+    loss_fn = loss_fn.to(dtype=torch.bfloat16)
+
+    assert loss_fn._nu_ret_raw.dtype == torch.float32
+
+
 def test_single_task_distribution_loss_ret_weighted_student_t_emphasizes_tail_samples() -> None:
     loss_fn = SingleTaskDistributionLoss(
         task="ret",

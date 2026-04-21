@@ -59,24 +59,24 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     train_parser = subparsers.add_parser("train", help="Train the forecast model")
-    mode_group = train_parser.add_mutually_exclusive_group(required=False)
-    mode_group.add_argument(
+    train_parser.add_argument(
         "-n",
         "--name",
         dest="run_name",
-        help="Create a new checkpoint directory under models/checkpoints/<name>.",
+        help="Write outputs to models/checkpoints/<name>. May be combined with --load/--checkpoint to migrate from an existing checkpoint into a new run directory.",
     )
-    mode_group.add_argument(
+    resume_group = train_parser.add_mutually_exclusive_group(required=False)
+    resume_group.add_argument(
         "-l",
         "--load",
         dest="load_name",
-        help="Resume from models/checkpoints/<name>/latest.pt.",
+        help="Resume from models/checkpoints/<name>/latest.pt. May be combined with --name to resume into a new run directory.",
     )
-    mode_group.add_argument(
+    resume_group.add_argument(
         "-c",
         "--checkpoint",
         dest="checkpoint",
-        help="Resume from an explicit checkpoint file or checkpoint directory.",
+        help="Resume from an explicit checkpoint file or checkpoint directory. May be combined with --name to resume into a new run directory.",
     )
     train_parser.add_argument(
         "-t",

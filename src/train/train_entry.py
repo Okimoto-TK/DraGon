@@ -55,11 +55,35 @@ def _resolve_checkpoint_runtime(
     load_name: str | None,
     checkpoint: str | Path | None,
 ) -> tuple[str, Path, Path | None]:
-    selected = sum(value is not None for value in (name, load_name, checkpoint))
-    if selected > 1:
-        raise ValueError("Only one of name, load_name, or checkpoint may be set.")
+    if load_name is not None and checkpoint is not None:
+        raise ValueError("Only one of load_name or checkpoint may be set.")
 
     checkpoint_root.mkdir(parents=True, exist_ok=True)
+
+    if name is not None:
+        run_name = name
+        checkpoint_dir = checkpoint_root / run_name
+        if checkpoint_dir.exists() and any(checkpoint_dir.iterdir()):
+            raise FileExistsError(
+                f"Checkpoint directory already exists and is not empty: {checkpoint_dir}"
+            )
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+        if checkpoint is not None:
+            checkpoint_path = Path(checkpoint)
+            resume_from = _resolve_resume_target(checkpoint_path)
+            if not resume_from.exists():
+                raise FileNotFoundError(f"Checkpoint path does not exist: {resume_from}")
+            return run_name, checkpoint_dir, resume_from
+
+        if load_name is not None:
+            source_checkpoint_dir = checkpoint_root / load_name
+            resume_from = source_checkpoint_dir / "latest.pt"
+            if not resume_from.exists():
+                raise FileNotFoundError(f"Named checkpoint latest not found: {resume_from}")
+            return run_name, checkpoint_dir, resume_from
+
+        return run_name, checkpoint_dir, None
 
     if checkpoint is not None:
         checkpoint_path = Path(checkpoint)

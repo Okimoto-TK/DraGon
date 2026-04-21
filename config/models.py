@@ -31,6 +31,16 @@ conditioning_encoder = ConditioningEncoderConfig()
 
 
 @dataclass(frozen=True)
+class WaveletDenoiseConfig:
+    """Open tuning parameters for the wavelet front-end."""
+
+    backprop: bool = True
+
+
+wavelet_denoise = WaveletDenoiseConfig()
+
+
+@dataclass(frozen=True)
 class WithinScaleSTARFusionConfig:
     """Open tuning parameters for WithinScaleSTARFusion."""
 
@@ -156,6 +166,19 @@ class SingleTaskLossConfig:
 
 
 single_task_loss = SingleTaskLossConfig()
+
+
+@dataclass(frozen=True)
+class FeatureChannelDropoutConfig:
+    """Open tuning parameters for input feature-channel dropout."""
+
+    macro_p: float = 0.05
+    mezzo_p: float = 0.03
+    micro_p: float = 0.03
+    macro_mf_main_amount_log_p: float = 0.25
+
+
+feature_channel_dropout = FeatureChannelDropoutConfig()
 
 
 @dataclass(frozen=True)

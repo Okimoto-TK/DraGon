@@ -110,3 +110,17 @@ def test_wavelet_denoise_invalid_input_length_raises_value_error(
 
     with pytest.raises(ValueError, match="shape mismatch"):
         _ = module(x_bad)
+
+
+def test_wavelet_denoise_can_disable_backward_graph(patch_ptwt: None) -> None:
+    module = wd.WaveletDenoise1D(
+        n_channels=3,
+        target_len=16,
+        warmup_len=8,
+        allow_backward=False,
+    )
+    x = torch.randn(2, 3, 24, requires_grad=True)
+
+    y = module(x)
+
+    assert not y.requires_grad

@@ -7,10 +7,12 @@ import torch.nn as nn
 
 from config.models import (
     adaln_zero_topdown_fusion,
+    feature_channel_dropout,
     modern_tcn_film_encoder,
     multi_scale_forecast_network,
     single_task_head,
     single_task_loss,
+    wavelet_denoise,
     within_scale_star_fusion,
 )
 from src.models.arch.encoders.modern_tcn_film_encoder import ModernTCNFiLMEncoder
@@ -19,6 +21,7 @@ from src.models.arch.fusions import (
     WithinScaleSTARFusion,
 )
 from src.models.arch.heads import SingleTaskHead
+from src.models.arch.layers import FeatureChannelDropout1D
 from src.models.arch.layers.wavelet_denoise import WaveletDenoise1D
 from src.models.arch.losses import SingleTaskDistributionLoss
 from src.models.config.hparams import (
@@ -61,16 +64,34 @@ class MultiScaleForecastNetwork(nn.Module):
             n_channels=modern_tcn_film_encoder["macro"].num_features,
             target_len=self._hparams._macro_target_len,
             warmup_len=self._hparams._macro_warmup_len,
+            allow_backward=wavelet_denoise.backprop,
         )
         self.denoise_mezzo = WaveletDenoise1D(
             n_channels=modern_tcn_film_encoder["mezzo"].num_features,
             target_len=self._hparams._mezzo_target_len,
             warmup_len=self._hparams._mezzo_warmup_len,
+            allow_backward=wavelet_denoise.backprop,
         )
         self.denoise_micro = WaveletDenoise1D(
             n_channels=modern_tcn_film_encoder["micro"].num_features,
             target_len=self._hparams._micro_target_len,
             warmup_len=self._hparams._micro_warmup_len,
+            allow_backward=wavelet_denoise.backprop,
+        )
+        self.dropout_macro_input = FeatureChannelDropout1D(
+            num_channels=self._macro_input_features,
+            p=feature_channel_dropout.macro_p,
+            special_channel_ps={
+                16: feature_channel_dropout.macro_mf_main_amount_log_p,
+            },
+        )
+        self.dropout_mezzo_input = FeatureChannelDropout1D(
+            num_channels=modern_tcn_film_encoder["mezzo"].num_features,
+            p=feature_channel_dropout.mezzo_p,
+        )
+        self.dropout_micro_input = FeatureChannelDropout1D(
+            num_channels=modern_tcn_film_encoder["micro"].num_features,
+            p=feature_channel_dropout.micro_p,
         )
 
         macro_encoder_kwargs = modern_tcn_film_encoder["macro"].__dict__.copy()
@@ -235,6 +256,9 @@ class MultiScaleForecastNetwork(nn.Module):
         mezzo_float = self.denoise_mezzo(mezzo_float_long)
         micro_float = self.denoise_micro(micro_float_long)
         macro_input = torch.cat([macro_float, sidechain_cond], dim=1)
+        macro_input = self.dropout_macro_input(macro_input)
+        mezzo_float = self.dropout_mezzo_input(mezzo_float)
+        micro_float = self.dropout_micro_input(micro_float)
 
         macro_state = macro_i8_long[:, 0, -64:].long()
         macro_pos = macro_i8_long[:, 1, -64:].long()

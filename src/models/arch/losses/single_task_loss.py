@@ -102,6 +102,16 @@ class SingleTaskDistributionLoss(nn.Module):
             / (self.q_tau * self.q_tau * (1.0 - self.q_tau) * (1.0 - self.q_tau))
         )
 
+    def _apply(self, fn):
+        super()._apply(fn)
+        # Keep the global Student-T degrees-of-freedom parameter in FP32 so
+        # tiny AdamW updates are not quantized away when the rest of the model
+        # runs in BF16.
+        self._nu_ret_raw.data = self._nu_ret_raw.data.to(dtype=torch.float32)
+        if self._nu_ret_raw.grad is not None:
+            self._nu_ret_raw.grad.data = self._nu_ret_raw.grad.data.to(dtype=torch.float32)
+        return self
+
     def forward(
         self,
         *,

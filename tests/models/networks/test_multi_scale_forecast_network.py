@@ -126,3 +126,9 @@ def test_forward_train_and_eval_both_run() -> None:
     out_eval = model(batch)
     assert out_train["fused_latents"].shape == (2, 128, 36)
     assert out_eval["fused_latents"].shape == (2, 128, 36)
+
+
+def test_macro_targeted_feature_dropout_configuration_present() -> None:
+    model = _make_model(task="ret")
+    assert model.dropout_macro_input.channel_ps.shape == (22,)
+    assert float(model.dropout_macro_input.channel_ps[16]) > float(model.dropout_macro_input.channel_ps[15])

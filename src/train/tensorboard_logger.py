@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 import math
 from pathlib import Path
 
@@ -31,6 +32,8 @@ class TensorBoardLogger:
         self.enabled = bool(enabled)
         self.debug_every = int(debug_every)
         self.flush_secs = int(flush_secs)
+        self._feature_heatmap_window = 32
+        self._feature_history: dict[tuple[str, str, str], deque[tuple[int, np.ndarray]]] = {}
         self.writer: SummaryWriter | None = None
         if self.enabled:
             self.log_dir.mkdir(parents=True, exist_ok=True)
@@ -128,7 +131,7 @@ class TensorBoardLogger:
                         float(value),
                         global_step,
                     )
-        self._log_feature_activation_histograms(
+        self._log_feature_activation_heatmaps(
             phase=phase,
             global_step=global_step,
             output=output,
@@ -261,7 +264,7 @@ class TensorBoardLogger:
                     global_step,
                 )
 
-    def _log_feature_activation_histograms(
+    def _log_feature_activation_heatmaps(
         self,
         *,
         phase: str,
@@ -278,24 +281,81 @@ class TensorBoardLogger:
                 continue
             pre_np = pre.detach().float().cpu().reshape(-1).numpy()
             post_np = post.detach().float().cpu().reshape(-1).numpy()
-            channels = np.arange(pre_np.size, dtype=np.int64)
-            fig, ax = plt.subplots(figsize=(8, 3.5), dpi=140)
-            width = 0.42
-            ax.bar(channels - width / 2.0, pre_np, width=width, label="pre", alpha=0.75)
-            ax.bar(channels + width / 2.0, post_np, width=width, label="post", alpha=0.75)
-            ax.set_xlabel("feature_channel")
-            ax.set_ylabel("activation_rms")
-            ax.set_title(f"{phase} {scale} feature activation")
-            ax.set_xticks(channels)
-            ax.grid(axis="y", alpha=0.2)
-            ax.legend(loc="upper right")
+            delta_np = post_np - pre_np
+            pre_hist = self._append_feature_history(
+                phase=phase,
+                scale=scale,
+                kind="pre",
+                global_step=global_step,
+                values=pre_np,
+            )
+            post_hist = self._append_feature_history(
+                phase=phase,
+                scale=scale,
+                kind="post",
+                global_step=global_step,
+                values=post_np,
+            )
+            delta_hist = self._append_feature_history(
+                phase=phase,
+                scale=scale,
+                kind="delta",
+                global_step=global_step,
+                values=delta_np,
+            )
+            stack = [pre_hist, post_hist, delta_hist]
+            labels = ["pre", "post", "delta"]
+            fig, axes = plt.subplots(
+                nrows=3,
+                ncols=1,
+                figsize=(max(8, stack[0].shape[1] * 0.35), 5.4),
+                dpi=140,
+                sharex=True,
+            )
+            for ax, row, label in zip(axes, stack, labels, strict=True):
+                cmap = "viridis" if label != "delta" else "coolwarm"
+                im = ax.imshow(row, aspect="auto", interpolation="nearest", cmap=cmap, origin="lower")
+                ax.set_ylabel(f"{label}\nchannel")
+                x_ticks = np.arange(row.shape[1], dtype=np.int64)
+                ax.set_xticks(x_ticks)
+                ax.set_xticklabels(self._feature_history_steps(phase=phase, scale=scale, kind=label), rotation=45, ha="right")
+                fig.colorbar(im, ax=ax, fraction=0.03, pad=0.02)
+            axes[-1].set_xlabel("logged_step")
+            fig.suptitle(f"{phase} {scale} feature activation")
             fig.tight_layout()
             self.writer.add_figure(
-                self._tag(f"debug_{phase}", f"feature_{scale}_activation_hist"),
+                self._tag(f"debug_{phase}", f"feature_{scale}_activation_heatmap"),
                 fig,
                 global_step,
             )
             plt.close(fig)
+
+    def _append_feature_history(
+        self,
+        *,
+        phase: str,
+        scale: str,
+        kind: str,
+        global_step: int,
+        values: np.ndarray,
+    ) -> np.ndarray:
+        key = (phase, scale, kind)
+        history = self._feature_history.setdefault(
+            key,
+            deque(maxlen=self._feature_heatmap_window),
+        )
+        history.append((global_step, values.astype(np.float32, copy=True)))
+        return np.stack([item[1] for item in history], axis=1)
+
+    def _feature_history_steps(
+        self,
+        *,
+        phase: str,
+        scale: str,
+        kind: str,
+    ) -> list[str]:
+        history = self._feature_history.get((phase, scale, kind), ())
+        return [str(item[0]) for item in history]
 
     def _add_basic_stats(
         self,
