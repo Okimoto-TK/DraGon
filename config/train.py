@@ -20,13 +20,15 @@ def _default_num_workers() -> int:
 class TrainingConfig:
     """Open tuning parameters for the training stack."""
 
-    batch_size: int = 1536
-    val_batch_size: int = 1536
+    batch_size: int = 2048
+    val_batch_size: int = 2048
     num_workers: int = field(default_factory=_default_num_workers)
     pin_memory: bool = True
     persistent_workers: bool = True
     prefetch_factor_train: int = 4
     prefetch_factor_val: int = 2
+    device_prefetch: bool = True
+    device_prefetch_batches: int = 4
     mmap_mode: str | None = None
     max_open_archives: int = 16
     lr: float = 3e-4
@@ -48,7 +50,7 @@ class TrainingConfig:
     dynamo_accumulated_recompile_limit: int = 2048
     amp_dtype: str = "bfloat16"
     allow_tf32: bool = True
-    cudnn_benchmark: bool = False
+    cudnn_benchmark: bool = True
 
 
 training = TrainingConfig()

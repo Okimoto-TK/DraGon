@@ -140,6 +140,8 @@ def run_training(
     use_amp: bool = True,
     mmap_mode: str | None = training.mmap_mode,
     validate_shapes: bool = True,
+    device_prefetch: bool = training.device_prefetch,
+    device_prefetch_batches: int = training.device_prefetch_batches,
     enable_console: bool = True,
 ) -> dict[str, Any]:
     """Run end-to-end training over assembled NPZ inputs."""
@@ -192,20 +194,19 @@ def run_training(
         compile_mode=compile_mode,
     )
     model_dtype = resolve_amp_dtype(amp_dtype)
-    # CUDA graph capture in torch.compile can be invalidated by our explicit
-    # prefetch stream issuing overlapping H2D copies on another stream.
-    prefetch_enabled = not compile_model
     train_loader = maybe_prefetch_loader(
         train_loader,
         device=resolved_device,
-        enabled=prefetch_enabled,
+        enabled=device_prefetch,
         float_dtype=model_dtype if model_dtype in {torch.bfloat16, torch.float16} else None,
+        num_prefetch_batches=device_prefetch_batches,
     )
     val_loader = maybe_prefetch_loader(
         val_loader,
         device=resolved_device,
-        enabled=prefetch_enabled,
+        enabled=device_prefetch,
         float_dtype=model_dtype if model_dtype in {torch.bfloat16, torch.float16} else None,
+        num_prefetch_batches=device_prefetch_batches,
     )
     model = build_model(task=selected_task)
     if model_dtype in {torch.bfloat16, torch.float16}:

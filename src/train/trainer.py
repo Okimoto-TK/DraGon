@@ -134,22 +134,6 @@ class Trainer:
             if was_training:
                 self.model.train()
 
-    def _capture_feature_snapshot(
-        self,
-        batch: dict[str, torch.Tensor],
-    ) -> dict[str, torch.Tensor] | None:
-        was_training = self.model.training
-        self.model.eval()
-        try:
-            with torch.inference_mode():
-                with self._autocast_context():
-                    return self.model(batch, return_aux=True)
-        except TypeError:
-            return None
-        finally:
-            if was_training:
-                self.model.train()
-
     def _extract_log_losses(
         self,
         output: dict[str, torch.Tensor],
@@ -338,16 +322,9 @@ class Trainer:
                             else None
                         ),
                     )
-                    feature_output = self._capture_feature_snapshot(batch)
-                    if feature_output is not None:
-                        self.tensorboard_logger.log_debug_snapshot(
-                            phase=phase,
-                            global_step=self.global_step,
-                            output=feature_output,
-                        )
-
             if (
-                self.tensorboard_logger is not None
+                phase == "val"
+                and self.tensorboard_logger is not None
                 and self.tensorboard_logger.should_log_debug(
                     phase=phase,
                     global_step=self.global_step,

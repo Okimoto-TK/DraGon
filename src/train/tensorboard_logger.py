@@ -53,10 +53,11 @@ class TensorBoardLogger:
         global_step: int,
         step: int,
     ) -> bool:
+        del global_step
         if not self.enabled:
             return False
         if phase == "train":
-            return self.debug_every > 0 and global_step > 0 and global_step % self.debug_every == 0
+            return False
         return step == 1
 
     def log_step(

@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 from src.models.arch.embeddings import ConditionEmbedding1D
-from src.models.arch.layers import ChannelFFN1D, FiLM1D, Patch1D
+from src.models.arch.layers import AdaLayerNorm1DLast, ChannelFFN1DLast, Patch1D
 
 
 class ModernTCNFiLMBlock(nn.Module):
@@ -53,8 +53,11 @@ class ModernTCNFiLMBlock(nn.Module):
         self._padding = self.kernel_size // 2
         self._eps = 1e-5
 
-        self.norm1 = nn.LayerNorm(self.hidden_dim, eps=self._eps)
-        self.film1 = FiLM1D(hidden_dim=self.hidden_dim, cond_dim=self.cond_dim)
+        self.ada_norm1 = AdaLayerNorm1DLast(
+            self.hidden_dim,
+            cond_dim=self.cond_dim,
+            eps=self._eps,
+        )
         self.temporal_conv = nn.Conv1d(
             in_channels=self._in_channels,
             out_channels=self._out_channels,
@@ -64,19 +67,16 @@ class ModernTCNFiLMBlock(nn.Module):
             groups=self._groups,
         )
 
-        self.norm2 = nn.LayerNorm(self.hidden_dim, eps=self._eps)
-        self.film2 = FiLM1D(hidden_dim=self.hidden_dim, cond_dim=self.cond_dim)
-        self.ffn = ChannelFFN1D(
+        self.ada_norm2 = AdaLayerNorm1DLast(
+            self.hidden_dim,
+            cond_dim=self.cond_dim,
+            eps=self._eps,
+        )
+        self.ffn = ChannelFFN1DLast(
             hidden_dim=self.hidden_dim,
             ffn_ratio=self.ffn_ratio,
             dropout=self.dropout,
         )
-
-    def _apply_ln(self, ln: nn.LayerNorm, x: torch.Tensor) -> torch.Tensor:
-        x = x.transpose(1, 2)  # [Bf, N, D]
-        x = ln(x)
-        x = x.transpose(1, 2)  # [Bf, D, N]
-        return x
 
     def forward(
         self,
@@ -85,34 +85,37 @@ class ModernTCNFiLMBlock(nn.Module):
     ) -> torch.Tensor:
         if x.ndim != 3:
             raise ValueError(
-                f"x must have shape [Bf, hidden_dim, N], got ndim={x.ndim}, shape={tuple(x.shape)}."
+                f"x must have shape [Bf, N, hidden_dim], got ndim={x.ndim}, shape={tuple(x.shape)}."
             )
         if cond.ndim != 3:
             raise ValueError(
-                "cond must have shape [Bf, cond_dim, N], "
+                "cond must have shape [Bf, N, cond_dim], "
                 f"got ndim={cond.ndim}, shape={tuple(cond.shape)}."
             )
-        if x.shape[0] != cond.shape[0] or x.shape[-1] != cond.shape[-1]:
+        if x.shape[0] != cond.shape[0] or x.shape[1] != cond.shape[1]:
             raise ValueError(
                 "x/cond batch or patch mismatch: "
                 f"x shape={tuple(x.shape)}, cond shape={tuple(cond.shape)}."
             )
-        if x.shape[1] != self.hidden_dim:
+        if x.shape[-1] != self.hidden_dim:
             raise ValueError(
-                f"x hidden_dim mismatch: expected {self.hidden_dim}, got {x.shape[1]}."
+                f"x hidden_dim mismatch: expected {self.hidden_dim}, got {x.shape[-1]}."
             )
-        if cond.shape[1] != self.cond_dim:
+        if cond.shape[-1] != self.cond_dim:
             raise ValueError(
-                f"cond cond_dim mismatch: expected {self.cond_dim}, got {cond.shape[1]}."
+                f"cond cond_dim mismatch: expected {self.cond_dim}, got {cond.shape[-1]}."
             )
 
-        temporal_branch = self._apply_ln(self.norm1, x)
-        temporal_branch = self.film1(temporal_branch, cond)
+        x = x.contiguous()
+        cond = cond.contiguous()
+
+        temporal_branch = self.ada_norm1(x, cond)
+        temporal_branch = temporal_branch.transpose(1, 2).contiguous()
         temporal_branch = self.temporal_conv(temporal_branch)
+        temporal_branch = temporal_branch.transpose(1, 2)
         x = x + temporal_branch
 
-        ffn_branch = self._apply_ln(self.norm2, x)
-        ffn_branch = self.film2(ffn_branch, cond)
+        ffn_branch = self.ada_norm2(x, cond)
         ffn_branch = self.ffn(ffn_branch)
         x = x + ffn_branch
 
@@ -300,11 +303,11 @@ class ModernTCNFiLMEncoder(nn.Module):
             )
 
         x = x_float.reshape(batch_size * num_features, 1, seq_len)
-        z = self.patch(x)
-        cond = self.condition_embedding(x_state, x_pos)
+        z = self.patch(x).transpose(1, 2).contiguous()
+        cond = self.condition_embedding(x_state, x_pos).transpose(1, 2).contiguous()
 
         for block in self.blocks:
             z = block(z, cond)
 
-        z = z.view(batch_size, num_features, self.hidden_dim, self._num_patches)
+        z = z.transpose(1, 2).view(batch_size, num_features, self.hidden_dim, self._num_patches)
         return z

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Callable, Mapping
 from functools import partial
 from typing import Any
@@ -199,10 +200,14 @@ class DevicePrefetchLoader:
         *,
         device: torch.device,
         float_dtype: torch.dtype | None = None,
+        num_prefetch_batches: int = 1,
     ) -> None:
         self.loader = loader
         self.device = device
         self.float_dtype = float_dtype
+        if num_prefetch_batches < 1:
+            raise ValueError("num_prefetch_batches must be at least 1.")
+        self.num_prefetch_batches = int(num_prefetch_batches)
 
     def __len__(self) -> int:
         return len(self.loader)
@@ -214,31 +219,38 @@ class DevicePrefetchLoader:
             return
 
         stream = torch.cuda.Stream(device=self.device)
-        next_batch: dict[str, Any] | None = None
+        prefetched: deque[dict[str, Any]] = deque()
+        exhausted = False
 
         def _preload() -> None:
-            nonlocal next_batch
+            nonlocal exhausted
+            if exhausted:
+                return
             try:
                 batch = next(iterator)
             except StopIteration:
-                next_batch = None
+                exhausted = True
                 return
             with torch.cuda.stream(stream):
-                next_batch = move_batch_to_device(
-                    batch,
-                    self.device,
-                    float_dtype=self.float_dtype,
+                prefetched.append(
+                    move_batch_to_device(
+                        batch,
+                        self.device,
+                        float_dtype=self.float_dtype,
+                    )
                 )
 
-        _preload()
+        for _ in range(self.num_prefetch_batches):
+            _preload()
         current_stream = torch.cuda.current_stream(device=self.device)
-        while next_batch is not None:
+        while prefetched:
             current_stream.wait_stream(stream)
-            batch = next_batch
+            batch = prefetched.popleft()
             for value in batch.values():
                 if isinstance(value, torch.Tensor):
                     value.record_stream(current_stream)
-            _preload()
+            while len(prefetched) < self.num_prefetch_batches and not exhausted:
+                _preload()
             yield batch
 
 
@@ -248,12 +260,18 @@ def maybe_prefetch_loader(
     device: torch.device,
     enabled: bool = True,
     float_dtype: torch.dtype | None = None,
+    num_prefetch_batches: int = 1,
 ):
     """Wrap a loader with CUDA prefetch when the target device can benefit."""
 
     if not enabled or device.type != "cuda":
         return loader
-    return DevicePrefetchLoader(loader, device=device, float_dtype=float_dtype)
+    return DevicePrefetchLoader(
+        loader,
+        device=device,
+        float_dtype=float_dtype,
+        num_prefetch_batches=num_prefetch_batches,
+    )
 
 
 def resolve_amp_dtype(amp_dtype: str) -> torch.dtype:
