@@ -38,8 +38,9 @@ def test_single_task_head_debug_contains_query_outputs() -> None:
     )
 
     assert "_debug" in out
-    assert "task_repr" in out["_debug"]
-    assert "task_attn_weights" in out["_debug"]
+    assert "head_head_context_l2_mean" in out["_debug"]
+    assert "head_task_repr_l2_mean" in out["_debug"]
+    assert "head_task_attn_entropy_mean" in out["_debug"]
 
 
 def test_single_task_head_invalid_task_raises_value_error() -> None:

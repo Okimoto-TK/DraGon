@@ -56,12 +56,20 @@ class EpochConsoleLogger:
         self._phase = ""
         self._last_log_time: float | None = None
         self._last_log_step = 0
+        self._started = False
+
+    def _ensure_started(self) -> None:
+        if self._started:
+            return
         self.progress.start()
+        self._started = True
 
     def start_phase(self, *, epoch: int, phase: str, total_steps: int) -> None:
         """Reset the single progress task for a new phase."""
 
-        description = f"{phase} epoch={epoch}"
+        self._ensure_started()
+        display_epoch = epoch + 1
+        description = f"{phase} epoch={display_epoch}"
         if self.task_id is None:
             self.task_id = self.progress.add_task(
                 description,
@@ -105,6 +113,7 @@ class EpochConsoleLogger:
             raise RuntimeError("Progress task has not been initialized.")
 
         now = time.perf_counter()
+        display_epoch = epoch + 1
         eta_seconds: float | None = None
         if self._last_log_time is not None:
             logged_steps = step - self._last_log_step
@@ -126,7 +135,7 @@ class EpochConsoleLogger:
         )
         if self.enabled:
             self.console.log(
-                f"phase={phase} epoch={epoch} step={step}/{total_steps} "
+                f"phase={phase} epoch={display_epoch} step={step}/{total_steps} "
                 f"loss_total={losses['loss_total']:.6f} "
                 f"loss_{self.task}={losses['loss_task']:.6f} "
                 f"lr={lr:.6e} eta={_format_seconds(eta_seconds)}"
@@ -135,4 +144,5 @@ class EpochConsoleLogger:
     def close(self) -> None:
         """Stop the underlying Rich progress display."""
 
-        self.progress.stop()
+        if self._started:
+            self.progress.stop()

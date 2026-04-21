@@ -78,9 +78,17 @@ def test_forward_loss_smoke_outputs(task: str) -> None:
 def test_forward_aux_outputs_present() -> None:
     model = _make_model(task="ret")
     out = model(_make_batch(), return_aux=True)
-    assert "s1" in out and "s2" in out and "s3" in out
+    assert "macro_input" in out
     assert "macro_fused" in out and "mezzo_fused" in out and "micro_fused" in out
     assert "macro_ctx" in out and "mezzo_ctx" in out and "micro_ctx" in out
+    assert "feature_rms_macro_pre" in out and "feature_rms_macro_post" in out
+    assert "feature_rms_mezzo_pre" in out and "feature_rms_mezzo_post" in out
+    assert "feature_rms_micro_pre" in out and "feature_rms_micro_post" in out
+    assert out["macro_input"].shape == (2, 22, 64)
+    assert out["feature_rms_macro_pre"].shape == (22,)
+    assert out["feature_rms_macro_post"].shape == (22,)
+    assert out["feature_rms_mezzo_pre"].shape == (9,)
+    assert out["feature_rms_micro_post"].shape == (9,)
 
 
 def test_forward_loss_debug_outputs_present() -> None:
@@ -88,10 +96,9 @@ def test_forward_loss_debug_outputs_present() -> None:
     out = model.forward_loss(_make_batch(), return_debug=True)
     assert "_debug" in out
     debug = out["_debug"]
-    assert "wavelet" in debug
-    assert "bridge" in debug
-    assert "cross_scale" in debug
-    assert "heads" in debug
+    assert "wavelet_macro_energy_raw" in debug
+    assert "cross_scale_macro_ctx_l2_mean" in debug
+    assert "head_head_context_l2_mean" in debug
 
 
 def test_forward_missing_key_raises_value_error() -> None:

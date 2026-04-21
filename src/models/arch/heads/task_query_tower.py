@@ -130,9 +130,18 @@ class TaskQueryTower(nn.Module):
             return task_repr
 
         debug = {
-            "task_repr": task_repr,
-            "task_delta_attn": delta_attn.squeeze(1),
+            "head_task_repr_l2_mean": _l2_mean(task_repr),
+            "head_task_delta_attn_l2_mean": _l2_mean(delta_attn.squeeze(1)),
         }
         if attn_weights is not None:
-            debug["task_attn_weights"] = attn_weights.squeeze(2)
+            probs = attn_weights.squeeze(2).detach().float().clamp_min(1e-12)
+            entropy = -(probs * probs.log()).sum(dim=-1).mean()
+            max_weight = probs.max(dim=-1).values.mean()
+            debug["head_task_attn_entropy_mean"] = float(entropy.cpu())
+            debug["head_task_attn_max_weight_mean"] = float(max_weight.cpu())
         return task_repr, debug
+
+
+def _l2_mean(value: torch.Tensor) -> float:
+    flat = value.detach().float().reshape(value.shape[0], -1)
+    return float(flat.norm(dim=1).mean().cpu())

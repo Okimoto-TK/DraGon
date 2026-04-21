@@ -50,12 +50,24 @@ def test_wavelet_denoise_mezzo_shape(patch_ptwt: None) -> None:
 
 
 def test_wavelet_denoise_dtype_and_device_consistent(patch_ptwt: None) -> None:
-    module = wd.WaveletDenoise1D(n_channels=4, target_len=16, warmup_len=8)
-    x = torch.randn(2, 4, 24, dtype=torch.float64)
+    module = wd.WaveletDenoise1D(n_channels=4, target_len=16, warmup_len=8).to(
+        dtype=torch.bfloat16
+    )
+    x = torch.randn(2, 4, 24, dtype=torch.bfloat16)
     y = module(x)
 
-    assert y.dtype == x.dtype
+    assert y.dtype == torch.bfloat16
     assert y.device == x.device
+
+
+def test_wavelet_denoise_uses_explicit_bf16(patch_ptwt: None) -> None:
+    module = wd.WaveletDenoise1D(n_channels=4, target_len=16, warmup_len=8).to(
+        dtype=torch.bfloat16
+    )
+    x = torch.randn(2, 4, 24, dtype=torch.bfloat16)
+    y = module(x)
+
+    assert y.dtype == torch.bfloat16
 
 
 def test_wavelet_denoise_three_scales_forward(patch_ptwt: None) -> None:

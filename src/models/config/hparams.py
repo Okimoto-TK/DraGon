@@ -89,6 +89,7 @@ class MultiTaskLossHParams:
     _nu_ret_min: float = 2.01
     _gamma_shape_min: float = 1e-4
     _ald_scale_min: float = 1e-6
+    _loss_compute_dtype: str = "float32"
 
 
 @dataclass(frozen=True)

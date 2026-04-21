@@ -31,6 +31,8 @@ class StudentTNLLLoss(nn.Module):
         mu: torch.Tensor,
         scale: torch.Tensor,
         nu: torch.Tensor,
+        *,
+        sample_weight: torch.Tensor | None = None,
     ) -> torch.Tensor:
         _validate_column_tensor("target", target)
         _validate_column_tensor("mu", mu)
@@ -61,6 +63,18 @@ class StudentTNLLLoss(nn.Module):
                 f"nu must be > {self._nu_min}, got value={nu.detach().reshape(-1)[0].item()}. "
                 f"Valid range: ({self._nu_min}, +inf)."
             )
+        if sample_weight is not None:
+            _validate_column_tensor("sample_weight", sample_weight)
+            if sample_weight.shape != target.shape:
+                raise ValueError(
+                    "sample_weight must share the same shape as target, "
+                    f"got sample_weight={tuple(sample_weight.shape)}, target={tuple(target.shape)}."
+                )
+            if torch.any(sample_weight <= 0):
+                raise ValueError(
+                    "sample_weight must be strictly positive, "
+                    f"got min={sample_weight.min().item()}. Valid range: (0, +inf)."
+                )
 
         nu = nu.to(device=target.device, dtype=target.dtype)
         pi = target.new_tensor(torch.pi)
@@ -73,7 +87,10 @@ class StudentTNLLLoss(nn.Module):
             + ((nu + 1.0) / 2.0)
             * torch.log1p(squared_error / (nu * scale.pow(2)))
         )
-        return nll.mean()
+        if sample_weight is None:
+            return nll.mean()
+        weights = sample_weight.to(device=target.device, dtype=target.dtype)
+        return (weights * nll).sum() / weights.sum().clamp_min(self._eps)
 
 
 def _validate_column_tensor(name: str, value: torch.Tensor) -> None:

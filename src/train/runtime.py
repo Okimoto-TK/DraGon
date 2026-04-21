@@ -168,17 +168,23 @@ def build_scheduler(
 def move_batch_to_device(
     batch: dict[str, torch.Tensor],
     device: torch.device,
+    *,
+    float_dtype: torch.dtype | None = None,
 ) -> dict[str, torch.Tensor]:
     """Move a tensor batch to the target device with non-blocking copies."""
 
     moved: dict[str, torch.Tensor] = {}
     for key, value in batch.items():
         if isinstance(value, torch.Tensor):
-            moved[key] = (
-                value
-                if value.device == device
-                else value.to(device=device, non_blocking=True)
-            )
+            target_dtype = float_dtype if value.is_floating_point() and float_dtype is not None else value.dtype
+            if value.device == device and value.dtype == target_dtype:
+                moved[key] = value
+            else:
+                moved[key] = value.to(
+                    device=device,
+                    dtype=target_dtype,
+                    non_blocking=True,
+                )
         else:
             moved[key] = value
     return moved
@@ -187,9 +193,16 @@ def move_batch_to_device(
 class DevicePrefetchLoader:
     """Overlap host-to-device copies with the current training step on CUDA."""
 
-    def __init__(self, loader, *, device: torch.device) -> None:
+    def __init__(
+        self,
+        loader,
+        *,
+        device: torch.device,
+        float_dtype: torch.dtype | None = None,
+    ) -> None:
         self.loader = loader
         self.device = device
+        self.float_dtype = float_dtype
 
     def __len__(self) -> int:
         return len(self.loader)
@@ -211,7 +224,11 @@ class DevicePrefetchLoader:
                 next_batch = None
                 return
             with torch.cuda.stream(stream):
-                next_batch = move_batch_to_device(batch, self.device)
+                next_batch = move_batch_to_device(
+                    batch,
+                    self.device,
+                    float_dtype=self.float_dtype,
+                )
 
         _preload()
         current_stream = torch.cuda.current_stream(device=self.device)
@@ -225,12 +242,18 @@ class DevicePrefetchLoader:
             yield batch
 
 
-def maybe_prefetch_loader(loader, *, device: torch.device, enabled: bool = True):
+def maybe_prefetch_loader(
+    loader,
+    *,
+    device: torch.device,
+    enabled: bool = True,
+    float_dtype: torch.dtype | None = None,
+):
     """Wrap a loader with CUDA prefetch when the target device can benefit."""
 
     if not enabled or device.type != "cuda":
         return loader
-    return DevicePrefetchLoader(loader, device=device)
+    return DevicePrefetchLoader(loader, device=device, float_dtype=float_dtype)
 
 
 def resolve_amp_dtype(amp_dtype: str) -> torch.dtype:

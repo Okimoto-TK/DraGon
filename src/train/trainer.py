@@ -13,6 +13,7 @@ import torch
 from .checkpoint import save_checkpoint
 from .console import EpochConsoleLogger
 from .runtime import move_batch_to_device, resolve_amp_dtype
+from .tensorboard_logger import TensorBoardLogger
 
 
 class Trainer:
@@ -33,8 +34,8 @@ class Trainer:
         log_every: int = 50,
         save_every: int = 1,
         console_logger=None,
+        tensorboard_logger: TensorBoardLogger | None = None,
         forward_loss: Callable[[dict[str, torch.Tensor]], dict[str, torch.Tensor]] | None = None,
-        wandb_logger=None,
     ) -> None:
         self.model = model
         self.optimizer = optimizer
@@ -45,6 +46,9 @@ class Trainer:
         self.use_amp = bool(use_amp)
         self.amp_dtype_name = amp_dtype
         self.amp_dtype = resolve_amp_dtype(amp_dtype)
+        self.float_dtype = (
+            self.amp_dtype if self.amp_dtype in {torch.bfloat16, torch.float16} else None
+        )
         self.max_grad_norm = float(max_grad_norm)
         self.task = getattr(model, "task", task)
         self.log_every = int(log_every)
@@ -55,7 +59,7 @@ class Trainer:
             log_every=self.log_every,
             task=self.task,
         )
-        self.wandb_logger = wandb_logger
+        self.tensorboard_logger = tensorboard_logger
 
         self.global_step = 0
         self.start_epoch = 0
@@ -107,7 +111,56 @@ class Trainer:
             return torch.autocast(device_type="cpu", dtype=torch.bfloat16)
         return nullcontext()
 
+    def _target_key(self) -> str:
+        return {
+            "ret": "target_ret",
+            "rv": "target_rv",
+            "q": "target_q",
+        }[self.task]
+
+    def _capture_debug_snapshot(
+        self,
+        batch: dict[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor] | None:
+        was_training = self.model.training
+        self.model.eval()
+        try:
+            with torch.inference_mode():
+                with self._autocast_context():
+                    return self.model.forward_loss(batch, return_debug=True)
+        except TypeError:
+            return None
+        finally:
+            if was_training:
+                self.model.train()
+
+    def _capture_feature_snapshot(
+        self,
+        batch: dict[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor] | None:
+        was_training = self.model.training
+        self.model.eval()
+        try:
+            with torch.inference_mode():
+                with self._autocast_context():
+                    return self.model(batch, return_aux=True)
+        except TypeError:
+            return None
+        finally:
+            if was_training:
+                self.model.train()
+
     def _extract_log_losses(
+        self,
+        output: dict[str, torch.Tensor],
+    ) -> dict[str, float]:
+        loss_metrics = self._extract_all_loss_metrics(output)
+        return {
+            "loss_total": loss_metrics["loss_total"],
+            "loss_task": loss_metrics["loss_task"],
+        }
+
+    def _extract_all_loss_metrics(
         self,
         output: dict[str, torch.Tensor],
     ) -> dict[str, float]:
@@ -119,10 +172,18 @@ class Trainer:
                     f"Expected 'loss_task' or {legacy_key!r} in model output, got keys={tuple(output.keys())}."
                 )
             task_loss = output[legacy_key]
-        return {
+
+        metrics: dict[str, float] = {
             "loss_total": float(output["loss_total"].detach().float().cpu()),
             "loss_task": float(task_loss.detach().float().cpu()),
         }
+        for key, value in output.items():
+            if key in metrics or not key.startswith("loss_") or not isinstance(value, torch.Tensor):
+                continue
+            if value.numel() != 1:
+                continue
+            metrics[key] = float(value.detach().float().cpu())
+        return metrics
 
     def _run_phase(
         self,
@@ -139,7 +200,7 @@ class Trainer:
             }
 
         total_steps = len(loader)
-        self.console_logger.start_phase(epoch=epoch, phase=phase, total_steps=total_steps)
+        phase_started = False
 
         if training:
             self.model.train()
@@ -147,23 +208,21 @@ class Trainer:
         else:
             self.model.eval()
 
-        aggregate = {
-            "loss_total": torch.zeros((), device=self.device, dtype=torch.float32),
-            "loss_task": torch.zeros((), device=self.device, dtype=torch.float32),
-        }
+        aggregate: dict[str, torch.Tensor] | None = None
+        pred_chunks: list[torch.Tensor] = []
+        target_chunks: list[torch.Tensor] = []
+        target_key = self._target_key()
 
         last_batch_end = time.perf_counter()
         for step, batch in enumerate(loader, start=1):
-            self.console_logger.advance(step)
             self._event_step += 1
-            should_log_wandb = (
-                training
-                and self.wandb_logger is not None
-                and self._event_step % self.log_every == 0
-            )
             data_time_ms = (time.perf_counter() - last_batch_end) * 1000.0
             step_start = time.perf_counter()
-            batch = move_batch_to_device(batch, self.device)
+            batch = move_batch_to_device(
+                batch,
+                self.device,
+                float_dtype=self.float_dtype,
+            )
             grad_norm: float | None = None
 
             if training:
@@ -204,23 +263,6 @@ class Trainer:
                     self.scheduler.step()
                 self.global_step += 1
 
-                log_output: dict[str, torch.Tensor] | None = None
-                if should_log_wandb:
-                    with torch.inference_mode():
-                        with self._autocast_context():
-                            try:
-                                log_output = self.model.forward_loss(
-                                    batch,
-                                    return_aux=True,
-                                    return_debug=True,
-                                )
-                            except TypeError:
-                                log_output = self.model.forward_loss(
-                                    batch,
-                                    return_aux=True,
-                                )
-                    for key in aggregate:
-                        log_output[key] = output[key].detach()
             else:
                 forward_start = time.perf_counter()
                 with torch.inference_mode():
@@ -229,10 +271,36 @@ class Trainer:
                 forward_time_ms = (time.perf_counter() - forward_start) * 1000.0
                 backward_time_ms = 0.0
                 optimizer_time_ms = 0.0
-                log_output = None
 
-            for key in aggregate:
-                aggregate[key] = aggregate[key] + output[key].detach().float()
+            loss_metric_tensors = {
+                key: value.detach().float()
+                for key, value in output.items()
+                if key.startswith("loss_") and isinstance(value, torch.Tensor) and value.numel() == 1
+            }
+            if "loss_task" not in loss_metric_tensors:
+                legacy_key = f"loss_{self.task}"
+                if legacy_key in output and isinstance(output[legacy_key], torch.Tensor):
+                    loss_metric_tensors["loss_task"] = output[legacy_key].detach().float()
+            if aggregate is None:
+                aggregate = {
+                    key: torch.zeros((), device=self.device, dtype=torch.float32)
+                    for key in loss_metric_tensors
+                }
+            for key, value in loss_metric_tensors.items():
+                if key not in aggregate:
+                    aggregate[key] = torch.zeros((), device=self.device, dtype=torch.float32)
+                aggregate[key] = aggregate[key] + value
+            pred_chunks.append(output["pred_primary"].detach().float().cpu())
+            target_chunks.append(batch[target_key].detach().float().cpu())
+
+            if not phase_started:
+                self.console_logger.start_phase(
+                    epoch=epoch,
+                    phase=phase,
+                    total_steps=total_steps,
+                )
+                phase_started = True
+            self.console_logger.advance(step)
 
             step_time_ms = (time.perf_counter() - step_start) * 1000.0
             samples_per_sec = (
@@ -241,6 +309,7 @@ class Trainer:
 
             if self._event_step % self.log_every == 0:
                 lr = float(self.optimizer.param_groups[0]["lr"])
+                param_norm = self._compute_param_norm() if training else None
                 self.console_logger.log_metrics(
                     epoch=epoch,
                     phase=phase,
@@ -249,32 +318,59 @@ class Trainer:
                     losses=self._extract_log_losses(output),
                     lr=lr,
                 )
-            if should_log_wandb:
-                self.wandb_logger.log_train_step(
-                    global_step=self.global_step,
-                    epoch=epoch,
-                    batch=batch,
-                    output=log_output or output,
-                    model=self.model,
-                    grad_norm=grad_norm,
-                    param_norm=self._compute_param_norm(),
-                    lr=float(self.optimizer.param_groups[0]["lr"]),
-                    step_time_ms=step_time_ms,
-                    data_time_ms=data_time_ms,
-                    forward_time_ms=forward_time_ms,
-                    backward_time_ms=backward_time_ms,
-                    optimizer_time_ms=optimizer_time_ms,
-                    samples_per_sec=samples_per_sec,
-                )
+                if self.tensorboard_logger is not None and phase == "train":
+                    self.tensorboard_logger.log_step(
+                        phase=phase,
+                        global_step=self.global_step,
+                        losses=self._extract_all_loss_metrics(output),
+                        lr=lr,
+                        grad_norm=grad_norm,
+                        param_norm=param_norm,
+                        data_time_ms=data_time_ms,
+                        forward_time_ms=forward_time_ms,
+                        backward_time_ms=backward_time_ms,
+                        optimizer_time_ms=optimizer_time_ms,
+                        step_time_ms=step_time_ms,
+                        samples_per_sec=samples_per_sec,
+                        gpu_mem_alloc_mb=(
+                            torch.cuda.memory_allocated(self.device) / (1024.0 * 1024.0)
+                            if self.device.type == "cuda"
+                            else None
+                        ),
+                    )
+                    feature_output = self._capture_feature_snapshot(batch)
+                    if feature_output is not None:
+                        self.tensorboard_logger.log_debug_snapshot(
+                            phase=phase,
+                            global_step=self.global_step,
+                            output=feature_output,
+                        )
 
+            if (
+                self.tensorboard_logger is not None
+                and self.tensorboard_logger.should_log_debug(
+                    phase=phase,
+                    global_step=self.global_step,
+                    step=step,
+                )
+            ):
+                debug_output = self._capture_debug_snapshot(batch)
+                if debug_output is not None:
+                    self.tensorboard_logger.log_debug_snapshot(
+                        phase=phase,
+                        global_step=self.global_step,
+                        output=debug_output,
+                    )
             last_batch_end = time.perf_counter()
 
         num_steps = max(total_steps, 1)
-        metrics = {
-            key: float((value / num_steps).detach().cpu()) for key, value in aggregate.items()
+        aggregate = aggregate or {
+            "loss_total": torch.zeros((), device=self.device, dtype=torch.float32),
+            "loss_task": torch.zeros((), device=self.device, dtype=torch.float32),
         }
+        metrics = {key: float((value / num_steps).detach().cpu()) for key, value in aggregate.items()}
 
-        if total_steps > 0 and self._event_step % self.log_every != 0:
+        if phase_started and self._event_step % self.log_every != 0:
             lr = float(self.optimizer.param_groups[0]["lr"])
             self.console_logger.log_metrics(
                 epoch=epoch,
@@ -284,39 +380,30 @@ class Trainer:
                 losses=metrics,
                 lr=lr,
             )
+            if self.tensorboard_logger is not None and phase == "train":
+                self.tensorboard_logger.log_step(
+                    phase=phase,
+                    global_step=self.global_step,
+                    losses=metrics,
+                    lr=lr,
+                )
+
+        if self.tensorboard_logger is not None:
+            self.tensorboard_logger.log_epoch_metrics(
+                phase=phase,
+                global_step=self.global_step,
+                epoch=epoch,
+                metrics=metrics,
+            )
+            if pred_chunks and target_chunks:
+                self.tensorboard_logger.log_prediction_plot(
+                    phase=phase,
+                    global_step=self.global_step,
+                    predictions=torch.cat(pred_chunks, dim=0),
+                    targets=torch.cat(target_chunks, dim=0),
+                )
 
         return metrics
-
-    def _log_fixed_val_snapshots(self, *, epoch: int) -> None:
-        if self.wandb_logger is None or not hasattr(self.wandb_logger, "get_fixed_val_batches"):
-            return
-        fixed_batches = self.wandb_logger.get_fixed_val_batches()
-        if not fixed_batches:
-            return
-
-        self.model.eval()
-        with torch.inference_mode():
-            for bucket_name, batch in fixed_batches.items():
-                batch_on_device = move_batch_to_device(batch, self.device)
-                with self._autocast_context():
-                    try:
-                        output = self.model.forward_loss(
-                            batch_on_device,
-                            return_aux=True,
-                            return_debug=True,
-                        )
-                    except TypeError:
-                        output = self.model.forward_loss(
-                            batch_on_device,
-                            return_aux=True,
-                        )
-                self.wandb_logger.log_fixed_val_snapshot(
-                    global_step=self.global_step,
-                    epoch=epoch,
-                    batch=batch_on_device,
-                    output=output,
-                    bucket_name=bucket_name,
-                )
 
     def train_one_epoch(self, epoch: int) -> dict[str, float]:
         return self._run_phase(
@@ -336,8 +423,6 @@ class Trainer:
 
     def fit(self, num_epochs: int) -> None:
         try:
-            if self.wandb_logger is not None:
-                self.wandb_logger.capture_fixed_val_batch(self.val_loader)
             for epoch in range(self.start_epoch, num_epochs):
                 train_metrics = self.train_one_epoch(epoch)
                 val_metrics = self.validate_one_epoch(epoch)
@@ -353,15 +438,6 @@ class Trainer:
                     "val": val_metrics,
                 }
                 self.history.append(history_row)
-                if self.wandb_logger is not None:
-                    self.wandb_logger.log_val_epoch(
-                        global_step=self.global_step,
-                        epoch=epoch,
-                        metrics=val_metrics,
-                        lr=float(self.optimizer.param_groups[0]["lr"]),
-                    )
-                    self._log_fixed_val_snapshots(epoch=epoch)
-
                 if self.checkpoint_dir is not None:
                     epoch_number = epoch + 1
                     if epoch_number % self.save_every == 0:
@@ -397,6 +473,6 @@ class Trainer:
                             global_step=self.global_step,
                         )
         finally:
+            if self.tensorboard_logger is not None:
+                self.tensorboard_logger.close()
             self.console_logger.close()
-            if self.wandb_logger is not None:
-                self.wandb_logger.finish()

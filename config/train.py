@@ -20,8 +20,8 @@ def _default_num_workers() -> int:
 class TrainingConfig:
     """Open tuning parameters for the training stack."""
 
-    batch_size: int = 2048
-    val_batch_size: int = 2048
+    batch_size: int = 1536
+    val_batch_size: int = 1536
     num_workers: int = field(default_factory=_default_num_workers)
     pin_memory: bool = True
     persistent_workers: bool = True
@@ -34,8 +34,12 @@ class TrainingConfig:
     max_grad_norm: float = 1.0
     task: str = "ret"
     log_every: int = 50
-    hist_every: int = 500
-    viz_every: int = 1000
+    enable_tensorboard: bool = True
+    tensorboard_root: str = "models/tensorboard"
+    tensorboard_host: str = "0.0.0.0"
+    tensorboard_port: int = 11111
+    tensorboard_debug_every: int = 200
+    tensorboard_flush_secs: int = 30
     num_epochs: int = 20
     save_every: int = 1
     compile_model: bool = True
@@ -45,10 +49,6 @@ class TrainingConfig:
     amp_dtype: str = "bfloat16"
     allow_tf32: bool = True
     cudnn_benchmark: bool = False
-    enable_wandb: bool = True
-    wandb_project: str | None = "dragon"
-    wandb_run_group: str | None = "dev"
-    wandb_base_url: str | None = None
 
 
 training = TrainingConfig()

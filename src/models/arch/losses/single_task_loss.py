@@ -20,11 +20,15 @@ class SingleTaskDistributionLoss(nn.Module):
         self,
         task: str,
         q_tau: float,
+        ret_tail_weight_threshold: float = 0.05,
+        ret_tail_weight_alpha: float = 2.0,
+        ret_tail_weight_max: float = 4.0,
         _eps: float = 1e-6,
         _nu_ret_init: float = 8.0,
         _nu_ret_min: float = 2.01,
         _gamma_shape_min: float = 1e-4,
         _ald_scale_min: float = 1e-6,
+        _loss_compute_dtype: str = "float32",
     ) -> None:
         super().__init__()
         if task not in VALID_SINGLE_TASKS:
@@ -54,14 +58,37 @@ class SingleTaskDistributionLoss(nn.Module):
             raise ValueError(
                 f"_ald_scale_min must be > 0, got {_ald_scale_min}. Valid range: (0, +inf)."
             )
+        if ret_tail_weight_threshold <= 0:
+            raise ValueError(
+                "ret_tail_weight_threshold must be > 0, "
+                f"got {ret_tail_weight_threshold}. Valid range: (0, +inf)."
+            )
+        if ret_tail_weight_alpha < 0:
+            raise ValueError(
+                "ret_tail_weight_alpha must be >= 0, "
+                f"got {ret_tail_weight_alpha}. Valid range: [0, +inf)."
+            )
+        if ret_tail_weight_max < 1:
+            raise ValueError(
+                "ret_tail_weight_max must be >= 1, "
+                f"got {ret_tail_weight_max}. Valid range: [1, +inf)."
+            )
+        if _loss_compute_dtype not in {"float32"}:
+            raise ValueError(
+                f"_loss_compute_dtype must be 'float32', got {_loss_compute_dtype!r}."
+            )
 
         self.task = task
         self.q_tau = float(q_tau)
+        self.ret_tail_weight_threshold = float(ret_tail_weight_threshold)
+        self.ret_tail_weight_alpha = float(ret_tail_weight_alpha)
+        self.ret_tail_weight_max = float(ret_tail_weight_max)
         self._eps = float(_eps)
         self._nu_ret_init = float(_nu_ret_init)
         self._nu_ret_min = float(_nu_ret_min)
         self._gamma_shape_min = float(_gamma_shape_min)
         self._ald_scale_min = float(_ald_scale_min)
+        self._loss_compute_dtype = _loss_compute_dtype
 
         init_gap = self._nu_ret_init - self._nu_ret_min
         self._nu_ret_raw = nn.Parameter(
@@ -96,30 +123,37 @@ class SingleTaskDistributionLoss(nn.Module):
                 "Valid range: all batch sizes must be equal."
             )
 
+        target_f32 = target.float()
+        pred_primary_f32 = pred_primary.float()
+        pred_aux_raw_f32 = pred_aux_raw.float()
+
         if self.task == "ret":
             nu_ret = (
                 self._nu_ret_min + F.softplus(self._nu_ret_raw)
-            ).to(device=pred_primary.device, dtype=pred_primary.dtype)
-            scale = F.softplus(pred_aux_raw) + self._eps
+            ).to(device=pred_primary.device, dtype=torch.float32)
+            scale = F.softplus(pred_aux_raw_f32) + self._eps
+            sample_weight = self._ret_sample_weight(target=target_f32)
             loss = self.ret_nll(
-                target=target,
-                mu=pred_primary,
+                target=target_f32,
+                mu=pred_primary_f32,
                 scale=scale,
                 nu=nu_ret,
+                sample_weight=sample_weight,
             )
             sigma = scale * torch.sqrt(nu_ret / (nu_ret - 2.0))
             return {
                 "loss_total": loss,
                 "loss_task": loss,
+                "loss_ret_weighted_nll": loss,
                 "sigma_pred": sigma,
                 "nu_ret": nu_ret,
             }
 
         if self.task == "rv":
-            mean = F.softplus(pred_primary) + self._eps
-            shape = F.softplus(pred_aux_raw) + self._gamma_shape_min
+            mean = F.softplus(pred_primary_f32) + self._eps
+            shape = F.softplus(pred_aux_raw_f32) + self._gamma_shape_min
             loss = self.rv_nll(
-                target=target,
+                target=target_f32,
                 mean=mean,
                 shape=shape,
             )
@@ -131,10 +165,10 @@ class SingleTaskDistributionLoss(nn.Module):
                 "shape_rv": shape,
             }
 
-        scale = F.softplus(pred_aux_raw) + self._ald_scale_min
+        scale = F.softplus(pred_aux_raw_f32) + self._ald_scale_min
         loss = self.q_nll(
-            target=target,
-            mu=pred_primary,
+            target=target_f32,
+            mu=pred_primary_f32,
             scale=scale,
         )
         sigma = scale * scale.new_tensor(self._q_sigma_factor)
@@ -143,6 +177,16 @@ class SingleTaskDistributionLoss(nn.Module):
             "loss_task": loss,
             "sigma_pred": sigma,
         }
+
+    def _ret_sample_weight(
+        self,
+        *,
+        target: torch.Tensor,
+    ) -> torch.Tensor:
+        abs_target = target.abs()
+        tail_excess = torch.relu(abs_target / self.ret_tail_weight_threshold - 1.0)
+        weights = 1.0 + self.ret_tail_weight_alpha * tail_excess
+        return weights.clamp_max(self.ret_tail_weight_max)
 
     @staticmethod
     def _inverse_softplus(value: float) -> float:

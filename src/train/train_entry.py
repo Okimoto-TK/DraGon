@@ -9,10 +9,7 @@ from typing import Any, Sequence
 import torch
 
 from config.data import assembled_dir, checkpoint_dir as DEFAULT_CHECKPOINT_ROOT
-from config.data import train_seed as default_train_seed
-from config.models import multi_scale_forecast_network, single_task_loss
 from config.train import training
-from src.models.config.hparams import MULTI_SCALE_FORECAST_NETWORK_HPARAMS
 
 from .checkpoint import load_checkpoint
 from .console import EpochConsoleLogger
@@ -25,9 +22,10 @@ from .runtime import (
     configure_training_backends,
     maybe_compile_loss_fn,
     maybe_prefetch_loader,
+    resolve_amp_dtype,
 )
+from .tensorboard_logger import TensorBoardLogger
 from .trainer import Trainer
-from .wandb_logger import WandbLoggerConfig, WandbVisualizationLogger
 
 
 def _default_file_split() -> tuple[list[str], list[str]]:
@@ -89,32 +87,6 @@ def _resolve_checkpoint_runtime(
     return run_name, checkpoint_dir, None
 
 
-def _build_wandb_run_config(
-    *,
-    task: str,
-    batch_size: int,
-    lr: float,
-    weight_decay: float,
-    max_grad_norm: float,
-    compile_model: bool,
-) -> dict[str, object]:
-    return {
-        "model.task": task,
-        "model.hidden_dim": multi_scale_forecast_network.hidden_dim,
-        "model.cond_dim": multi_scale_forecast_network.cond_dim,
-        "model.q_tau": single_task_loss.q_tau,
-        "data.macro_len": MULTI_SCALE_FORECAST_NETWORK_HPARAMS._macro_target_len,
-        "data.mezzo_len": MULTI_SCALE_FORECAST_NETWORK_HPARAMS._mezzo_target_len,
-        "data.micro_len": MULTI_SCALE_FORECAST_NETWORK_HPARAMS._micro_target_len,
-        "train.batch_size": batch_size,
-        "train.lr": lr,
-        "train.weight_decay": weight_decay,
-        "train.grad_clip": max_grad_norm,
-        "train.compile": compile_model,
-        "train.seed": default_train_seed,
-    }
-
-
 def run_training(
     train_files: Sequence[str] | None = None,
     val_files: Sequence[str] | None = None,
@@ -131,17 +103,15 @@ def run_training(
     max_grad_norm: float = training.max_grad_norm,
     task: str = training.task,
     log_every: int = training.log_every,
-    hist_every: int = training.hist_every,
-    viz_every: int = training.viz_every,
+    enable_tensorboard: bool = training.enable_tensorboard,
+    tensorboard_root: str | Path = training.tensorboard_root,
+    tensorboard_debug_every: int = training.tensorboard_debug_every,
+    tensorboard_flush_secs: int = training.tensorboard_flush_secs,
     num_epochs: int = training.num_epochs,
     save_every: int = training.save_every,
     compile_model: bool = training.compile_model,
     compile_mode: str = training.compile_mode,
     amp_dtype: str = training.amp_dtype,
-    enable_wandb: bool = training.enable_wandb,
-    wandb_project: str | None = training.wandb_project,
-    wandb_run_group: str | None = training.wandb_run_group,
-    wandb_base_url: str | None = training.wandb_base_url,
     device: str | torch.device | None = None,
     use_amp: bool = True,
     mmap_mode: str | None = training.mmap_mode,
@@ -197,6 +167,7 @@ def run_training(
         device=resolved_device,
         compile_mode=compile_mode,
     )
+    model_dtype = resolve_amp_dtype(amp_dtype)
     # CUDA graph capture in torch.compile can be invalidated by our explicit
     # prefetch stream issuing overlapping H2D copies on another stream.
     prefetch_enabled = not compile_model
@@ -204,13 +175,19 @@ def run_training(
         train_loader,
         device=resolved_device,
         enabled=prefetch_enabled,
+        float_dtype=model_dtype if model_dtype in {torch.bfloat16, torch.float16} else None,
     )
     val_loader = maybe_prefetch_loader(
         val_loader,
         device=resolved_device,
         enabled=prefetch_enabled,
+        float_dtype=model_dtype if model_dtype in {torch.bfloat16, torch.float16} else None,
     )
-    model = build_model(task=selected_task).to(resolved_device)
+    model = build_model(task=selected_task)
+    if model_dtype in {torch.bfloat16, torch.float16}:
+        model = model.to(device=resolved_device, dtype=model_dtype)
+    else:
+        model = model.to(device=resolved_device)
     optimizer = build_optimizer(model, lr=lr, weight_decay=weight_decay)
     scheduler = build_scheduler(optimizer)
     console_logger = EpochConsoleLogger(
@@ -218,26 +195,13 @@ def run_training(
         enabled=enable_console,
         task=selected_task,
     )
-    wandb_logger = WandbVisualizationLogger(
-        config=WandbLoggerConfig(
-            enabled=enable_wandb,
-            task=selected_task,
-            log_every=log_every,
-            hist_every=hist_every,
-            viz_every=viz_every,
-            project=wandb_project,
-            group=wandb_run_group,
-            base_url=wandb_base_url,
-        ),
-        run_name=resolved_run_name,
-        run_config=_build_wandb_run_config(
-            task=selected_task,
-            batch_size=batch_size,
-            lr=lr,
-            weight_decay=weight_decay,
-            max_grad_norm=max_grad_norm,
-            compile_model=compile_model,
-        ),
+    tensorboard_log_dir = Path(tensorboard_root) / resolved_run_name
+    tensorboard_logger = TensorBoardLogger(
+        log_dir=tensorboard_log_dir,
+        task=selected_task,
+        enabled=enable_tensorboard,
+        debug_every=tensorboard_debug_every,
+        flush_secs=tensorboard_flush_secs,
     )
     trainer = Trainer(
         model=model,
@@ -253,7 +217,7 @@ def run_training(
         log_every=log_every,
         save_every=save_every,
         console_logger=console_logger,
-        wandb_logger=wandb_logger,
+        tensorboard_logger=tensorboard_logger,
     )
     trainer.checkpoint_dir = resolved_checkpoint_dir
     trainer.checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -290,4 +254,11 @@ def run_training(
         "epochs_completed": len(trainer.history),
         "device": str(resolved_device),
         "task": selected_task,
+        "tensorboard_log_dir": str(tensorboard_log_dir) if enable_tensorboard else None,
+        "tensorboard_command": (
+            f"tensorboard --logdir {Path(tensorboard_root)} "
+            f"--host {training.tensorboard_host} --port {training.tensorboard_port}"
+        )
+        if enable_tensorboard
+        else None,
     }

@@ -92,6 +92,18 @@ scale_context_bridge_fusion = ScaleContextBridgeFusionConfig()
 
 
 @dataclass(frozen=True)
+class AdaLNZeroTopDownFusionConfig:
+    """Open tuning parameters for AdaLN-Zero macro -> mezzo -> micro modulation."""
+
+    hidden_dim: int = 128
+    ffn_ratio: float = 2.0
+    dropout: float = 0.0
+
+
+adaln_zero_topdown_fusion = AdaLNZeroTopDownFusionConfig()
+
+
+@dataclass(frozen=True)
 class MultiTaskHeadsConfig:
     """Open tuning parameters for MultiTaskHeads."""
 
@@ -138,6 +150,9 @@ class SingleTaskLossConfig:
     """Open tuning parameters for SingleTaskDistributionLoss."""
 
     q_tau: float = 0.05
+    ret_tail_weight_threshold: float = 0.05
+    ret_tail_weight_alpha: float = 2.0
+    ret_tail_weight_max: float = 4.0
 
 
 single_task_loss = SingleTaskLossConfig()
@@ -150,6 +165,7 @@ class MultiScaleForecastNetworkConfig:
     hidden_dim: int = 128
     cond_dim: int = 32
     num_latents: int = 8
+    sidechain_features: int = 13
     task: str = "ret"
 
 

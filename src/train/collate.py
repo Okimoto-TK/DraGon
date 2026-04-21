@@ -19,7 +19,7 @@ def estimate_network_sample_bytes() -> int:
     total = 0
     for key in FLOAT_BATCH_KEYS:
         shape = NETWORK_SAMPLE_SHAPES[key]
-        total += int(np.prod(shape)) * np.dtype(np.float32).itemsize
+        total += int(np.prod(shape)) * torch.tensor([], dtype=torch.bfloat16).element_size()
     for key in INT_BATCH_KEYS:
         shape = NETWORK_SAMPLE_SHAPES[key]
         total += int(np.prod(shape)) * np.dtype(np.int64).itemsize
@@ -85,7 +85,7 @@ def collate_network_batch(
             dtype=np.float32,
             chunk_size=effective_chunk_size,
         )
-        batch[key] = torch.from_numpy(stacked).to(dtype=torch.float32)
+        batch[key] = torch.from_numpy(stacked).to(dtype=torch.bfloat16)
 
     for key in INT_BATCH_KEYS:
         stacked = _stack_samples_chunked(

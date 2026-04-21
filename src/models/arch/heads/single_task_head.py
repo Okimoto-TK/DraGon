@@ -157,8 +157,12 @@ class SingleTaskHead(nn.Module):
 
         if return_debug:
             out["_debug"] = {
-                "task_repr": task_repr,
-                "head_context": head_context,
+                "head_head_context_l2_mean": _l2_mean(head_context),
                 **readout_debug,
             }
         return out
+
+
+def _l2_mean(value: torch.Tensor) -> float:
+    flat = value.detach().float().reshape(value.shape[0], -1)
+    return float(flat.norm(dim=1).mean().cpu())

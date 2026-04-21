@@ -6,26 +6,21 @@ import torch
 import torch.nn as nn
 
 from config.models import (
-    conditioning_encoder,
-    exogenous_bridge_fusion,
+    adaln_zero_topdown_fusion,
     modern_tcn_film_encoder,
     multi_scale_forecast_network,
-    scale_context_bridge_fusion,
     single_task_head,
     single_task_loss,
     within_scale_star_fusion,
 )
-from src.models.arch.encoders import ConditioningEncoder
 from src.models.arch.encoders.modern_tcn_film_encoder import ModernTCNFiLMEncoder
 from src.models.arch.fusions import (
-    ExogenousBridgeFusion,
-    ScaleContextBridgeFusion,
+    AdaLNZeroTopDownFusion,
     WithinScaleSTARFusion,
 )
 from src.models.arch.heads import SingleTaskHead
 from src.models.arch.layers.wavelet_denoise import WaveletDenoise1D
 from src.models.arch.losses import SingleTaskDistributionLoss
-from src.models.arch.networks.side_memory_hierarchy import SideMemoryHierarchy
 from src.models.config.hparams import (
     MULTI_SCALE_FORECAST_NETWORK_HPARAMS,
     MULTI_TASK_LOSS_HPARAMS,
@@ -57,6 +52,10 @@ class MultiScaleForecastNetwork(nn.Module):
         self.task = task
         self.return_aux_default = bool(return_aux_default)
         self._hparams = MULTI_SCALE_FORECAST_NETWORK_HPARAMS
+        self._macro_input_features = (
+            modern_tcn_film_encoder["macro"].num_features
+            + multi_scale_forecast_network.sidechain_features
+        )
 
         self.denoise_macro = WaveletDenoise1D(
             n_channels=modern_tcn_film_encoder["macro"].num_features,
@@ -74,9 +73,9 @@ class MultiScaleForecastNetwork(nn.Module):
             warmup_len=self._hparams._micro_warmup_len,
         )
 
-        self.encoder_macro = ModernTCNFiLMEncoder(
-            **modern_tcn_film_encoder["macro"].__dict__
-        )
+        macro_encoder_kwargs = modern_tcn_film_encoder["macro"].__dict__.copy()
+        macro_encoder_kwargs["num_features"] = self._macro_input_features
+        self.encoder_macro = ModernTCNFiLMEncoder(**macro_encoder_kwargs)
         self.encoder_mezzo = ModernTCNFiLMEncoder(
             **modern_tcn_film_encoder["mezzo"].__dict__
         )
@@ -86,7 +85,7 @@ class MultiScaleForecastNetwork(nn.Module):
 
         self.star_macro = WithinScaleSTARFusion(
             hidden_dim=self.hidden_dim,
-            num_features=within_scale_star_fusion.num_features,
+            num_features=self._macro_input_features,
             core_dim=within_scale_star_fusion.core_dim,
             num_layers=within_scale_star_fusion.num_layers,
             dropout=within_scale_star_fusion.dropout,
@@ -106,48 +105,10 @@ class MultiScaleForecastNetwork(nn.Module):
             dropout=within_scale_star_fusion.dropout,
         )
 
-        self.conditioning_encoder = ConditioningEncoder(
-            d_cond=self.cond_dim,
-            input_features=conditioning_encoder.input_features,
-            num_blocks=conditioning_encoder.num_blocks,
-            dropout=conditioning_encoder.dropout,
-        )
-        self.side_memory_hierarchy = SideMemoryHierarchy(
-            d_cond=self.cond_dim,
-            _norm_eps=self._hparams._norm_eps,
-        )
-
-        self.bridge_macro = ExogenousBridgeFusion(
+        self.cross_scale_fusion = AdaLNZeroTopDownFusion(
             hidden_dim=self.hidden_dim,
-            exogenous_dim=self.cond_dim,
-            num_heads=exogenous_bridge_fusion.num_heads,
-            ffn_ratio=exogenous_bridge_fusion.ffn_ratio,
-            num_layers=exogenous_bridge_fusion.num_layers,
-            dropout=exogenous_bridge_fusion.dropout,
-        )
-        self.bridge_mezzo = ExogenousBridgeFusion(
-            hidden_dim=self.hidden_dim,
-            exogenous_dim=self.cond_dim,
-            num_heads=exogenous_bridge_fusion.num_heads,
-            ffn_ratio=exogenous_bridge_fusion.ffn_ratio,
-            num_layers=exogenous_bridge_fusion.num_layers,
-            dropout=exogenous_bridge_fusion.dropout,
-        )
-        self.bridge_micro = ExogenousBridgeFusion(
-            hidden_dim=self.hidden_dim,
-            exogenous_dim=self.cond_dim,
-            num_heads=exogenous_bridge_fusion.num_heads,
-            ffn_ratio=exogenous_bridge_fusion.ffn_ratio,
-            num_layers=exogenous_bridge_fusion.num_layers,
-            dropout=exogenous_bridge_fusion.dropout,
-        )
-
-        self.cross_scale_fusion = ScaleContextBridgeFusion(
-            hidden_dim=self.hidden_dim,
-            num_heads=scale_context_bridge_fusion.num_heads,
-            ffn_ratio=scale_context_bridge_fusion.ffn_ratio,
-            num_layers=scale_context_bridge_fusion.num_layers,
-            dropout=scale_context_bridge_fusion.dropout,
+            ffn_ratio=adaln_zero_topdown_fusion.ffn_ratio,
+            dropout=adaln_zero_topdown_fusion.dropout,
         )
         self.single_task_head = SingleTaskHead(
             task=self.task,
@@ -159,11 +120,15 @@ class MultiScaleForecastNetwork(nn.Module):
         self.loss_fn = SingleTaskDistributionLoss(
             task=self.task,
             q_tau=single_task_loss.q_tau,
+            ret_tail_weight_threshold=single_task_loss.ret_tail_weight_threshold,
+            ret_tail_weight_alpha=single_task_loss.ret_tail_weight_alpha,
+            ret_tail_weight_max=single_task_loss.ret_tail_weight_max,
             _eps=MULTI_TASK_LOSS_HPARAMS._eps,
             _nu_ret_init=MULTI_TASK_LOSS_HPARAMS._nu_ret_init,
             _nu_ret_min=MULTI_TASK_LOSS_HPARAMS._nu_ret_min,
             _gamma_shape_min=MULTI_TASK_LOSS_HPARAMS._gamma_shape_min,
             _ald_scale_min=MULTI_TASK_LOSS_HPARAMS._ald_scale_min,
+            _loss_compute_dtype=MULTI_TASK_LOSS_HPARAMS._loss_compute_dtype,
         )
 
     def _expect_shape(
@@ -178,6 +143,44 @@ class MultiScaleForecastNetwork(nn.Module):
         if key not in batch:
             raise ValueError(f"Missing required batch key: {key}.")
         return batch[key]
+
+    @staticmethod
+    def _energy_mean(value: torch.Tensor) -> float:
+        return float(value.detach().float().square().mean().cpu())
+
+    @staticmethod
+    def _mean(value: torch.Tensor) -> float:
+        return float(value.detach().float().mean().cpu())
+
+    @staticmethod
+    def _std(value: torch.Tensor) -> float:
+        return float(value.detach().float().std(unbiased=False).cpu())
+
+    @staticmethod
+    def _abs_mean(value: torch.Tensor) -> float:
+        return float(value.detach().float().abs().mean().cpu())
+
+    @staticmethod
+    def _feature_cosdist(value: torch.Tensor) -> float:
+        if value.ndim != 4 or value.shape[1] < 2:
+            return 0.0
+        feats = value.detach().float().reshape(value.shape[0], value.shape[1], -1)
+        feats = torch.nn.functional.normalize(feats, dim=-1, eps=1e-6)
+        cos = torch.matmul(feats, feats.transpose(1, 2))
+        feature_count = value.shape[1]
+        mask = ~torch.eye(feature_count, device=cos.device, dtype=torch.bool).unsqueeze(0)
+        dist = (1.0 - cos).masked_select(mask)
+        if dist.numel() == 0:
+            return 0.0
+        return float(dist.mean().cpu())
+
+    @staticmethod
+    def _feature_channel_rms(value: torch.Tensor) -> torch.Tensor:
+        if value.ndim != 4:
+            raise ValueError(
+                f"value must have shape [B, F, D, N], got shape={tuple(value.shape)}."
+            )
+        return value.detach().float().square().mean(dim=(0, 2, 3)).sqrt().cpu()
 
     def _validate_forward_batch(
         self, batch: dict[str, torch.Tensor]
@@ -231,6 +234,7 @@ class MultiScaleForecastNetwork(nn.Module):
         macro_float = self.denoise_macro(macro_float_long)
         mezzo_float = self.denoise_mezzo(mezzo_float_long)
         micro_float = self.denoise_micro(micro_float_long)
+        macro_input = torch.cat([macro_float, sidechain_cond], dim=1)
 
         macro_state = macro_i8_long[:, 0, -64:].long()
         macro_pos = macro_i8_long[:, 1, -64:].long()
@@ -239,7 +243,7 @@ class MultiScaleForecastNetwork(nn.Module):
         micro_state = micro_i8_long[:, 0, -144:].long()
         micro_pos = micro_i8_long[:, 1, -144:].long()
 
-        z_macro = self.encoder_macro(macro_float, macro_state, macro_pos)
+        z_macro = self.encoder_macro(macro_input, macro_state, macro_pos)
         z_mezzo = self.encoder_mezzo(mezzo_float, mezzo_state, mezzo_pos)
         z_micro = self.encoder_micro(micro_float, micro_state, micro_pos)
 
@@ -247,74 +251,65 @@ class MultiScaleForecastNetwork(nn.Module):
         z_mezzo_fused, scale_seq_mezzo = self.star_mezzo(z_mezzo)
         z_micro_fused, scale_seq_micro = self.star_micro(z_micro)
 
-        cond_seq, cond_global = self.conditioning_encoder(sidechain_cond)
-        s1, g1, s2, g2, s3, g3 = self.side_memory_hierarchy(cond_seq, cond_global)
-
-        debug: dict[str, object] = {}
+        debug: dict[str, float] = {}
         if return_debug:
-            macro_fused, _, bridge_macro_debug = self.bridge_macro(
-                scale_seq_macro,
-                s1,
-                g1,
-                return_debug=True,
+            macro_fused = scale_seq_macro
+            mezzo_fused = scale_seq_mezzo
+            micro_fused = scale_seq_micro
+            macro_raw_tail = macro_float_long[:, :, -64:]
+            mezzo_raw_tail = mezzo_float_long[:, :, -96:]
+            micro_raw_tail = micro_float_long[:, :, -144:]
+            macro_raw_energy = self._energy_mean(macro_raw_tail)
+            mezzo_raw_energy = self._energy_mean(mezzo_raw_tail)
+            micro_raw_energy = self._energy_mean(micro_raw_tail)
+            macro_denoised_energy = self._energy_mean(macro_float)
+            mezzo_denoised_energy = self._energy_mean(mezzo_float)
+            micro_denoised_energy = self._energy_mean(micro_float)
+            debug.update(
+                {
+                    "wavelet_macro_energy_raw": macro_raw_energy,
+                    "wavelet_macro_energy_denoised": macro_denoised_energy,
+                    "wavelet_macro_energy_ratio_denoised_over_raw": macro_denoised_energy / max(macro_raw_energy, 1e-12),
+                    "wavelet_mezzo_energy_raw": mezzo_raw_energy,
+                    "wavelet_mezzo_energy_denoised": mezzo_denoised_energy,
+                    "wavelet_mezzo_energy_ratio_denoised_over_raw": mezzo_denoised_energy / max(mezzo_raw_energy, 1e-12),
+                    "wavelet_micro_energy_raw": micro_raw_energy,
+                    "wavelet_micro_energy_denoised": micro_denoised_energy,
+                    "wavelet_micro_energy_ratio_denoised_over_raw": micro_denoised_energy / max(micro_raw_energy, 1e-12),
+                    "encoder_macro_final_block_act_mean": self._mean(z_macro),
+                    "encoder_macro_final_block_act_std": self._std(z_macro),
+                    "encoder_macro_final_block_act_abs_mean": self._abs_mean(z_macro),
+                    "encoder_mezzo_final_block_act_mean": self._mean(z_mezzo),
+                    "encoder_mezzo_final_block_act_std": self._std(z_mezzo),
+                    "encoder_mezzo_final_block_act_abs_mean": self._abs_mean(z_mezzo),
+                    "encoder_micro_final_block_act_mean": self._mean(z_micro),
+                    "encoder_micro_final_block_act_std": self._std(z_micro),
+                    "encoder_micro_final_block_act_abs_mean": self._abs_mean(z_micro),
+                }
             )
-            mezzo_fused, _, bridge_mezzo_debug = self.bridge_mezzo(
-                scale_seq_mezzo,
-                s2,
-                g2,
-                return_debug=True,
+            macro_pre_dist = self._feature_cosdist(z_macro)
+            macro_post_dist = self._feature_cosdist(z_macro_fused)
+            mezzo_pre_dist = self._feature_cosdist(z_mezzo)
+            mezzo_post_dist = self._feature_cosdist(z_mezzo_fused)
+            micro_pre_dist = self._feature_cosdist(z_micro)
+            micro_post_dist = self._feature_cosdist(z_micro_fused)
+            debug.update(
+                {
+                    "within_scale_macro_feature_cosdist_pre": macro_pre_dist,
+                    "within_scale_macro_feature_cosdist_post": macro_post_dist,
+                    "within_scale_macro_feature_cosdist_ratio": macro_post_dist / max(macro_pre_dist, 1e-12),
+                    "within_scale_mezzo_feature_cosdist_pre": mezzo_pre_dist,
+                    "within_scale_mezzo_feature_cosdist_post": mezzo_post_dist,
+                    "within_scale_mezzo_feature_cosdist_ratio": mezzo_post_dist / max(mezzo_pre_dist, 1e-12),
+                    "within_scale_micro_feature_cosdist_pre": micro_pre_dist,
+                    "within_scale_micro_feature_cosdist_post": micro_post_dist,
+                    "within_scale_micro_feature_cosdist_ratio": micro_post_dist / max(micro_pre_dist, 1e-12),
+                }
             )
-            micro_fused, _, bridge_micro_debug = self.bridge_micro(
-                scale_seq_micro,
-                s3,
-                g3,
-                return_debug=True,
-            )
-            debug["wavelet"] = {
-                "macro_raw_tail": macro_float_long[:, :, -64:],
-                "macro_denoised": macro_float,
-                "mezzo_raw_tail": mezzo_float_long[:, :, -96:],
-                "mezzo_denoised": mezzo_float,
-                "micro_raw_tail": micro_float_long[:, :, -144:],
-                "micro_denoised": micro_float,
-            }
-            debug["encoder"] = {
-                "macro": z_macro,
-                "mezzo": z_mezzo,
-                "micro": z_micro,
-            }
-            debug["within_scale"] = {
-                "macro_pre": z_macro,
-                "macro_post": z_macro_fused,
-                "macro_seq": scale_seq_macro,
-                "mezzo_pre": z_mezzo,
-                "mezzo_post": z_mezzo_fused,
-                "mezzo_seq": scale_seq_mezzo,
-                "micro_pre": z_micro,
-                "micro_post": z_micro_fused,
-                "micro_seq": scale_seq_micro,
-            }
-            debug["conditioning"] = {
-                "cond_seq": cond_seq,
-                "cond_global": cond_global,
-            }
-            debug["side_memory"] = {
-                "s1": s1,
-                "g1": g1,
-                "s2": s2,
-                "g2": g2,
-                "s3": s3,
-                "g3": g3,
-            }
-            debug["bridge"] = {
-                "macro": bridge_macro_debug,
-                "mezzo": bridge_mezzo_debug,
-                "micro": bridge_micro_debug,
-            }
         else:
-            macro_fused, _ = self.bridge_macro(scale_seq_macro, s1, g1)
-            mezzo_fused, _ = self.bridge_mezzo(scale_seq_mezzo, s2, g2)
-            micro_fused, _ = self.bridge_micro(scale_seq_micro, s3, g3)
+            macro_fused = scale_seq_macro
+            mezzo_fused = scale_seq_mezzo
+            micro_fused = scale_seq_micro
 
         if return_debug:
             micro_td, macro_ctx, mezzo_ctx, micro_ctx, cross_scale_debug = self.cross_scale_fusion(
@@ -329,8 +324,8 @@ class MultiScaleForecastNetwork(nn.Module):
                 macro_ctx,
                 return_debug=True,
             )
-            debug["cross_scale"] = cross_scale_debug
-            debug["heads"] = pred_dict.pop("_debug", {})
+            debug.update(cross_scale_debug)
+            debug.update(pred_dict.pop("_debug", {}))
         else:
             micro_td, macro_ctx, mezzo_ctx, micro_ctx = self.cross_scale_fusion(
                 macro_seq=macro_fused,
@@ -358,16 +353,17 @@ class MultiScaleForecastNetwork(nn.Module):
                     "scale_seq_macro": scale_seq_macro,
                     "scale_seq_mezzo": scale_seq_mezzo,
                     "scale_seq_micro": scale_seq_micro,
-                    "s1": s1,
-                    "g1": g1,
-                    "s2": s2,
-                    "g2": g2,
-                    "s3": s3,
-                    "g3": g3,
+                    "macro_input": macro_input,
                     "macro_fused": macro_fused,
                     "mezzo_fused": mezzo_fused,
                     "micro_fused": micro_fused,
                     "micro_td": micro_td,
+                    "feature_rms_macro_pre": self._feature_channel_rms(z_macro),
+                    "feature_rms_macro_post": self._feature_channel_rms(z_macro_fused),
+                    "feature_rms_mezzo_pre": self._feature_channel_rms(z_mezzo),
+                    "feature_rms_mezzo_post": self._feature_channel_rms(z_mezzo_fused),
+                    "feature_rms_micro_pre": self._feature_channel_rms(z_micro),
+                    "feature_rms_micro_post": self._feature_channel_rms(z_micro_fused),
                 }
             )
         if return_debug:
