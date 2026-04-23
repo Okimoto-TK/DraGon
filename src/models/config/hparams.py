@@ -60,6 +60,46 @@ class WithinScaleSTARFusionHParams:
 
 
 @dataclass(frozen=True)
+class WaveletBranchEncoderHParams:
+    """Hidden hyper-parameters for the wavelet-domain branch encoder."""
+
+    _norm_eps: float = 1e-6
+    _band_gate_floor: float = 0.1
+    _resample_mode: str = "linear"
+
+
+@dataclass(frozen=True)
+class DualDomainMutualAttentionHParams:
+    """Hidden hyper-parameters for scale-local mutual attention."""
+
+    _norm_eps: float = 1e-6
+    _gate_floor: float = 0.1
+
+
+@dataclass(frozen=True)
+class TimeTopDownFusionHParams:
+    """Hidden hyper-parameters for time-domain hierarchical fusion."""
+
+    _norm_eps: float = 1e-6
+    _gate_floor: float = 0.1
+
+
+@dataclass(frozen=True)
+class WaveletBottomUpFusionHParams:
+    """Hidden hyper-parameters for wavelet-domain support-aware fusion."""
+
+    _norm_eps: float = 1e-6
+    _gate_floor: float = 0.1
+
+
+@dataclass(frozen=True)
+class DualDomainConcatHeadHParams:
+    """Hidden hyper-parameters for the final dual-domain concat head."""
+
+    _norm_eps: float = 1e-6
+
+
+@dataclass(frozen=True)
 class ExogenousBridgeFusionHParams:
     """Hidden hyper-parameters for ExogenousBridgeFusion."""
 
@@ -102,7 +142,7 @@ class MultiScaleForecastNetworkHParams:
     _mezzo_warmup_len: int = 48
     _micro_target_len: int = 144
     _micro_warmup_len: int = 48
-    _side_len: int = 64
+    _macro_days: int = 64
     _mezzo_days: int = 12
     _micro_days: int = 3
     _norm_eps: float = 1e-6
@@ -130,6 +170,11 @@ MODERN_TCN_FILM_ENCODER_HPARAMS = {
 WAVELET_DENOISE_HPARAMS = WaveletDenoiseHParams()
 CONDITIONING_ENCODER_HPARAMS = ConditioningEncoderHParams()
 WITHIN_SCALE_STAR_FUSION_HPARAMS = WithinScaleSTARFusionHParams()
+WAVELET_BRANCH_ENCODER_HPARAMS = WaveletBranchEncoderHParams()
+DUAL_DOMAIN_MUTUAL_ATTENTION_HPARAMS = DualDomainMutualAttentionHParams()
+TIME_TOPDOWN_FUSION_HPARAMS = TimeTopDownFusionHParams()
+WAVELET_BOTTOMUP_FUSION_HPARAMS = WaveletBottomUpFusionHParams()
+DUAL_DOMAIN_CONCAT_HEAD_HPARAMS = DualDomainConcatHeadHParams()
 EXOGENOUS_BRIDGE_FUSION_HPARAMS = ExogenousBridgeFusionHParams()
 CROSS_SCALE_FUSION_HPARAMS = CrossScaleFusionHParams()
 MULTI_TASK_HEADS_HPARAMS = MultiTaskHeadsHParams()

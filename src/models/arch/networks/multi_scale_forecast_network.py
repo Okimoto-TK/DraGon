@@ -6,21 +6,29 @@ import torch
 import torch.nn as nn
 
 from config.models import (
-    adaln_zero_topdown_fusion,
+    dual_domain_concat_head,
+    dual_domain_concat_head_hparams,
+    dual_domain_mutual_attention,
+    dual_domain_mutual_attention_hparams,
     feature_channel_dropout,
     modern_tcn_film_encoder,
     multi_scale_forecast_network,
-    single_task_head,
     single_task_loss,
+    time_topdown_fusion,
+    time_topdown_fusion_hparams,
+    wavelet_bottomup_fusion,
+    wavelet_bottomup_fusion_hparams,
+    wavelet_branch_encoder,
+    wavelet_branch_encoder_hparams,
     wavelet_denoise,
     within_scale_star_fusion,
 )
-from src.models.arch.encoders.modern_tcn_film_encoder import ModernTCNFiLMEncoder
+from src.models.arch.encoders import DualDomainScaleEncoder
 from src.models.arch.fusions import (
-    AdaLNZeroTopDownFusion,
-    WithinScaleSTARFusion,
+    TimeTopDownHierarchicalFusion,
+    WaveletBottomUpSupportFusion,
 )
-from src.models.arch.heads import SingleTaskHead
+from src.models.arch.heads import DualDomainConcatHead
 from src.models.arch.layers import FeatureChannelDropout1D
 from src.models.arch.layers.wavelet_denoise import WaveletDenoise1D
 from src.models.arch.losses import SingleTaskDistributionLoss
@@ -31,13 +39,12 @@ from src.models.config.hparams import (
 
 
 class MultiScaleForecastNetwork(nn.Module):
-    """Assemble denoise -> encoder -> fusion -> heads into one forward chain."""
+    """Assemble denoise -> dual-domain encoders -> hierarchical fusion -> head."""
 
     def __init__(
         self,
         hidden_dim: int = multi_scale_forecast_network.hidden_dim,
         cond_dim: int = multi_scale_forecast_network.cond_dim,
-        num_latents: int = multi_scale_forecast_network.num_latents,
         task: str = multi_scale_forecast_network.task,
         return_aux_default: bool = False,
     ) -> None:
@@ -46,12 +53,9 @@ class MultiScaleForecastNetwork(nn.Module):
             raise ValueError(f"hidden_dim must be > 0, got {hidden_dim}.")
         if cond_dim <= 0:
             raise ValueError(f"cond_dim must be > 0, got {cond_dim}.")
-        if num_latents <= 0:
-            raise ValueError(f"num_latents must be > 0, got {num_latents}.")
 
         self.hidden_dim = int(hidden_dim)
         self.cond_dim = int(cond_dim)
-        self.num_latents = int(num_latents)
         self.task = task
         self.return_aux_default = bool(return_aux_default)
         self._hparams = MULTI_SCALE_FORECAST_NETWORK_HPARAMS
@@ -78,12 +82,11 @@ class MultiScaleForecastNetwork(nn.Module):
             warmup_len=self._hparams._micro_warmup_len,
             allow_backward=wavelet_denoise.backprop,
         )
+
         self.dropout_macro_input = FeatureChannelDropout1D(
             num_channels=self._macro_input_features,
             p=feature_channel_dropout.macro_p,
-            special_channel_ps={
-                16: feature_channel_dropout.macro_mf_main_amount_log_p,
-            },
+            special_channel_ps={16: feature_channel_dropout.macro_mf_main_amount_log_p},
         )
         self.dropout_mezzo_input = FeatureChannelDropout1D(
             num_channels=modern_tcn_film_encoder["mezzo"].num_features,
@@ -94,49 +97,76 @@ class MultiScaleForecastNetwork(nn.Module):
             p=feature_channel_dropout.micro_p,
         )
 
-        macro_encoder_kwargs = modern_tcn_film_encoder["macro"].__dict__.copy()
-        macro_encoder_kwargs["num_features"] = self._macro_input_features
-        self.encoder_macro = ModernTCNFiLMEncoder(**macro_encoder_kwargs)
-        self.encoder_mezzo = ModernTCNFiLMEncoder(
-            **modern_tcn_film_encoder["mezzo"].__dict__
+        self.scale_macro = self._build_scale_encoder(
+            scale_name="macro",
+            scale_index=0,
+            time_num_features=self._macro_input_features,
+            wavelet_num_features=modern_tcn_film_encoder["macro"].num_features,
+            wavelet_sidechain_features=multi_scale_forecast_network.sidechain_features,
         )
-        self.encoder_micro = ModernTCNFiLMEncoder(
-            **modern_tcn_film_encoder["micro"].__dict__
+        self.scale_mezzo = self._build_scale_encoder(
+            scale_name="mezzo",
+            scale_index=1,
+            time_num_features=modern_tcn_film_encoder["mezzo"].num_features,
+            wavelet_num_features=modern_tcn_film_encoder["mezzo"].num_features,
+            wavelet_sidechain_features=0,
+        )
+        self.scale_micro = self._build_scale_encoder(
+            scale_name="micro",
+            scale_index=2,
+            time_num_features=modern_tcn_film_encoder["micro"].num_features,
+            wavelet_num_features=modern_tcn_film_encoder["micro"].num_features,
+            wavelet_sidechain_features=0,
+        )
+        self.register_buffer(
+            "_macro_token_support",
+            self._build_token_support(
+                scale_name="macro",
+                total_days=float(self._hparams._macro_days),
+            ),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_mezzo_token_support",
+            self._build_token_support(
+                scale_name="mezzo",
+                total_days=float(self._hparams._mezzo_days),
+            ),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_micro_token_support",
+            self._build_token_support(
+                scale_name="micro",
+                total_days=float(self._hparams._micro_days),
+            ),
+            persistent=False,
         )
 
-        self.star_macro = WithinScaleSTARFusion(
+        self.time_cross_scale_fusion = TimeTopDownHierarchicalFusion(
             hidden_dim=self.hidden_dim,
-            num_features=self._macro_input_features,
-            core_dim=within_scale_star_fusion.core_dim,
-            num_layers=within_scale_star_fusion.num_layers,
-            dropout=within_scale_star_fusion.dropout,
+            num_heads=time_topdown_fusion.num_heads,
+            ffn_ratio=time_topdown_fusion.ffn_ratio,
+            num_layers=time_topdown_fusion.num_layers,
+            dropout=time_topdown_fusion.dropout,
+            _norm_eps=time_topdown_fusion_hparams._norm_eps,
+            _gate_floor=time_topdown_fusion_hparams._gate_floor,
         )
-        self.star_mezzo = WithinScaleSTARFusion(
+        self.wavelet_cross_scale_fusion = WaveletBottomUpSupportFusion(
             hidden_dim=self.hidden_dim,
-            num_features=within_scale_star_fusion.num_features,
-            core_dim=within_scale_star_fusion.core_dim,
-            num_layers=within_scale_star_fusion.num_layers,
-            dropout=within_scale_star_fusion.dropout,
+            ffn_ratio=wavelet_bottomup_fusion.ffn_ratio,
+            num_layers=wavelet_bottomup_fusion.num_layers,
+            dropout=wavelet_bottomup_fusion.dropout,
+            _norm_eps=wavelet_bottomup_fusion_hparams._norm_eps,
+            _gate_floor=wavelet_bottomup_fusion_hparams._gate_floor,
         )
-        self.star_micro = WithinScaleSTARFusion(
-            hidden_dim=self.hidden_dim,
-            num_features=within_scale_star_fusion.num_features,
-            core_dim=within_scale_star_fusion.core_dim,
-            num_layers=within_scale_star_fusion.num_layers,
-            dropout=within_scale_star_fusion.dropout,
-        )
-
-        self.cross_scale_fusion = AdaLNZeroTopDownFusion(
-            hidden_dim=self.hidden_dim,
-            ffn_ratio=adaln_zero_topdown_fusion.ffn_ratio,
-            dropout=adaln_zero_topdown_fusion.dropout,
-        )
-        self.single_task_head = SingleTaskHead(
+        self.prediction_head = DualDomainConcatHead(
             task=self.task,
             hidden_dim=self.hidden_dim,
-            num_heads=single_task_head.num_heads,
-            ffn_ratio=single_task_head.ffn_ratio,
-            dropout=single_task_head.dropout,
+            num_heads=dual_domain_concat_head.num_heads,
+            ffn_ratio=dual_domain_concat_head.ffn_ratio,
+            dropout=dual_domain_concat_head.dropout,
+            _norm_eps=dual_domain_concat_head_hparams._norm_eps,
         )
         self.loss_fn = SingleTaskDistributionLoss(
             task=self.task,
@@ -152,8 +182,73 @@ class MultiScaleForecastNetwork(nn.Module):
             _loss_compute_dtype=MULTI_TASK_LOSS_HPARAMS._loss_compute_dtype,
         )
 
+    def _build_scale_encoder(
+        self,
+        *,
+        scale_name: str,
+        scale_index: int,
+        time_num_features: int,
+        wavelet_num_features: int,
+        wavelet_sidechain_features: int,
+    ) -> DualDomainScaleEncoder:
+        hp = modern_tcn_film_encoder[scale_name]
+        time_encoder_kwargs = hp.__dict__.copy()
+        time_encoder_kwargs["num_features"] = int(time_num_features)
+        time_encoder_kwargs["hidden_dim"] = self.hidden_dim
+        time_encoder_kwargs["cond_dim"] = self.cond_dim
+
+        return DualDomainScaleEncoder(
+            time_encoder_kwargs=time_encoder_kwargs,
+            wavelet_num_features=wavelet_num_features,
+            scale_index=scale_index,
+            time_star_core_dim=within_scale_star_fusion.core_dim,
+            time_star_num_layers=within_scale_star_fusion.num_layers,
+            time_star_dropout=within_scale_star_fusion.dropout,
+            wavelet_num_heads=wavelet_branch_encoder.num_heads,
+            wavelet_ffn_ratio=wavelet_branch_encoder.ffn_ratio,
+            wavelet_num_layers=wavelet_branch_encoder.num_layers,
+            wavelet_sidechain_features=wavelet_sidechain_features,
+            mutual_num_heads=dual_domain_mutual_attention.num_heads,
+            mutual_ffn_ratio=dual_domain_mutual_attention.ffn_ratio,
+            mutual_num_layers=dual_domain_mutual_attention.num_layers,
+            dropout=dual_domain_mutual_attention.dropout,
+            wavelet_norm_eps=wavelet_branch_encoder_hparams._norm_eps,
+            wavelet_band_gate_floor=wavelet_branch_encoder_hparams._band_gate_floor,
+            wavelet_resample_mode=wavelet_branch_encoder_hparams._resample_mode,
+            mutual_norm_eps=dual_domain_mutual_attention_hparams._norm_eps,
+            mutual_gate_floor=dual_domain_mutual_attention_hparams._gate_floor,
+        )
+
+    def _build_token_support(
+        self,
+        *,
+        scale_name: str,
+        total_days: float,
+    ) -> torch.Tensor:
+        hp = modern_tcn_film_encoder[scale_name]
+        seq_len = int(hp.seq_len)
+        patch_len = int(hp.patch_len)
+        patch_stride = int(hp.patch_stride)
+        num_tokens = int(hp._num_patches)
+        if total_days <= 0:
+            raise ValueError(f"total_days must be > 0, got {total_days}.")
+        day_per_step = float(total_days) / float(seq_len)
+        starts = []
+        ends = []
+        for token_idx in range(num_tokens):
+            step_start = token_idx * patch_stride
+            step_end = min(step_start + patch_len, seq_len)
+            start_day = -float(total_days) + float(step_start) * day_per_step
+            end_day = -float(total_days) + float(step_end) * day_per_step
+            starts.append(start_day)
+            ends.append(min(end_day, 0.0))
+        return torch.tensor(list(zip(starts, ends)), dtype=torch.float32)
+
     def _expect_shape(
-        self, name: str, tensor: torch.Tensor, expected: tuple[int, ...]
+        self,
+        name: str,
+        tensor: torch.Tensor,
+        expected: tuple[int, ...],
     ) -> None:
         if tuple(tensor.shape) != expected:
             raise ValueError(
@@ -170,30 +265,9 @@ class MultiScaleForecastNetwork(nn.Module):
         return float(value.detach().float().square().mean().cpu())
 
     @staticmethod
-    def _mean(value: torch.Tensor) -> float:
-        return float(value.detach().float().mean().cpu())
-
-    @staticmethod
-    def _std(value: torch.Tensor) -> float:
-        return float(value.detach().float().std(unbiased=False).cpu())
-
-    @staticmethod
-    def _abs_mean(value: torch.Tensor) -> float:
-        return float(value.detach().float().abs().mean().cpu())
-
-    @staticmethod
-    def _feature_cosdist(value: torch.Tensor) -> float:
-        if value.ndim != 4 or value.shape[1] < 2:
-            return 0.0
-        feats = value.detach().float().reshape(value.shape[0], value.shape[1], -1)
-        feats = torch.nn.functional.normalize(feats, dim=-1, eps=1e-6)
-        cos = torch.matmul(feats, feats.transpose(1, 2))
-        feature_count = value.shape[1]
-        mask = ~torch.eye(feature_count, device=cos.device, dtype=torch.bool).unsqueeze(0)
-        dist = (1.0 - cos).masked_select(mask)
-        if dist.numel() == 0:
-            return 0.0
-        return float(dist.mean().cpu())
+    def _l2_mean(value: torch.Tensor) -> float:
+        flat = value.detach().float().reshape(value.shape[0], -1)
+        return float(flat.norm(dim=1).mean().cpu())
 
     @staticmethod
     def _feature_channel_rms(value: torch.Tensor) -> torch.Tensor:
@@ -203,8 +277,20 @@ class MultiScaleForecastNetwork(nn.Module):
             )
         return value.detach().float().square().mean(dim=(0, 2, 3)).sqrt().cpu()
 
+    def _forward_wavelet_frontend(
+        self,
+        module: nn.Module,
+        x_long: torch.Tensor,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
+        if hasattr(module, "forward_features"):
+            y, coeffs = module.forward_features(x_long)  # type: ignore[attr-defined]
+            return y, coeffs
+        y = module(x_long)
+        return y, (y, y, y)
+
     def _validate_forward_batch(
-        self, batch: dict[str, torch.Tensor]
+        self,
+        batch: dict[str, torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         required = [
             "macro_float_long",
@@ -216,8 +302,8 @@ class MultiScaleForecastNetwork(nn.Module):
             "sidechain_cond",
         ]
         values = {k: self._require_key(batch, k) for k in required}
-
         bsz = values["macro_float_long"].shape[0]
+
         self._expect_shape("macro_float_long", values["macro_float_long"], (bsz, 9, 112))
         self._expect_shape("macro_i8_long", values["macro_i8_long"], (bsz, 2, 112))
         self._expect_shape("mezzo_float_long", values["mezzo_float_long"], (bsz, 9, 144))
@@ -252,13 +338,22 @@ class MultiScaleForecastNetwork(nn.Module):
             sidechain_cond,
         ) = self._validate_forward_batch(batch)
 
-        macro_float = self.denoise_macro(macro_float_long)
-        mezzo_float = self.denoise_mezzo(mezzo_float_long)
-        micro_float = self.denoise_micro(micro_float_long)
-        macro_input = torch.cat([macro_float, sidechain_cond], dim=1)
-        macro_input = self.dropout_macro_input(macro_input)
-        mezzo_float = self.dropout_mezzo_input(mezzo_float)
-        micro_float = self.dropout_micro_input(micro_float)
+        macro_float, macro_coeffs = self._forward_wavelet_frontend(
+            self.denoise_macro,
+            macro_float_long,
+        )
+        mezzo_float, mezzo_coeffs = self._forward_wavelet_frontend(
+            self.denoise_mezzo,
+            mezzo_float_long,
+        )
+        micro_float, micro_coeffs = self._forward_wavelet_frontend(
+            self.denoise_micro,
+            micro_float_long,
+        )
+
+        macro_input = self.dropout_macro_input(torch.cat([macro_float, sidechain_cond], dim=1))
+        mezzo_input = self.dropout_mezzo_input(mezzo_float)
+        micro_input = self.dropout_micro_input(micro_float)
 
         macro_state = macro_i8_long[:, 0, -64:].long()
         macro_pos = macro_i8_long[:, 1, -64:].long()
@@ -267,130 +362,103 @@ class MultiScaleForecastNetwork(nn.Module):
         micro_state = micro_i8_long[:, 0, -144:].long()
         micro_pos = micro_i8_long[:, 1, -144:].long()
 
-        z_macro = self.encoder_macro(macro_input, macro_state, macro_pos)
-        z_mezzo = self.encoder_mezzo(mezzo_float, mezzo_state, mezzo_pos)
-        z_micro = self.encoder_micro(micro_float, micro_state, micro_pos)
+        macro_time, macro_wavelet, macro_time_features = self.scale_macro(
+            time_x=macro_input,
+            x_state=macro_state,
+            x_pos=macro_pos,
+            wavelet_coeffs=macro_coeffs,
+            sidechain=sidechain_cond,
+        )
+        mezzo_time, mezzo_wavelet, mezzo_time_features = self.scale_mezzo(
+            time_x=mezzo_input,
+            x_state=mezzo_state,
+            x_pos=mezzo_pos,
+            wavelet_coeffs=mezzo_coeffs,
+        )
+        micro_time, micro_wavelet, micro_time_features = self.scale_micro(
+            time_x=micro_input,
+            x_state=micro_state,
+            x_pos=micro_pos,
+            wavelet_coeffs=micro_coeffs,
+        )
 
-        z_macro_fused, scale_seq_macro = self.star_macro(z_macro)
-        z_mezzo_fused, scale_seq_mezzo = self.star_mezzo(z_mezzo)
-        z_micro_fused, scale_seq_micro = self.star_micro(z_micro)
+        macro_time, mezzo_time, micro_time = self.time_cross_scale_fusion(
+            macro_time,
+            mezzo_time,
+            micro_time,
+        )
+        macro_wavelet, mezzo_wavelet, micro_wavelet = self.wavelet_cross_scale_fusion(
+            macro_wavelet,
+            mezzo_wavelet,
+            micro_wavelet,
+            macro_support=self._macro_token_support,
+            mezzo_support=self._mezzo_token_support,
+            micro_support=self._micro_token_support,
+        )
 
-        debug: dict[str, float] = {}
-        if return_debug:
-            macro_fused = scale_seq_macro
-            mezzo_fused = scale_seq_mezzo
-            micro_fused = scale_seq_micro
-            macro_raw_tail = macro_float_long[:, :, -64:]
-            mezzo_raw_tail = mezzo_float_long[:, :, -96:]
-            micro_raw_tail = micro_float_long[:, :, -144:]
-            macro_raw_energy = self._energy_mean(macro_raw_tail)
-            mezzo_raw_energy = self._energy_mean(mezzo_raw_tail)
-            micro_raw_energy = self._energy_mean(micro_raw_tail)
-            macro_denoised_energy = self._energy_mean(macro_float)
-            mezzo_denoised_energy = self._energy_mean(mezzo_float)
-            micro_denoised_energy = self._energy_mean(micro_float)
-            debug.update(
-                {
-                    "wavelet_macro_energy_raw": macro_raw_energy,
-                    "wavelet_macro_energy_denoised": macro_denoised_energy,
-                    "wavelet_macro_energy_ratio_denoised_over_raw": macro_denoised_energy / max(macro_raw_energy, 1e-12),
-                    "wavelet_mezzo_energy_raw": mezzo_raw_energy,
-                    "wavelet_mezzo_energy_denoised": mezzo_denoised_energy,
-                    "wavelet_mezzo_energy_ratio_denoised_over_raw": mezzo_denoised_energy / max(mezzo_raw_energy, 1e-12),
-                    "wavelet_micro_energy_raw": micro_raw_energy,
-                    "wavelet_micro_energy_denoised": micro_denoised_energy,
-                    "wavelet_micro_energy_ratio_denoised_over_raw": micro_denoised_energy / max(micro_raw_energy, 1e-12),
-                    "encoder_macro_final_block_act_mean": self._mean(z_macro),
-                    "encoder_macro_final_block_act_std": self._std(z_macro),
-                    "encoder_macro_final_block_act_abs_mean": self._abs_mean(z_macro),
-                    "encoder_mezzo_final_block_act_mean": self._mean(z_mezzo),
-                    "encoder_mezzo_final_block_act_std": self._std(z_mezzo),
-                    "encoder_mezzo_final_block_act_abs_mean": self._abs_mean(z_mezzo),
-                    "encoder_micro_final_block_act_mean": self._mean(z_micro),
-                    "encoder_micro_final_block_act_std": self._std(z_micro),
-                    "encoder_micro_final_block_act_abs_mean": self._abs_mean(z_micro),
-                }
-            )
-            macro_pre_dist = self._feature_cosdist(z_macro)
-            macro_post_dist = self._feature_cosdist(z_macro_fused)
-            mezzo_pre_dist = self._feature_cosdist(z_mezzo)
-            mezzo_post_dist = self._feature_cosdist(z_mezzo_fused)
-            micro_pre_dist = self._feature_cosdist(z_micro)
-            micro_post_dist = self._feature_cosdist(z_micro_fused)
-            debug.update(
-                {
-                    "within_scale_macro_feature_cosdist_pre": macro_pre_dist,
-                    "within_scale_macro_feature_cosdist_post": macro_post_dist,
-                    "within_scale_macro_feature_cosdist_ratio": macro_post_dist / max(macro_pre_dist, 1e-12),
-                    "within_scale_mezzo_feature_cosdist_pre": mezzo_pre_dist,
-                    "within_scale_mezzo_feature_cosdist_post": mezzo_post_dist,
-                    "within_scale_mezzo_feature_cosdist_ratio": mezzo_post_dist / max(mezzo_pre_dist, 1e-12),
-                    "within_scale_micro_feature_cosdist_pre": micro_pre_dist,
-                    "within_scale_micro_feature_cosdist_post": micro_post_dist,
-                    "within_scale_micro_feature_cosdist_ratio": micro_post_dist / max(micro_pre_dist, 1e-12),
-                }
-            )
-        else:
-            macro_fused = scale_seq_macro
-            mezzo_fused = scale_seq_mezzo
-            micro_fused = scale_seq_micro
+        pred_dict = self.prediction_head(
+            mezzo_time,
+            mezzo_wavelet,
+            return_debug=return_debug,
+        )
 
-        if return_debug:
-            micro_td, macro_ctx, mezzo_ctx, micro_ctx, cross_scale_debug = self.cross_scale_fusion(
-                macro_seq=macro_fused,
-                mezzo_seq=mezzo_fused,
-                micro_seq=micro_fused,
-                return_debug=True,
-            )
-            pred_dict = self.single_task_head(
-                micro_td,
-                mezzo_ctx,
-                macro_ctx,
-                return_debug=True,
-            )
-            debug.update(cross_scale_debug)
-            debug.update(pred_dict.pop("_debug", {}))
-        else:
-            micro_td, macro_ctx, mezzo_ctx, micro_ctx = self.cross_scale_fusion(
-                macro_seq=macro_fused,
-                mezzo_seq=mezzo_fused,
-                micro_seq=micro_fused,
-            )
-            pred_dict = self.single_task_head(
-                micro_td,
-                mezzo_ctx,
-                macro_ctx,
-            )
+        macro_dual_summary = 0.5 * (macro_time.mean(dim=-1) + macro_wavelet.mean(dim=-1))
+        micro_dual_summary = 0.5 * (micro_time.mean(dim=-1) + micro_wavelet.mean(dim=-1))
+
         out: dict[str, torch.Tensor] = {
-            **pred_dict,
-            "fused_latents": micro_td,
-            "fused_global": pred_dict["head_context"],
-            "macro_ctx": macro_ctx,
-            "mezzo_ctx": mezzo_ctx,
-            "micro_ctx": micro_ctx,
+            "pred_primary": pred_dict["pred_primary"],
+            "pred_aux_raw": pred_dict["pred_aux_raw"],
+            "task_repr": pred_dict["task_repr"],
+            "mezzo_head_tokens": pred_dict["head_tokens"],
+            "mezzo_head_context": pred_dict["head_context"],
+            "macro_dual_summary": macro_dual_summary,
+            "micro_dual_summary": micro_dual_summary,
         }
+        for name in (
+            "pred_mu_ret",
+            "pred_scale_ret_raw",
+            "pred_mean_rv_raw",
+            "pred_shape_rv_raw",
+            "pred_mu_q",
+            "pred_scale_q_raw",
+        ):
+            if name in pred_dict:
+                out[name] = pred_dict[name]
 
         use_aux = self.return_aux_default if return_aux is None else bool(return_aux)
         if use_aux:
             out.update(
                 {
-                    "scale_seq_macro": scale_seq_macro,
-                    "scale_seq_mezzo": scale_seq_mezzo,
-                    "scale_seq_micro": scale_seq_micro,
                     "macro_input": macro_input,
-                    "macro_fused": macro_fused,
-                    "mezzo_fused": mezzo_fused,
-                    "micro_fused": micro_fused,
-                    "micro_td": micro_td,
-                    "feature_rms_macro_pre": self._feature_channel_rms(z_macro),
-                    "feature_rms_macro_post": self._feature_channel_rms(z_macro_fused),
-                    "feature_rms_mezzo_pre": self._feature_channel_rms(z_mezzo),
-                    "feature_rms_mezzo_post": self._feature_channel_rms(z_mezzo_fused),
-                    "feature_rms_micro_pre": self._feature_channel_rms(z_micro),
-                    "feature_rms_micro_post": self._feature_channel_rms(z_micro_fused),
+                    "time_tokens_macro": macro_time,
+                    "time_tokens_mezzo": mezzo_time,
+                    "time_tokens_micro": micro_time,
+                    "wavelet_tokens_macro": macro_wavelet,
+                    "wavelet_tokens_mezzo": mezzo_wavelet,
+                    "wavelet_tokens_micro": micro_wavelet,
+                    "macro_wavelet_sidechain_input": sidechain_cond,
+                    "feature_rms_macro_pre": self._feature_channel_rms(macro_time_features),
+                    "feature_rms_mezzo_pre": self._feature_channel_rms(mezzo_time_features),
+                    "feature_rms_micro_pre": self._feature_channel_rms(micro_time_features),
                 }
             )
+
         if return_debug:
+            debug = {
+                "wavelet_macro_energy_raw": self._energy_mean(macro_float_long[:, :, -64:]),
+                "wavelet_macro_energy_denoised": self._energy_mean(macro_float),
+                "wavelet_mezzo_energy_raw": self._energy_mean(mezzo_float_long[:, :, -96:]),
+                "wavelet_mezzo_energy_denoised": self._energy_mean(mezzo_float),
+                "wavelet_micro_energy_raw": self._energy_mean(micro_float_long[:, :, -144:]),
+                "wavelet_micro_energy_denoised": self._energy_mean(micro_float),
+                "time_macro_summary_l2_mean": self._l2_mean(macro_time.mean(dim=-1)),
+                "time_mezzo_summary_l2_mean": self._l2_mean(mezzo_time.mean(dim=-1)),
+                "time_micro_summary_l2_mean": self._l2_mean(micro_time.mean(dim=-1)),
+                "wavelet_macro_summary_l2_mean": self._l2_mean(macro_wavelet.mean(dim=-1)),
+                "wavelet_mezzo_summary_l2_mean": self._l2_mean(mezzo_wavelet.mean(dim=-1)),
+                "wavelet_micro_summary_l2_mean": self._l2_mean(micro_wavelet.mean(dim=-1)),
+            }
+            debug.update(pred_dict.pop("_debug", {}))
             out["_debug"] = debug
         return out
 
@@ -421,11 +489,10 @@ class MultiScaleForecastNetwork(nn.Module):
             **loss,
             "pred_primary": pred["pred_primary"],
             "pred_aux_raw": pred["pred_aux_raw"],
-            "fused_latents": pred["fused_latents"],
-            "fused_global": pred["fused_global"],
-            "macro_ctx": pred["macro_ctx"],
-            "mezzo_ctx": pred["mezzo_ctx"],
-            "micro_ctx": pred["micro_ctx"],
+            "mezzo_head_tokens": pred["mezzo_head_tokens"],
+            "mezzo_head_context": pred["mezzo_head_context"],
+            "macro_dual_summary": pred["macro_dual_summary"],
+            "micro_dual_summary": pred["micro_dual_summary"],
         }
         for name in (
             "pred_mu_ret",
@@ -435,16 +502,9 @@ class MultiScaleForecastNetwork(nn.Module):
             "pred_mu_q",
             "pred_scale_q_raw",
             "task_repr",
-            "head_context",
         ):
             if name in pred:
                 out[name] = pred[name]
-        if return_aux:
-            out.update(
-                {
-                    "micro_td": pred["fused_latents"],
-                }
-            )
         if return_debug and "_debug" in pred:
             out["_debug"] = pred["_debug"]
         return out

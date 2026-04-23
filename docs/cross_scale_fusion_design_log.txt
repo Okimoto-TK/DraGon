@@ -1,0 +1,136 @@
+Cross-Scale Fusion Design Log
+=============================
+
+Date: 2026-04-23
+Scope: dual-branch time-domain + wavelet-domain encoder and cross-scale fusion redesign
+
+Confirmed Decisions
+-------------------
+
+1. Encoder output contract
+- Each scale encoder returns:
+  - time_tokens
+  - wavelet_tokens
+- Both outputs use the same hidden dimension.
+- Both outputs use the same token length for that scale.
+- Unified shape: [B, D, N_scale]
+
+2. Wavelet branch semantic preservation
+- Preserve subband identity inside the wavelet branch.
+- Explicitly preserve:
+  - band type identity: A / D
+  - decomposition level identity
+  - scale identity: macro / mezzo / micro
+- Each subband uses its own projector into [B, D, N_scale].
+- Subbands interact inside the wavelet branch before final merge.
+- External output remains a unified wavelet_tokens tensor; raw multi-subband tensors are not exposed to the final fusion.
+
+3. Time branch input
+- time branch input = inverse-transformed time-domain sequence after wavelet processing
+- wavelet branch input = wavelet subband coefficients without inverse transform
+
+4. Parameter sharing between branches
+- Share only lightweight semantic/front-end components:
+  - input normalization policy
+  - scale embedding
+  - time-position encoding system
+- Do not share:
+  - per-branch projectors
+  - branch encoder blocks
+  - branch-local fusion/mixer modules
+
+5. Branch-internal processing style
+- The two branches are heterogeneous rather than isomorphic.
+- time branch:
+  - keeps a strong temporal-inductive-bias style block
+  - remains closer to ModernTCN-style temporal modeling
+- wavelet branch:
+  - does not simply copy the time-branch block
+  - should use a block specialized for subband-aware / cross-band modeling
+
+6. Wavelet branch block choice
+- Use a hybrid block rather than pure mixer or pure attention.
+- Recommended internal order:
+  - cross-band attention
+  - lightweight band-wise MLP / mixer
+  - gated residual update
+- Design intent:
+  - allow A/D subbands and different levels to exchange information
+  - constrain update amplitude so high-frequency noise is not amplified too aggressively
+
+Open Items
+----------
+
+7. Intra-scale time/wavelet interaction
+- Within each scale, use direct mutual attention between time_tokens and wavelet_tokens.
+- After intra-scale interaction, keep only two token sequences:
+  - time_tokens
+  - wavelet_tokens
+- Do not add a third persistent bridge-token stream.
+- Rationale:
+  - avoid representation explosion
+  - make the final cross-scale fusion easier to optimize
+  - reduce redundancy under low-SNR financial data
+
+8. Intra-scale mutual-attention direction
+- Use bidirectional mutual attention rather than one-way interaction.
+- Recommended order:
+  - wavelet -> time
+  - time -> wavelet
+- Both directions should use residual connections and gates.
+- Design intent:
+  - let wavelet-domain structure first refine time-domain noise perception
+  - then let time-domain phase / morphology information feed back into the wavelet branch
+
+9. Cross-scale fusion topology
+- Use asymmetric dual-domain cross-scale routing:
+  - time-domain branch: top-down
+  - wavelet-domain branch: bottom-up
+- Concretely:
+  - time tokens follow macro -> mezzo -> micro -> mezzo
+  - wavelet tokens follow micro -> mezzo -> macro -> mezzo
+- Rationale:
+  - time-domain branch is better suited to regime/context injection from coarse scales downward
+  - wavelet-domain branch is better suited to aggregating local/high-frequency evidence upward
+  - both branches return to mezzo as the meeting level for final cross-domain integration
+- Avoid flattening all domain/scale streams into one global attention pool.
+
+10. Cross-scale operator by domain
+- time-domain cross-scale routing uses attention-style interaction.
+- wavelet-domain bottom-up routing does not use ordinary token-to-token attention.
+- Instead, wavelet bottom-up routing uses support-aware aggregation / multiresolution coarsening:
+  - micro -> mezzo: aggregate child evidence within parent support regions
+  - mezzo -> macro: aggregate child evidence within parent support regions
+  - return to mezzo only through constrained write-back if needed
+- Rationale:
+  - coarse wavelet tokens correspond to wide temporal support regions
+  - ordinary attention would force macro tokens to attend over many distant child tokens with weak semantics
+  - support-aware aggregation matches multiresolution wavelet structure better
+
+11. Final mezzo-level output for the head
+- After both branches return to mezzo, keep:
+  - mezzo_time_tokens: [B, D, N_mezzo]
+  - mezzo_wavelet_tokens: [B, D, N_mezzo]
+- Concatenate them along channel dimension:
+  - mezzo_concat: [B, 2D, N_mezzo]
+- Before the prediction head, apply only a lightweight projection / reshaping stage:
+  - normalization
+  - linear / 1x1 projection from 2D back to head width
+- Do not add another complex fusion block before the head.
+- Rationale:
+  - first implementation should stay structurally simple
+  - preserves both domains while keeping the head input contract manageable
+
+12. Unified gate / residual / normalization rule
+- Use pre-norm as the default normalization pattern.
+- Every cross-domain or cross-scale update should be applied through a residual path.
+- Every operation that writes external information into the current stream should use a gate.
+- Gates should be initialized conservatively so the initial behavior stays close to identity.
+- Avoid mixing many normalization styles in the first implementation.
+- Design intent:
+  - keep optimization stable
+  - avoid aggressive noise injection under low-SNR financial data
+  - make module semantics easier to inspect and debug
+13. Token budget and compression policy
+14. Temporal and scale alignment
+15. Auxiliary losses and ablation order

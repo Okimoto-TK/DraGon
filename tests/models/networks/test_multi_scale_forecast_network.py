@@ -15,6 +15,13 @@ class _TailCropDenoise(nn.Module):
     def forward(self, x_long: torch.Tensor) -> torch.Tensor:
         return x_long[..., -self.target_len :]
 
+    def forward_features(
+        self,
+        x_long: torch.Tensor,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
+        y = self.forward(x_long)
+        return y, (y, y, y)
+
 
 def _make_batch(batch_size: int = 2) -> dict[str, torch.Tensor]:
     macro_state = torch.randint(0, 16, (batch_size, 1, 112), dtype=torch.int64)
@@ -59,8 +66,8 @@ def test_forward_smoke_outputs_and_shapes(task: str, expected_keys: set[str]) ->
     assert expected_keys.issubset(set(out.keys()))
     assert out["pred_primary"].shape == (2, 1)
     assert out["pred_aux_raw"].shape == (2, 1)
-    assert out["fused_latents"].shape == (2, 128, 36)
-    assert out["fused_global"].shape == (2, 128)
+    assert out["mezzo_head_tokens"].shape == (2, 128, 24)
+    assert out["mezzo_head_context"].shape == (2, 128)
 
 @pytest.mark.parametrize("task", ["ret", "rv", "q"])
 def test_forward_loss_smoke_outputs(task: str) -> None:
@@ -79,16 +86,30 @@ def test_forward_aux_outputs_present() -> None:
     model = _make_model(task="ret")
     out = model(_make_batch(), return_aux=True)
     assert "macro_input" in out
-    assert "macro_fused" in out and "mezzo_fused" in out and "micro_fused" in out
-    assert "macro_ctx" in out and "mezzo_ctx" in out and "micro_ctx" in out
-    assert "feature_rms_macro_pre" in out and "feature_rms_macro_post" in out
-    assert "feature_rms_mezzo_pre" in out and "feature_rms_mezzo_post" in out
-    assert "feature_rms_micro_pre" in out and "feature_rms_micro_post" in out
+    assert "time_tokens_macro" in out and "wavelet_tokens_macro" in out
+    assert "time_tokens_mezzo" in out and "wavelet_tokens_mezzo" in out
+    assert "time_tokens_micro" in out and "wavelet_tokens_micro" in out
+    assert "macro_dual_summary" in out
+    assert "mezzo_head_context" in out
+    assert "micro_dual_summary" in out
+    assert "macro_wavelet_sidechain_input" in out
+    assert "feature_rms_macro_pre" in out
+    assert "feature_rms_mezzo_pre" in out
+    assert "feature_rms_micro_pre" in out
     assert out["macro_input"].shape == (2, 22, 64)
+    assert out["time_tokens_macro"].shape == (2, 128, 16)
+    assert out["wavelet_tokens_macro"].shape == (2, 128, 16)
+    assert out["time_tokens_mezzo"].shape == (2, 128, 24)
+    assert out["wavelet_tokens_mezzo"].shape == (2, 128, 24)
+    assert out["time_tokens_micro"].shape == (2, 128, 36)
+    assert out["wavelet_tokens_micro"].shape == (2, 128, 36)
+    assert out["macro_dual_summary"].shape == (2, 128)
+    assert out["mezzo_head_context"].shape == (2, 128)
+    assert out["micro_dual_summary"].shape == (2, 128)
+    assert out["macro_wavelet_sidechain_input"].shape == (2, 13, 64)
     assert out["feature_rms_macro_pre"].shape == (22,)
-    assert out["feature_rms_macro_post"].shape == (22,)
     assert out["feature_rms_mezzo_pre"].shape == (9,)
-    assert out["feature_rms_micro_post"].shape == (9,)
+    assert out["feature_rms_micro_pre"].shape == (9,)
 
 
 def test_forward_loss_debug_outputs_present() -> None:
@@ -97,8 +118,8 @@ def test_forward_loss_debug_outputs_present() -> None:
     assert "_debug" in out
     debug = out["_debug"]
     assert "wavelet_macro_energy_raw" in debug
-    assert "cross_scale_macro_ctx_l2_mean" in debug
-    assert "head_head_context_l2_mean" in debug
+    assert "time_macro_summary_l2_mean" in debug
+    assert "head_task_repr_l2_mean" in debug
 
 
 def test_forward_missing_key_raises_value_error() -> None:
@@ -124,8 +145,8 @@ def test_forward_train_and_eval_both_run() -> None:
     out_train = model(batch)
     model.eval()
     out_eval = model(batch)
-    assert out_train["fused_latents"].shape == (2, 128, 36)
-    assert out_eval["fused_latents"].shape == (2, 128, 36)
+    assert out_train["mezzo_head_tokens"].shape == (2, 128, 24)
+    assert out_eval["mezzo_head_tokens"].shape == (2, 128, 24)
 
 
 def test_macro_targeted_feature_dropout_configuration_present() -> None:

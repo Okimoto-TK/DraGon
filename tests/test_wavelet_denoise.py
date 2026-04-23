@@ -124,3 +124,18 @@ def test_wavelet_denoise_can_disable_backward_graph(patch_ptwt: None) -> None:
     y = module(x)
 
     assert not y.requires_grad
+
+
+def test_wavelet_denoise_forward_features_returns_denoised_and_coeffs(
+    patch_ptwt: None,
+) -> None:
+    module = wd.WaveletDenoise1D(n_channels=3, target_len=16, warmup_len=8)
+    x = torch.randn(2, 3, 24)
+
+    y, coeffs = module.forward_features(x)
+
+    assert y.shape == (2, 3, 16)
+    assert len(coeffs) == 3
+    assert coeffs[0].shape == (2, 3, 24)
+    assert coeffs[1].shape == (2, 3, 24)
+    assert coeffs[2].shape == (2, 3, 24)

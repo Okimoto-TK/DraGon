@@ -6,11 +6,16 @@ from dataclasses import dataclass
 
 from src.models.config.hparams import (
     CROSS_SCALE_FUSION_HPARAMS,
+    DUAL_DOMAIN_CONCAT_HEAD_HPARAMS,
+    DUAL_DOMAIN_MUTUAL_ATTENTION_HPARAMS,
     EXOGENOUS_BRIDGE_FUSION_HPARAMS,
     MULTI_SCALE_FORECAST_NETWORK_HPARAMS,
     MULTI_TASK_HEADS_HPARAMS,
     MULTI_TASK_LOSS_HPARAMS,
     MODERN_TCN_FILM_ENCODER_HPARAMS,
+    TIME_TOPDOWN_FUSION_HPARAMS,
+    WAVELET_BOTTOMUP_FUSION_HPARAMS,
+    WAVELET_BRANCH_ENCODER_HPARAMS,
     WITHIN_SCALE_STAR_FUSION_HPARAMS,
 )
 
@@ -44,8 +49,6 @@ wavelet_denoise = WaveletDenoiseConfig()
 class WithinScaleSTARFusionConfig:
     """Open tuning parameters for WithinScaleSTARFusion."""
 
-    hidden_dim: int = 128
-    num_features: int = 9
     core_dim: int = 64
     num_layers: int = 1
     dropout: float = 0.0
@@ -53,6 +56,74 @@ class WithinScaleSTARFusionConfig:
 
 within_scale_star_fusion = WithinScaleSTARFusionConfig()
 within_scale_star_fusion_hparams = WITHIN_SCALE_STAR_FUSION_HPARAMS
+
+
+@dataclass(frozen=True)
+class WaveletBranchEncoderConfig:
+    """Open tuning parameters for the wavelet-domain branch encoder."""
+
+    num_heads: int = 4
+    ffn_ratio: float = 2.0
+    num_layers: int = 1
+    dropout: float = 0.0
+
+
+wavelet_branch_encoder = WaveletBranchEncoderConfig()
+wavelet_branch_encoder_hparams = WAVELET_BRANCH_ENCODER_HPARAMS
+
+
+@dataclass(frozen=True)
+class DualDomainMutualAttentionConfig:
+    """Open tuning parameters for scale-local mutual attention."""
+
+    num_heads: int = 4
+    ffn_ratio: float = 2.0
+    num_layers: int = 1
+    dropout: float = 0.0
+
+
+dual_domain_mutual_attention = DualDomainMutualAttentionConfig()
+dual_domain_mutual_attention_hparams = DUAL_DOMAIN_MUTUAL_ATTENTION_HPARAMS
+
+
+@dataclass(frozen=True)
+class TimeTopDownFusionConfig:
+    """Open tuning parameters for time-domain top-down hierarchical fusion."""
+
+    num_heads: int = 4
+    ffn_ratio: float = 2.0
+    num_layers: int = 1
+    dropout: float = 0.0
+
+
+time_topdown_fusion = TimeTopDownFusionConfig()
+time_topdown_fusion_hparams = TIME_TOPDOWN_FUSION_HPARAMS
+
+
+@dataclass(frozen=True)
+class WaveletBottomUpFusionConfig:
+    """Open tuning parameters for wavelet-domain support-aware fusion."""
+
+    ffn_ratio: float = 2.0
+    num_layers: int = 1
+    dropout: float = 0.0
+
+
+wavelet_bottomup_fusion = WaveletBottomUpFusionConfig()
+wavelet_bottomup_fusion_hparams = WAVELET_BOTTOMUP_FUSION_HPARAMS
+
+
+@dataclass(frozen=True)
+class DualDomainConcatHeadConfig:
+    """Open tuning parameters for the final dual-domain concat head."""
+
+    num_heads: int = 4
+    ffn_ratio: float = 2.0
+    dropout: float = 0.0
+
+
+dual_domain_concat_head = DualDomainConcatHeadConfig()
+dual_domain_concat_head_hparams = DUAL_DOMAIN_CONCAT_HEAD_HPARAMS
 
 
 @dataclass(frozen=True)
@@ -187,7 +258,6 @@ class MultiScaleForecastNetworkConfig:
 
     hidden_dim: int = 128
     cond_dim: int = 32
-    num_latents: int = 8
     sidechain_features: int = 13
     task: str = "ret"
 

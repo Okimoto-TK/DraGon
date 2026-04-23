@@ -79,7 +79,10 @@ class WaveletDenoise1D(nn.Module):
     def _soft_threshold(x: torch.Tensor, thr: torch.Tensor) -> torch.Tensor:
         return torch.sign(x) * F.relu(x.abs() - thr)
 
-    def _forward_impl(self, x_long: torch.Tensor) -> torch.Tensor:
+    def _forward_features_impl(
+        self,
+        x_long: torch.Tensor,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
         if x_long.ndim != 3:
             raise ValueError(
                 f"x_long must have shape [B, C, T], got ndim={x_long.ndim}, "
@@ -148,7 +151,15 @@ class WaveletDenoise1D(nn.Module):
 
         y_long = y_long[..., -expected_t:]
         y = y_long[..., -self.target_len:]
-        return y.to(device=x_long.device, dtype=compute_dtype)
+        wavelet_coeffs = (
+            approximation.to(device=x_long.device, dtype=compute_dtype),
+            *[detail.to(device=x_long.device, dtype=compute_dtype) for detail in new_details],
+        )
+        return y.to(device=x_long.device, dtype=compute_dtype), wavelet_coeffs
+
+    def _forward_impl(self, x_long: torch.Tensor) -> torch.Tensor:
+        y, _ = self._forward_features_impl(x_long)
+        return y
 
     @_disable_for_compile
     def forward(self, x_long: torch.Tensor) -> torch.Tensor:
@@ -156,3 +167,14 @@ class WaveletDenoise1D(nn.Module):
             return self._forward_impl(x_long)
         with torch.no_grad():
             return self._forward_impl(x_long).detach()
+
+    @_disable_for_compile
+    def forward_features(
+        self,
+        x_long: torch.Tensor,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
+        if self.allow_backward:
+            return self._forward_features_impl(x_long)
+        with torch.no_grad():
+            y, coeffs = self._forward_features_impl(x_long)
+        return y.detach(), tuple(coeff.detach() for coeff in coeffs)
