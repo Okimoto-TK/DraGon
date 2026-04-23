@@ -39,6 +39,7 @@ class EpochConsoleLogger:
     ) -> None:
         self.log_every = int(log_every)
         self.task = task
+        self._task_display = "q10" if task == "q" else task
         self.enabled = bool(enabled)
         self.console = console or Console()
         self.progress = Progress(
@@ -46,6 +47,7 @@ class EpochConsoleLogger:
             BarColumn(),
             MofNCompleteColumn(),
             TextColumn("{task.fields[metrics]}"),
+            TextColumn("step={task.fields[step_ms]}"),
             TextColumn("eta={task.fields[eta]}"),
             TimeElapsedColumn(),
             console=self.console,
@@ -54,8 +56,7 @@ class EpochConsoleLogger:
         )
         self.task_id: TaskID | None = None
         self._phase = ""
-        self._last_log_time: float | None = None
-        self._last_log_step = 0
+        self._phase_start_time: float | None = None
         self._started = False
 
     def _ensure_started(self) -> None:
@@ -75,6 +76,7 @@ class EpochConsoleLogger:
                 description,
                 total=total_steps,
                 metrics="loss=--",
+                step_ms="--ms",
                 eta="--:--",
             )
         else:
@@ -84,18 +86,45 @@ class EpochConsoleLogger:
                 completed=0,
                 description=description,
                 metrics="loss=--",
+                step_ms="--ms",
                 eta="--:--",
             )
         self._phase = phase
-        self._last_log_time = time.perf_counter()
-        self._last_log_step = 0
+        self._phase_start_time = time.perf_counter()
+
+    def _estimate_timing(
+        self,
+        *,
+        step: int,
+        total_steps: int,
+    ) -> tuple[float | None, float | None]:
+        if self._phase_start_time is None or step <= 0:
+            return None, None
+        elapsed = max(time.perf_counter() - self._phase_start_time, 0.0)
+        avg_step_seconds = elapsed / step
+        eta_seconds = avg_step_seconds * max(total_steps - step, 0)
+        return avg_step_seconds, eta_seconds
 
     def advance(self, step: int) -> None:
         """Advance the current phase progress."""
 
         if self.task_id is None:
             raise RuntimeError("Progress task has not been initialized.")
-        self.progress.update(self.task_id, completed=step)
+        task = self.progress.tasks[self.task_id]
+        total_steps = int(task.total) if task.total is not None else step
+        avg_step_seconds, eta_seconds = self._estimate_timing(
+            step=step,
+            total_steps=total_steps,
+        )
+        step_ms_text = "--ms"
+        if avg_step_seconds is not None:
+            step_ms_text = f"{avg_step_seconds * 1000.0:.1f}ms"
+        self.progress.update(
+            self.task_id,
+            completed=step,
+            step_ms=step_ms_text,
+            eta=_format_seconds(eta_seconds),
+        )
 
     def log_metrics(
         self,
@@ -112,33 +141,32 @@ class EpochConsoleLogger:
         if self.task_id is None:
             raise RuntimeError("Progress task has not been initialized.")
 
-        now = time.perf_counter()
         display_epoch = epoch + 1
-        eta_seconds: float | None = None
-        if self._last_log_time is not None:
-            logged_steps = step - self._last_log_step
-            if logged_steps > 0:
-                avg_step_time = (now - self._last_log_time) / logged_steps
-                eta_seconds = avg_step_time * max(total_steps - step, 0)
-        self._last_log_time = now
-        self._last_log_step = step
+        avg_step_seconds, eta_seconds = self._estimate_timing(
+            step=step,
+            total_steps=total_steps,
+        )
+        step_ms_text = "--ms"
+        if avg_step_seconds is not None:
+            step_ms_text = f"{avg_step_seconds * 1000.0:.1f}ms"
 
         metric_text = (
             f"loss={losses['loss_total']:.4f} "
-            f"{self.task}={losses['loss_task']:.4f} "
+            f"{self._task_display}={losses['loss_task']:.4f} "
             f"lr={lr:.2e}"
         )
         self.progress.update(
             self.task_id,
             metrics=metric_text,
+            step_ms=step_ms_text,
             eta=_format_seconds(eta_seconds),
         )
         if self.enabled:
             self.console.log(
                 f"phase={phase} epoch={display_epoch} step={step}/{total_steps} "
                 f"loss_total={losses['loss_total']:.6f} "
-                f"loss_{self.task}={losses['loss_task']:.6f} "
-                f"lr={lr:.6e} eta={_format_seconds(eta_seconds)}"
+                f"loss_{self._task_display}={losses['loss_task']:.6f} "
+                f"lr={lr:.6e} step_ms={step_ms_text} eta={_format_seconds(eta_seconds)}"
             )
 
     def close(self) -> None:

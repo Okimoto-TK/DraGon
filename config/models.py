@@ -148,7 +148,7 @@ class MultiTaskLossConfig:
     ret_loss_weight: float = 1.0
     rv_loss_weight: float = 1.0
     q_loss_weight: float = 1.0
-    q_tau: float = 0.05
+    q_tau: float = 0.10
 
 
 multi_task_loss = MultiTaskLossConfig()
@@ -159,7 +159,7 @@ multi_task_loss_hparams = MULTI_TASK_LOSS_HPARAMS
 class SingleTaskLossConfig:
     """Open tuning parameters for SingleTaskDistributionLoss."""
 
-    q_tau: float = 0.05
+    q_tau: float = 0.10
     ret_tail_weight_threshold: float = 0.05
     ret_tail_weight_alpha: float = 2.0
     ret_tail_weight_max: float = 4.0

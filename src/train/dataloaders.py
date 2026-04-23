@@ -19,17 +19,12 @@ def _resolve_loader_parallelism(
     num_workers: int,
     prefetch_factor: int,
 ) -> tuple[int, int]:
-    """Keep host-side prefetch bounded when the batch itself is already large."""
+    """Resolve safe dataloader worker and prefetch settings."""
+    _ = batch_size
 
     if num_workers <= 0:
         return 0, prefetch_factor
-    if batch_size >= 4096:
-        return min(num_workers, 4), 1
-    if batch_size >= 2048:
-        return min(num_workers, 6), 1
-    if batch_size >= 1024:
-        return min(num_workers, 8), min(prefetch_factor, 2)
-    return num_workers, prefetch_factor
+    return num_workers, max(1, prefetch_factor)
 
 
 class FileLocalityBatchSampler(BatchSampler):
@@ -146,7 +141,7 @@ def build_val_dataloader(
     dataset: Dataset,
     *,
     batch_size: int = training.val_batch_size,
-    num_workers: int = training.num_workers,
+    num_workers: int = training.val_num_workers,
 ) -> DataLoader:
     """Build the validation dataloader."""
 

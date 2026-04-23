@@ -5,8 +5,8 @@ from src.data.pipelines import RawPipeline, ProcessedPipeline
 
 # Processed feature types to generate
 FEATURE_TYPES = [
-    # "index",
-    # "mask",
+    "index",
+    "mask",
     # "macro",
     "mezzo",
     "micro",

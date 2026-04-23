@@ -121,7 +121,8 @@ def run_training(
     checkpoint_root: str | Path = DEFAULT_CHECKPOINT_ROOT,
     batch_size: int = training.batch_size,
     val_batch_size: int = training.val_batch_size,
-    num_workers: int = training.num_workers,
+    num_workers: int | None = training.num_workers,
+    val_num_workers: int | None = training.val_num_workers,
     lr: float = training.lr,
     weight_decay: float = training.weight_decay,
     max_grad_norm: float = training.max_grad_norm,
@@ -129,7 +130,6 @@ def run_training(
     log_every: int = training.log_every,
     enable_tensorboard: bool = training.enable_tensorboard,
     tensorboard_root: str | Path = training.tensorboard_root,
-    tensorboard_debug_every: int = training.tensorboard_debug_every,
     tensorboard_flush_secs: int = training.tensorboard_flush_secs,
     num_epochs: int = training.num_epochs,
     save_every: int = training.save_every,
@@ -139,7 +139,7 @@ def run_training(
     device: str | torch.device | None = None,
     use_amp: bool = True,
     mmap_mode: str | None = training.mmap_mode,
-    validate_shapes: bool = True,
+    validate_shapes: bool = training.validate_shapes,
     device_prefetch: bool = training.device_prefetch,
     device_prefetch_batches: int = training.device_prefetch_batches,
     enable_console: bool = True,
@@ -147,6 +147,10 @@ def run_training(
     """Run end-to-end training over assembled NPZ inputs."""
 
     selected_task = task or training.task
+    resolved_train_workers = training.num_workers if num_workers is None else int(num_workers)
+    resolved_val_workers = (
+        training.val_num_workers if val_num_workers is None else int(val_num_workers)
+    )
 
     if train_files is None or val_files is None:
         default_train_files, default_val_files = _default_file_split()
@@ -176,12 +180,12 @@ def run_training(
     train_loader = build_train_dataloader(
         train_dataset,
         batch_size=batch_size,
-        num_workers=num_workers,
+        num_workers=resolved_train_workers,
     )
     val_loader = build_val_dataloader(
         val_dataset,
         batch_size=val_batch_size,
-        num_workers=num_workers,
+        num_workers=resolved_val_workers,
     )
 
     resolved_device = (
@@ -225,7 +229,6 @@ def run_training(
         log_dir=tensorboard_log_dir,
         task=selected_task,
         enabled=enable_tensorboard,
-        debug_every=tensorboard_debug_every,
         flush_secs=tensorboard_flush_secs,
     )
     trainer = Trainer(

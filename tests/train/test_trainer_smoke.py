@@ -290,7 +290,6 @@ def test_trainer_fit_writes_tensorboard_events(tmp_path: Path) -> None:
         log_dir=tmp_path / "tb" / "smoke",
         task="ret",
         enabled=True,
-        debug_every=1,
     )
     trainer = Trainer(
         model=model,

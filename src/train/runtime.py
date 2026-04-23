@@ -158,10 +158,20 @@ def build_optimizer(
 
 def build_scheduler(
     optimizer: torch.optim.Optimizer,
-) -> torch.optim.lr_scheduler.LambdaLR:
-    """Build a minimal epoch-stepped scheduler."""
+) -> torch.optim.lr_scheduler.ReduceLROnPlateau:
+    """Build a plateau scheduler driven by validation loss."""
 
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda _: 1.0)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="min",
+        factor=training.lr_plateau_factor,
+        patience=training.lr_plateau_patience,
+        threshold=0.0,
+        threshold_mode="abs",
+        cooldown=0,
+        min_lr=0.0,
+        eps=1e-12,
+    )
     setattr(scheduler, "_step_per_batch", False)
     return scheduler
 

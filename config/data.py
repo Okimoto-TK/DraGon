@@ -58,6 +58,7 @@ processed_path = SimpleNamespace(
 )
 
 assembled_dir = data_dir / "assembled"
+latest_dir = data_dir / "latest"
 
 # ---------------------------------------------------------------------------
 # Label schema

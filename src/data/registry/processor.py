@@ -3,7 +3,7 @@ from __future__ import annotations
 
 # === Processing Window Constants ===
 
-FEAT_WINDOW = 5
+FEAT_WINDOW = 48
 LABEL_WINDOW = 4
 
 # === Chunking Configuration ===

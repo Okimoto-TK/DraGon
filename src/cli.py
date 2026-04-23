@@ -84,6 +84,16 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=("ret", "rv", "q"),
         help="Train a single selected task head: ret, rv, or q.",
     )
+    train_parser.add_argument(
+        "--workers",
+        type=int,
+        help="Override train dataloader worker count.",
+    )
+    train_parser.add_argument(
+        "--val-workers",
+        type=int,
+        help="Override validation dataloader worker count.",
+    )
 
     prepare_parser = subparsers.add_parser(
         "prepare",
@@ -125,6 +135,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             checkpoint=args.checkpoint,
             checkpoint_root=DEFAULT_CHECKPOINT_ROOT,
             task=args.task,
+            num_workers=args.workers if args.workers is not None else None,
+            val_num_workers=args.val_workers if args.val_workers is not None else None,
         )
         print(result)
         return

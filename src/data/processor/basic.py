@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import config.data as config
+import numpy as np
 import polars as pl
 from tqdm import tqdm
 
@@ -32,18 +33,24 @@ def process_mask(
 ) -> pl.DataFrame:
     """Process suspend and namechange data into filter mask table."""
     nc = namechange_df.with_columns(
-        is_st=pl.col("name").str.starts_with("ST")
+        is_st_event=pl.col("name").str.starts_with("ST")
         | pl.col("name").str.starts_with("*ST")
     )
 
-    df = suspend_df.join(
-        nc.select(["code", "trade_date", "is_st"]),
-        on=["code", "trade_date"],
-        how="full",
-        coalesce=True,
-    ).with_columns(
-        pl.col("is_suspend").fill_null(False),
-        pl.col("is_st").fill_null(False),
+    # ``namechange`` is an event stream keyed by effective date, so convert it
+    # to a daily state on the raw trading-date grid before evaluating the mask.
+    df = (
+        suspend_df.join(
+            nc.select(["code", "trade_date", "is_st_event"]),
+            on=["code", "trade_date"],
+            how="left",
+        )
+        .sort(["code", "trade_date"])
+        .with_columns(
+            pl.col("is_suspend").fill_null(False),
+            pl.col("is_st_event").forward_fill().over("code").fill_null(False).alias("is_st"),
+        )
+        .drop("is_st_event")
     )
 
     df = df.join(
@@ -59,7 +66,7 @@ def process_mask(
         n = len(group)
         suspend = group["is_suspend"].to_numpy()
         st = group["is_st"].to_numpy()
-        logic_idx = group["logic_index"].to_numpy()
+        logic_idx = group["logic_index"].cast(pl.Float64).to_numpy()
 
         mask = []
         for i in range(n):
@@ -68,8 +75,16 @@ def process_mask(
             future_suspend = suspend[i:future_end].any()
             future_st = st[i:future_end].any()
 
-            lookback_start = current_idx - FEAT_WINDOW
-            lookback_mask = (logic_idx >= lookback_start) & (logic_idx <= current_idx)
+            if np.isnan(current_idx):
+                mask.append(False)
+                continue
+
+            lookback_start = current_idx - FEAT_WINDOW + 1
+            lookback_mask = (
+                np.isfinite(logic_idx)
+                & (logic_idx >= lookback_start)
+                & (logic_idx <= current_idx)
+            )
             window_st = st[lookback_mask].any()
 
             mask.append(not future_suspend and not future_st and not window_st)

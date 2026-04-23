@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 
+from config.train import training as training_config
 from .checkpoint import save_checkpoint
 from .console import EpochConsoleLogger
 from .runtime import move_batch_to_device, resolve_amp_dtype
@@ -68,6 +71,18 @@ class Trainer:
         self.checkpoint_dir: Path | None = None
         self.forward_loss = forward_loss or self._default_forward_loss
         self._event_step = 0
+        self._phase_prefetched: dict[str, dict[str, torch.Tensor] | None] = {
+            "train": None,
+            "val": None,
+        }
+        self._phase_prefetch_future: dict[str, Future | None] = {
+            "train": None,
+            "val": None,
+        }
+        self._prefetch_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="phase-prefetch",
+        )
         self.scaler = (
             torch.cuda.amp.GradScaler()
             if self.device.type == "cuda"
@@ -81,24 +96,6 @@ class Trainer:
         batch: dict[str, torch.Tensor],
     ) -> dict[str, torch.Tensor]:
         return self.model.forward_loss(batch, return_aux=False)
-
-    def _compute_param_norm(self) -> float:
-        total = torch.zeros((), device=self.device, dtype=torch.float32)
-        with torch.no_grad():
-            for param in self.model.parameters():
-                if not param.requires_grad:
-                    continue
-                total = total + param.detach().float().square().sum()
-        return float(total.sqrt().cpu())
-
-    def _compute_grad_norm(self) -> float:
-        total = torch.zeros((), device=self.device, dtype=torch.float32)
-        with torch.no_grad():
-            for param in self.model.parameters():
-                if param.grad is None:
-                    continue
-                total = total + param.grad.detach().float().square().sum()
-        return float(total.sqrt().cpu())
 
     def _autocast_context(self):
         if not self.use_amp:
@@ -118,21 +115,35 @@ class Trainer:
             "q": "target_q",
         }[self.task]
 
-    def _capture_debug_snapshot(
-        self,
-        batch: dict[str, torch.Tensor],
-    ) -> dict[str, torch.Tensor] | None:
-        was_training = self.model.training
-        self.model.eval()
+    def _prefetch_loader_once(self, loader) -> dict[str, torch.Tensor] | None:
+        iterator = iter(loader)
         try:
-            with torch.inference_mode():
-                with self._autocast_context():
-                    return self.model.forward_loss(batch, return_debug=True)
-        except TypeError:
+            batch = next(iterator)
+        except StopIteration:
             return None
-        finally:
-            if was_training:
-                self.model.train()
+        return batch
+
+    def _collect_prefetch(self, phase: str, *, wait: bool) -> None:
+        future = self._phase_prefetch_future.get(phase)
+        if future is None:
+            return
+        if not wait and not future.done():
+            return
+        self._phase_prefetch_future[phase] = None
+        self._phase_prefetched[phase] = future.result()
+
+    def _start_prefetch_for(self, phase: str) -> None:
+        if self._phase_prefetched.get(phase) is not None:
+            return
+        if self._phase_prefetch_future.get(phase) is not None:
+            return
+        loader = self.train_loader if phase == "train" else self.val_loader
+        if loader is None:
+            return
+        self._phase_prefetch_future[phase] = self._prefetch_executor.submit(
+            self._prefetch_loader_once,
+            loader,
+        )
 
     def _extract_log_losses(
         self,
@@ -169,6 +180,17 @@ class Trainer:
             metrics[key] = float(value.detach().float().cpu())
         return metrics
 
+    def _prediction_for_logging(
+        self,
+        output: dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        pred = output["pred_primary"]
+        if self.task == "rv":
+            # Align visualization semantics with rv target domain (>0):
+            # loss uses mean = softplus(raw) + eps.
+            return F.softplus(pred.float()) + 1e-6
+        return pred
+
     def _run_phase(
         self,
         *,
@@ -193,12 +215,33 @@ class Trainer:
             self.model.eval()
 
         aggregate: dict[str, torch.Tensor] | None = None
-        pred_chunks: list[torch.Tensor] = []
-        target_chunks: list[torch.Tensor] = []
         target_key = self._target_key()
 
+        phase_name = "train" if training else "val"
+        next_phase_name = "val" if training else "train"
+
+        self._collect_prefetch(phase_name, wait=True)
+        prefetched_batch = self._phase_prefetched.get(phase_name)
+        self._phase_prefetched[phase_name] = None
+        self._start_prefetch_for(next_phase_name)
+
+        batch_iter = iter(loader)
+        if prefetched_batch is not None:
+            try:
+                next(batch_iter)
+            except StopIteration:
+                batch_iter = iter(())
+            base_iter = batch_iter
+
+            def _iter_prefetched():
+                yield prefetched_batch
+                for _batch in base_iter:
+                    yield _batch
+
+            batch_iter = _iter_prefetched()
+
         last_batch_end = time.perf_counter()
-        for step, batch in enumerate(loader, start=1):
+        for step, batch in enumerate(batch_iter, start=1):
             self._event_step += 1
             data_time_ms = (time.perf_counter() - last_batch_end) * 1000.0
             step_start = time.perf_counter()
@@ -207,38 +250,30 @@ class Trainer:
                 self.device,
                 float_dtype=self.float_dtype,
             )
-            grad_norm: float | None = None
-
             if training:
-                forward_start = time.perf_counter()
                 with self._autocast_context():
                     output = self.forward_loss(batch)
                     loss = output["loss_total"]
-                forward_time_ms = (time.perf_counter() - forward_start) * 1000.0
 
-                backward_start = time.perf_counter()
                 if self.scaler is not None:
                     self.scaler.scale(loss).backward()
                     self.scaler.unscale_(self.optimizer)
-                    grad_norm = float(torch.nn.utils.clip_grad_norm_(
+                    torch.nn.utils.clip_grad_norm_(
                         self.model.parameters(),
                         self.max_grad_norm,
-                    ).detach().float().cpu())
+                    )
                 else:
                     loss.backward()
-                    grad_norm = float(torch.nn.utils.clip_grad_norm_(
+                    torch.nn.utils.clip_grad_norm_(
                         self.model.parameters(),
                         self.max_grad_norm,
-                    ).detach().float().cpu())
-                backward_time_ms = (time.perf_counter() - backward_start) * 1000.0
+                    )
 
-                optimizer_start = time.perf_counter()
                 if self.scaler is not None:
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
                 else:
                     self.optimizer.step()
-                optimizer_time_ms = (time.perf_counter() - optimizer_start) * 1000.0
 
                 self.optimizer.zero_grad(set_to_none=True)
                 if self.scheduler is not None and getattr(
@@ -248,13 +283,9 @@ class Trainer:
                 self.global_step += 1
 
             else:
-                forward_start = time.perf_counter()
                 with torch.inference_mode():
                     with self._autocast_context():
                         output = self.forward_loss(batch)
-                forward_time_ms = (time.perf_counter() - forward_start) * 1000.0
-                backward_time_ms = 0.0
-                optimizer_time_ms = 0.0
 
             loss_metric_tensors = {
                 key: value.detach().float()
@@ -274,8 +305,12 @@ class Trainer:
                 if key not in aggregate:
                     aggregate[key] = torch.zeros((), device=self.device, dtype=torch.float32)
                 aggregate[key] = aggregate[key] + value
-            pred_chunks.append(output["pred_primary"].detach().float().cpu())
-            target_chunks.append(batch[target_key].detach().float().cpu())
+            if self.tensorboard_logger is not None:
+                self.tensorboard_logger.update_prediction_state(
+                    phase=phase,
+                    predictions=self._prediction_for_logging(output),
+                    targets=batch[target_key],
+                )
 
             if not phase_started:
                 self.console_logger.start_phase(
@@ -293,7 +328,6 @@ class Trainer:
 
             if self._event_step % self.log_every == 0:
                 lr = float(self.optimizer.param_groups[0]["lr"])
-                param_norm = self._compute_param_norm() if training else None
                 self.console_logger.log_metrics(
                     epoch=epoch,
                     phase=phase,
@@ -302,42 +336,6 @@ class Trainer:
                     losses=self._extract_log_losses(output),
                     lr=lr,
                 )
-                if self.tensorboard_logger is not None and phase == "train":
-                    self.tensorboard_logger.log_step(
-                        phase=phase,
-                        global_step=self.global_step,
-                        losses=self._extract_all_loss_metrics(output),
-                        lr=lr,
-                        grad_norm=grad_norm,
-                        param_norm=param_norm,
-                        data_time_ms=data_time_ms,
-                        forward_time_ms=forward_time_ms,
-                        backward_time_ms=backward_time_ms,
-                        optimizer_time_ms=optimizer_time_ms,
-                        step_time_ms=step_time_ms,
-                        samples_per_sec=samples_per_sec,
-                        gpu_mem_alloc_mb=(
-                            torch.cuda.memory_allocated(self.device) / (1024.0 * 1024.0)
-                            if self.device.type == "cuda"
-                            else None
-                        ),
-                    )
-            if (
-                phase == "val"
-                and self.tensorboard_logger is not None
-                and self.tensorboard_logger.should_log_debug(
-                    phase=phase,
-                    global_step=self.global_step,
-                    step=step,
-                )
-            ):
-                debug_output = self._capture_debug_snapshot(batch)
-                if debug_output is not None:
-                    self.tensorboard_logger.log_debug_snapshot(
-                        phase=phase,
-                        global_step=self.global_step,
-                        output=debug_output,
-                    )
             last_batch_end = time.perf_counter()
 
         num_steps = max(total_steps, 1)
@@ -357,13 +355,6 @@ class Trainer:
                 losses=metrics,
                 lr=lr,
             )
-            if self.tensorboard_logger is not None and phase == "train":
-                self.tensorboard_logger.log_step(
-                    phase=phase,
-                    global_step=self.global_step,
-                    losses=metrics,
-                    lr=lr,
-                )
 
         if self.tensorboard_logger is not None:
             self.tensorboard_logger.log_epoch_metrics(
@@ -372,13 +363,10 @@ class Trainer:
                 epoch=epoch,
                 metrics=metrics,
             )
-            if pred_chunks and target_chunks:
-                self.tensorboard_logger.log_prediction_plot(
-                    phase=phase,
-                    global_step=self.global_step,
-                    predictions=torch.cat(pred_chunks, dim=0),
-                    targets=torch.cat(target_chunks, dim=0),
-                )
+            self.tensorboard_logger.log_epoch_prediction_plot(
+                phase=phase,
+                global_step=self.global_step,
+            )
 
         return metrics
 
@@ -399,6 +387,8 @@ class Trainer:
         )
 
     def fit(self, num_epochs: int) -> None:
+        no_improve_epochs = 0
+        early_stop_patience = int(training_config.early_stop_patience)
         try:
             for epoch in range(self.start_epoch, num_epochs):
                 train_metrics = self.train_one_epoch(epoch)
@@ -407,7 +397,11 @@ class Trainer:
                 if self.scheduler is not None and not getattr(
                     self.scheduler, "_step_per_batch", False
                 ):
-                    self.scheduler.step()
+                    val_loss_for_scheduler = float(val_metrics["loss_total"])
+                    if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                        self.scheduler.step(val_loss_for_scheduler)
+                    else:
+                        self.scheduler.step()
 
                 history_row = {
                     "epoch": epoch,
@@ -440,6 +434,7 @@ class Trainer:
                     val_loss = val_metrics["loss_total"]
                     if val_loss <= self.best_val_loss:
                         self.best_val_loss = val_loss
+                        no_improve_epochs = 0
                         save_checkpoint(
                             self.checkpoint_dir / "best.pt",
                             model=self.model,
@@ -449,7 +444,19 @@ class Trainer:
                             epoch=epoch,
                             global_step=self.global_step,
                         )
+                    else:
+                        no_improve_epochs += 1
+                else:
+                    val_loss = val_metrics["loss_total"]
+                    if val_loss <= self.best_val_loss:
+                        self.best_val_loss = val_loss
+                        no_improve_epochs = 0
+                    else:
+                        no_improve_epochs += 1
+                if no_improve_epochs >= early_stop_patience:
+                    break
         finally:
+            self._prefetch_executor.shutdown(wait=False, cancel_futures=True)
             if self.tensorboard_logger is not None:
                 self.tensorboard_logger.close()
             self.console_logger.close()
