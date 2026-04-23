@@ -32,7 +32,7 @@ class _FakeArchive:
         self.close()
 
 
-def test_dataset_keeps_only_current_file_payload(monkeypatch) -> None:
+def test_dataset_reuses_loaded_file_payload(monkeypatch) -> None:
     sample_counts = {
         "a.npz": 2,
         "b.npz": 3,
@@ -50,18 +50,18 @@ def test_dataset_keeps_only_current_file_payload(monkeypatch) -> None:
     dataset = AssembledNPZDataset(
         ["a.npz", "b.npz", "c.npz"],
         validate_shapes=False,
-        max_open_archives=2,
+        max_open_archives=16,
     )
 
     payload_a = dataset._load_file_payload(0)
+    payload_a_again = dataset._load_file_payload(0)
     payload_b = dataset._load_file_payload(1)
-    payload_c = dataset._load_file_payload(2)
 
     assert payload_a["label"].shape == (2, 2)
+    assert payload_a_again is payload_a
     assert payload_b["label"].shape == (3, 2)
-    assert payload_c["label"].shape == (4, 2)
-    assert dataset._loaded_file_id == 2
-    assert dataset._loaded_payload is payload_c
+    assert dataset._loaded_file_id == 1
+    assert dataset._loaded_payload is payload_b
 
     dataset.close()
     assert dataset._loaded_file_id is None

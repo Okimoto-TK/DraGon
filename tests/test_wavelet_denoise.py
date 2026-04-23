@@ -1,47 +1,20 @@
 from __future__ import annotations
 
 import pytest
-import src.models.arch.layers.wavelet_denoise as wd
 import torch
 
-
-class _FakePtwt:
-    @staticmethod
-    def wavedec(
-        x: torch.Tensor,
-        wavelet: str,
-        mode: str,
-        level: int,
-        axis: int,
-    ) -> list[torch.Tensor]:
-        del wavelet, mode, axis
-        return [x] + [torch.zeros_like(x) for _ in range(level)]
-
-    @staticmethod
-    def waverec(
-        coeffs: list[torch.Tensor],
-        wavelet: str,
-        axis: int,
-    ) -> torch.Tensor:
-        del wavelet, axis
-        return coeffs[0]
+import src.models.arch.layers.wavelet_denoise as wd
 
 
-@pytest.fixture
-def patch_ptwt(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(wd, "_require_ptwt", lambda: _FakePtwt)
-
-
-def test_wavelet_denoise_macro_shape_and_crop(patch_ptwt: None) -> None:
+def test_wavelet_denoise_macro_shape_and_crop() -> None:
     module = wd.WaveletDenoise1D(n_channels=5, target_len=64, warmup_len=48)
     x = torch.randn(2, 5, 112)
     y = module(x)
 
     assert y.shape == (2, 5, 64)
-    assert torch.allclose(y, x[..., -64:])
 
 
-def test_wavelet_denoise_mezzo_shape(patch_ptwt: None) -> None:
+def test_wavelet_denoise_mezzo_shape() -> None:
     module = wd.WaveletDenoise1D(n_channels=7, target_len=96, warmup_len=48)
     x = torch.randn(2, 7, 144)
     y = module(x)
@@ -49,7 +22,7 @@ def test_wavelet_denoise_mezzo_shape(patch_ptwt: None) -> None:
     assert y.shape == (2, 7, 96)
 
 
-def test_wavelet_denoise_dtype_and_device_consistent(patch_ptwt: None) -> None:
+def test_wavelet_denoise_dtype_and_device_consistent() -> None:
     module = wd.WaveletDenoise1D(n_channels=4, target_len=16, warmup_len=8).to(
         dtype=torch.bfloat16
     )
@@ -60,17 +33,7 @@ def test_wavelet_denoise_dtype_and_device_consistent(patch_ptwt: None) -> None:
     assert y.device == x.device
 
 
-def test_wavelet_denoise_uses_explicit_bf16(patch_ptwt: None) -> None:
-    module = wd.WaveletDenoise1D(n_channels=4, target_len=16, warmup_len=8).to(
-        dtype=torch.bfloat16
-    )
-    x = torch.randn(2, 4, 24, dtype=torch.bfloat16)
-    y = module(x)
-
-    assert y.dtype == torch.bfloat16
-
-
-def test_wavelet_denoise_three_scales_forward(patch_ptwt: None) -> None:
+def test_wavelet_denoise_three_scales_forward() -> None:
     denoise_macro = wd.WaveletDenoise1D(
         n_channels=3,
         target_len=64,
@@ -102,9 +65,7 @@ def test_wavelet_denoise_three_scales_forward(patch_ptwt: None) -> None:
     assert y_micro.shape == (2, 7, 144)
 
 
-def test_wavelet_denoise_invalid_input_length_raises_value_error(
-    patch_ptwt: None,
-) -> None:
+def test_wavelet_denoise_invalid_input_length_raises_value_error() -> None:
     module = wd.WaveletDenoise1D(n_channels=5, target_len=64, warmup_len=48)
     x_bad = torch.randn(2, 5, 111)
 
@@ -112,7 +73,7 @@ def test_wavelet_denoise_invalid_input_length_raises_value_error(
         _ = module(x_bad)
 
 
-def test_wavelet_denoise_can_disable_backward_graph(patch_ptwt: None) -> None:
+def test_wavelet_denoise_can_disable_backward_graph() -> None:
     module = wd.WaveletDenoise1D(
         n_channels=3,
         target_len=16,
@@ -126,9 +87,7 @@ def test_wavelet_denoise_can_disable_backward_graph(patch_ptwt: None) -> None:
     assert not y.requires_grad
 
 
-def test_wavelet_denoise_forward_features_returns_denoised_and_coeffs(
-    patch_ptwt: None,
-) -> None:
+def test_wavelet_denoise_forward_features_returns_denoised_and_coeffs() -> None:
     module = wd.WaveletDenoise1D(n_channels=3, target_len=16, warmup_len=8)
     x = torch.randn(2, 3, 24)
 
@@ -136,6 +95,27 @@ def test_wavelet_denoise_forward_features_returns_denoised_and_coeffs(
 
     assert y.shape == (2, 3, 16)
     assert len(coeffs) == 3
-    assert coeffs[0].shape == (2, 3, 24)
-    assert coeffs[1].shape == (2, 3, 24)
-    assert coeffs[2].shape == (2, 3, 24)
+    assert coeffs[0].shape == (2, 3, 12)
+    assert coeffs[1].shape == (2, 3, 12)
+    assert coeffs[2].shape == (2, 3, 16)
+
+
+def test_wavelet_denoise_db4_reconstruction_is_nearly_lossless_without_shrinkage() -> None:
+    module = wd.WaveletDenoise1D(n_channels=3, target_len=16, warmup_len=8)
+    x = torch.randn(2, 3, 24, dtype=torch.float32)
+    with torch.no_grad():
+        module.psi_detail.fill_(50.0)
+
+    y = module(x)
+
+    assert torch.allclose(y, x[..., -16:], atol=1e-5, rtol=1e-5)
+
+
+def test_wavelet_denoise_unsupported_wavelet_raises_value_error() -> None:
+    with pytest.raises(ValueError, match="Only 'db4' is currently supported"):
+        _ = wd.WaveletDenoise1D(
+            n_channels=3,
+            target_len=16,
+            warmup_len=8,
+            wavelet="haar",
+        )

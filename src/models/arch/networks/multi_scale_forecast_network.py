@@ -174,6 +174,9 @@ class MultiScaleForecastNetwork(nn.Module):
             ret_tail_weight_threshold=single_task_loss.ret_tail_weight_threshold,
             ret_tail_weight_alpha=single_task_loss.ret_tail_weight_alpha,
             ret_tail_weight_max=single_task_loss.ret_tail_weight_max,
+            rv_tail_weight_threshold=single_task_loss.rv_tail_weight_threshold,
+            rv_tail_weight_alpha=single_task_loss.rv_tail_weight_alpha,
+            rv_tail_weight_max=single_task_loss.rv_tail_weight_max,
             _eps=MULTI_TASK_LOSS_HPARAMS._eps,
             _nu_ret_init=MULTI_TASK_LOSS_HPARAMS._nu_ret_init,
             _nu_ret_min=MULTI_TASK_LOSS_HPARAMS._nu_ret_min,
@@ -488,23 +491,7 @@ class MultiScaleForecastNetwork(nn.Module):
         out = {
             **loss,
             "pred_primary": pred["pred_primary"],
-            "pred_aux_raw": pred["pred_aux_raw"],
-            "mezzo_head_tokens": pred["mezzo_head_tokens"],
-            "mezzo_head_context": pred["mezzo_head_context"],
-            "macro_dual_summary": pred["macro_dual_summary"],
-            "micro_dual_summary": pred["micro_dual_summary"],
         }
-        for name in (
-            "pred_mu_ret",
-            "pred_scale_ret_raw",
-            "pred_mean_rv_raw",
-            "pred_shape_rv_raw",
-            "pred_mu_q",
-            "pred_scale_q_raw",
-            "task_repr",
-        ):
-            if name in pred:
-                out[name] = pred[name]
         if return_debug and "_debug" in pred:
             out["_debug"] = pred["_debug"]
         return out

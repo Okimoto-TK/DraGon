@@ -240,11 +240,8 @@ class Trainer:
 
             batch_iter = _iter_prefetched()
 
-        last_batch_end = time.perf_counter()
         for step, batch in enumerate(batch_iter, start=1):
             self._event_step += 1
-            data_time_ms = (time.perf_counter() - last_batch_end) * 1000.0
-            step_start = time.perf_counter()
             batch = move_batch_to_device(
                 batch,
                 self.device,
@@ -310,6 +307,7 @@ class Trainer:
                     phase=phase,
                     predictions=self._prediction_for_logging(output),
                     targets=batch[target_key],
+                    uncertainties=output.get("sigma_pred"),
                 )
 
             if not phase_started:
@@ -321,11 +319,6 @@ class Trainer:
                 phase_started = True
             self.console_logger.advance(step)
 
-            step_time_ms = (time.perf_counter() - step_start) * 1000.0
-            samples_per_sec = (
-                float(batch["macro_float_long"].shape[0]) * 1000.0 / max(step_time_ms, 1e-12)
-            )
-
             if self._event_step % self.log_every == 0:
                 lr = float(self.optimizer.param_groups[0]["lr"])
                 self.console_logger.log_metrics(
@@ -336,7 +329,6 @@ class Trainer:
                     losses=self._extract_log_losses(output),
                     lr=lr,
                 )
-            last_batch_end = time.perf_counter()
 
         num_steps = max(total_steps, 1)
         aggregate = aggregate or {

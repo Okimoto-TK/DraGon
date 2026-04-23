@@ -133,6 +133,41 @@ class _CompileTrackingModel(_TinyTrainModel):
         return out
 
 
+class _CountingTensorBoardLogger:
+    def __init__(self) -> None:
+        self.update_calls: list[tuple[str, int]] = []
+        self.epoch_metric_calls = 0
+        self.epoch_plot_calls = 0
+
+    def update_prediction_state(
+        self,
+        *,
+        phase: str,
+        predictions: torch.Tensor,
+        targets: torch.Tensor,
+        uncertainties: torch.Tensor | None = None,
+    ) -> None:
+        self.update_calls.append((phase, int(predictions.shape[0])))
+
+    def log_epoch_metrics(
+        self,
+        *,
+        phase: str,
+        global_step: int,
+        epoch: int,
+        metrics: dict[str, float],
+    ) -> None:
+        self.epoch_metric_calls += 1
+
+    def log_epoch_prediction_plot(
+        self,
+        *,
+        phase: str,
+        global_step: int,
+    ) -> None:
+        self.epoch_plot_calls += 1
+
+
 def test_dataset_can_read_and_adapt(tmp_path: Path) -> None:
     path = _write_minimal_npz(tmp_path / "000001.SZ.npz", samples=3)
     dataset = AssembledNPZDataset([str(path)], mmap_mode=None)
@@ -307,6 +342,39 @@ def test_trainer_fit_writes_tensorboard_events(tmp_path: Path) -> None:
     trainer.fit(num_epochs=1)
 
     assert list((tmp_path / "tb" / "smoke").glob("events.out.tfevents.*"))
+
+
+def test_prediction_state_updates_every_step(tmp_path: Path) -> None:
+    path = _write_minimal_npz(tmp_path / "000001.SZ.npz", samples=6)
+    dataset = AssembledNPZDataset([str(path)], mmap_mode=None)
+    train_loader = build_train_dataloader(dataset, batch_size=2, num_workers=0)
+    val_loader = build_val_dataloader(dataset, batch_size=2, num_workers=0)
+
+    model = _TinyTrainModel()
+    optimizer = build_optimizer(model, lr=1e-3, weight_decay=0.0)
+    scheduler = build_scheduler(optimizer)
+    logger = _CountingTensorBoardLogger()
+    trainer = Trainer(
+        model=model,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        device=torch.device("cpu"),
+        use_amp=False,
+        log_every=2,
+        console_logger=EpochConsoleLogger(log_every=2, enabled=False),
+        tensorboard_logger=logger,
+    )
+
+    trainer.train_one_epoch(epoch=0)
+
+    assert len(logger.update_calls) == 3
+    assert logger.update_calls[0][0] == "train"
+    assert logger.update_calls[1][0] == "train"
+    assert logger.update_calls[2][0] == "train"
+    assert logger.epoch_metric_calls == 1
+    assert logger.epoch_plot_calls == 1
 
 
 def test_compile_path_uses_reduce_overhead(monkeypatch: pytest.MonkeyPatch) -> None:

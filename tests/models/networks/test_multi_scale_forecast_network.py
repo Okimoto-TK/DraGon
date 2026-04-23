@@ -75,7 +75,13 @@ def test_forward_loss_smoke_outputs(task: str) -> None:
     out = model.forward_loss(_make_batch())
     assert "loss_total" in out
     assert "loss_task" in out
+    assert "pred_primary" in out
     assert "sigma_pred" in out
+    assert "pred_aux_raw" not in out
+    assert "mezzo_head_tokens" not in out
+    assert "mezzo_head_context" not in out
+    assert "macro_dual_summary" not in out
+    assert "micro_dual_summary" not in out
     if task == "ret":
         assert "nu_ret" in out
     if task == "rv":

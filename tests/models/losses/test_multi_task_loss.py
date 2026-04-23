@@ -122,3 +122,35 @@ def test_multi_task_distribution_loss_gamma_handles_tiny_positive_target() -> No
     )
 
     assert torch.isfinite(out["loss_rv"])
+
+
+def test_multi_task_distribution_loss_rv_tail_weighting_emphasizes_large_targets() -> None:
+    weighted_loss_fn = MultiTaskDistributionLoss(
+        q_tau=0.05,
+        rv_tail_weight_threshold=0.03,
+        rv_tail_weight_alpha=2.0,
+        rv_tail_weight_max=4.0,
+    )
+    base_loss_fn = MultiTaskDistributionLoss(
+        q_tau=0.05,
+        rv_tail_weight_threshold=0.03,
+        rv_tail_weight_alpha=0.0,
+        rv_tail_weight_max=1.0,
+    )
+    target_rv = torch.tensor([[0.08], [0.01]], dtype=torch.float32)
+    kwargs = dict(
+        target_ret=torch.zeros(2, 1),
+        pred_mu_ret=torch.zeros(2, 1),
+        pred_scale_ret_raw=torch.zeros(2, 1),
+        target_rv=target_rv,
+        pred_mean_rv_raw=torch.zeros(2, 1),
+        pred_shape_rv_raw=torch.zeros(2, 1),
+        target_q=torch.zeros(2, 1),
+        pred_mu_q=torch.zeros(2, 1),
+        pred_scale_q_raw=torch.zeros(2, 1),
+    )
+
+    weighted_out = weighted_loss_fn(**kwargs)
+    base_out = base_loss_fn(**kwargs)
+
+    assert weighted_out["loss_rv"] > base_out["loss_rv"]

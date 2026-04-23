@@ -219,6 +219,9 @@ class MultiTaskLossConfig:
     ret_loss_weight: float = 1.0
     rv_loss_weight: float = 1.0
     q_loss_weight: float = 1.0
+    rv_tail_weight_threshold: float = 0.03
+    rv_tail_weight_alpha: float = 2.0
+    rv_tail_weight_max: float = 4.0
     q_tau: float = 0.10
 
 
@@ -234,6 +237,9 @@ class SingleTaskLossConfig:
     ret_tail_weight_threshold: float = 0.05
     ret_tail_weight_alpha: float = 2.0
     ret_tail_weight_max: float = 4.0
+    rv_tail_weight_threshold: float = 0.03
+    rv_tail_weight_alpha: float = 2.0
+    rv_tail_weight_max: float = 4.0
 
 
 single_task_loss = SingleTaskLossConfig()

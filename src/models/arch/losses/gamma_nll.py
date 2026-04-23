@@ -24,16 +24,24 @@ class GammaNLLLoss(nn.Module):
         target: torch.Tensor,
         mean: torch.Tensor,
         shape: torch.Tensor,
+        sample_weight: torch.Tensor | None = None,
     ) -> torch.Tensor:
         _validate_column_tensor("target", target)
         _validate_column_tensor("mean", mean)
         _validate_column_tensor("shape", shape)
+        if sample_weight is not None:
+            _validate_column_tensor("sample_weight", sample_weight)
 
         if target.shape != mean.shape or target.shape != shape.shape:
             raise ValueError(
                 "target, mean, and shape must share the same shape, "
                 f"got target={tuple(target.shape)}, mean={tuple(mean.shape)}, shape={tuple(shape.shape)}. "
                 "Valid shape: [B, 1] with a shared batch size."
+            )
+        if sample_weight is not None and sample_weight.shape != target.shape:
+            raise ValueError(
+                "sample_weight must share the same shape as target, mean, and shape, "
+                f"got sample_weight={tuple(sample_weight.shape)}, target={tuple(target.shape)}."
             )
         if torch.any(mean <= 0):
             raise ValueError(
@@ -52,7 +60,14 @@ class GammaNLLLoss(nn.Module):
             + torch.lgamma(shape)
             - (shape - 1.0) * torch.log(target_safe)
         )
-        return nll.mean()
+        if sample_weight is None:
+            return nll.mean()
+        if torch.any(sample_weight < 0):
+            raise ValueError(
+                f"sample_weight must be >= 0, got min={sample_weight.min().item()}."
+            )
+        weight_sum = sample_weight.sum().clamp_min(self._eps)
+        return (nll * sample_weight).sum() / weight_sum
 
 
 def _validate_column_tensor(name: str, value: torch.Tensor) -> None:

@@ -7,29 +7,50 @@ import torch.nn as nn
 import torch.nn.functional as F
 from src.models.config.hparams import WAVELET_DENOISE_HPARAMS
 
-
-def _require_ptwt():
-    try:
-        import ptwt
-    except ModuleNotFoundError as exc:  # pragma: no cover - exercised in env setup only
-        raise ImportError(
-            "WaveletDenoise1D requires 'ptwt'. Install it with `pip install ptwt`."
-        ) from exc
-    return ptwt
-
-
-def _disable_for_compile(fn):
-    compiler = getattr(torch, "compiler", None)
-    if compiler is not None and hasattr(compiler, "disable"):
-        return compiler.disable(fn)
-    dynamo = getattr(torch, "_dynamo", None)
-    if dynamo is not None and hasattr(dynamo, "disable"):
-        return dynamo.disable(fn)
-    return fn
+_DB4_DEC_LO = (
+    -0.010597401785069032,
+    0.0328830116668852,
+    0.030841381835560764,
+    -0.18703481171909309,
+    -0.027983769416859854,
+    0.6308807679298589,
+    0.7148465705529157,
+    0.2303778133088965,
+)
+_DB4_DEC_HI = (
+    -0.2303778133088965,
+    0.7148465705529157,
+    -0.6308807679298589,
+    -0.027983769416859854,
+    0.18703481171909309,
+    0.030841381835560764,
+    -0.0328830116668852,
+    -0.010597401785069032,
+)
+_DB4_REC_LO = (
+    0.2303778133088965,
+    0.7148465705529157,
+    0.6308807679298589,
+    -0.027983769416859854,
+    -0.18703481171909309,
+    0.030841381835560764,
+    0.0328830116668852,
+    -0.010597401785069032,
+)
+_DB4_REC_HI = (
+    -0.010597401785069032,
+    -0.0328830116668852,
+    0.030841381835560764,
+    0.18703481171909309,
+    -0.027983769416859854,
+    -0.6308807679298589,
+    0.7148465705529157,
+    -0.2303778133088965,
+)
 
 
 class WaveletDenoise1D(nn.Module):
-    """Denoise [B, C, T_total] with fixed DWT and detail-band shrinkage."""
+    """Denoise [B, C, T_total] with fixed db4 DWT and detail-band shrinkage."""
 
     def __init__(
         self,
@@ -66,10 +87,20 @@ class WaveletDenoise1D(nn.Module):
         self._level = int(level)
         self._eps = float(eps)
         self.allow_backward = bool(allow_backward)
+        if self._wavelet != "db4":
+            raise ValueError(
+                f"Only 'db4' is currently supported by the torch-only frontend, got {self._wavelet!r}."
+            )
 
         self.theta_detail = nn.Parameter(torch.zeros(self._level, self.n_channels))
         self.phi_detail = nn.Parameter(torch.zeros(self._level, self.n_channels))
         self.psi_detail = nn.Parameter(torch.zeros(self._level, self.n_channels))
+        self.register_buffer("_dec_lo", torch.tensor(_DB4_DEC_LO, dtype=torch.float32), persistent=False)
+        self.register_buffer("_dec_hi", torch.tensor(_DB4_DEC_HI, dtype=torch.float32), persistent=False)
+        self.register_buffer("_rec_lo", torch.tensor(_DB4_REC_LO, dtype=torch.float32), persistent=False)
+        self.register_buffer("_rec_hi", torch.tensor(_DB4_REC_HI, dtype=torch.float32), persistent=False)
+        self._filter_len = int(self._dec_lo.numel())
+        self._analysis_pad = self._filter_len - 1
 
     @staticmethod
     def _rms(x: torch.Tensor, eps: float) -> torch.Tensor:
@@ -78,6 +109,97 @@ class WaveletDenoise1D(nn.Module):
     @staticmethod
     def _soft_threshold(x: torch.Tensor, thr: torch.Tensor) -> torch.Tensor:
         return torch.sign(x) * F.relu(x.abs() - thr)
+
+    def _grouped_filter(
+        self,
+        filt: torch.Tensor,
+        *,
+        channels: int,
+        dtype: torch.dtype,
+        device: torch.device,
+        flip: bool,
+    ) -> torch.Tensor:
+        weight = filt.to(device=device, dtype=dtype)
+        weight = weight.flip(0) if flip else weight
+        return weight.view(1, 1, -1).repeat(channels, 1, 1)
+
+    def _analysis_step(
+        self,
+        x: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        channels = x.shape[1]
+        lo_weight = self._grouped_filter(
+            self._dec_lo,
+            channels=channels,
+            dtype=x.dtype,
+            device=x.device,
+            flip=True,
+        )
+        hi_weight = self._grouped_filter(
+            self._dec_hi,
+            channels=channels,
+            dtype=x.dtype,
+            device=x.device,
+            flip=True,
+        )
+        padded = F.pad(x, (self._analysis_pad, self._analysis_pad))
+        approx = F.conv1d(padded, lo_weight, stride=2, groups=channels)
+        detail = F.conv1d(padded, hi_weight, stride=2, groups=channels)
+        return approx, detail
+
+    def _synthesis_step(
+        self,
+        approx: torch.Tensor,
+        detail: torch.Tensor,
+        *,
+        out_len: int,
+    ) -> torch.Tensor:
+        channels = approx.shape[1]
+        lo_weight = self._grouped_filter(
+            self._rec_lo,
+            channels=channels,
+            dtype=approx.dtype,
+            device=approx.device,
+            flip=False,
+        )
+        hi_weight = self._grouped_filter(
+            self._rec_hi,
+            channels=channels,
+            dtype=approx.dtype,
+            device=approx.device,
+            flip=False,
+        )
+        recon = F.conv_transpose1d(approx, lo_weight, stride=2, groups=channels)
+        recon = recon + F.conv_transpose1d(detail, hi_weight, stride=2, groups=channels)
+        start = self._analysis_pad
+        end = start + out_len
+        return recon[..., start:end]
+
+    def _shrink_detail(
+        self,
+        detail: torch.Tensor,
+        *,
+        level_idx: int,
+    ) -> torch.Tensor:
+        sigma = self._rms(detail, self._eps)
+        tau = F.softplus(self.theta_detail[level_idx].to(dtype=detail.dtype)).view(
+            1,
+            self.n_channels,
+            1,
+        )
+        alpha = torch.sigmoid(self.phi_detail[level_idx].to(dtype=detail.dtype)).view(
+            1,
+            self.n_channels,
+            1,
+        )
+        rho = torch.sigmoid(self.psi_detail[level_idx].to(dtype=detail.dtype)).view(
+            1,
+            self.n_channels,
+            1,
+        )
+        threshold = tau * sigma
+        detail_shrunk = self._soft_threshold(detail, threshold)
+        return rho * detail + (1.0 - rho) * (alpha * detail_shrunk)
 
     def _forward_features_impl(
         self,
@@ -100,60 +222,41 @@ class WaveletDenoise1D(nn.Module):
                 f"{expected_shape}, got {actual_shape}."
             )
 
-        ptwt = _require_ptwt()
-
         compute_dtype = self.theta_detail.dtype
-        ptwt_dtype = torch.float32
-        x_compute = x_long.to(device=x_long.device, dtype=ptwt_dtype)
-        coeffs = ptwt.wavedec(
-            x_compute,
-            self._wavelet,
-            mode="zero",
-            level=self._level,
-            axis=-1,
-        )
-        approximation = coeffs[0].to(dtype=ptwt_dtype)
-        details = [detail.to(dtype=ptwt_dtype) for detail in coeffs[1:]]
+        wavelet_dtype = torch.float32
+        x_compute = x_long.to(device=x_long.device, dtype=wavelet_dtype)
 
-        if len(details) != self._level:
-            raise ValueError(
-                f"DWT detail level mismatch: expected {self._level}, got {len(details)}."
-            )
+        approximations = [x_compute]
+        details_low_to_high: list[torch.Tensor] = []
+        approx = x_compute
+        for _ in range(self._level):
+            approx, detail = self._analysis_step(approx)
+            approximations.append(approx)
+            details_low_to_high.append(detail)
 
-        new_details: list[torch.Tensor] = []
-        for level_idx, detail in enumerate(details):
-            sigma = self._rms(detail, self._eps)
-
-            tau = F.softplus(self.theta_detail[level_idx].to(dtype=ptwt_dtype)).view(
-                1, self.n_channels, 1
-            )
-            alpha = torch.sigmoid(self.phi_detail[level_idx].to(dtype=ptwt_dtype)).view(
-                1, self.n_channels, 1
-            )
-            rho = torch.sigmoid(self.psi_detail[level_idx].to(dtype=ptwt_dtype)).view(
-                1, self.n_channels, 1
-            )
-
-            threshold = tau * sigma
-            detail_shrunk = self._soft_threshold(detail, threshold)
-            detail_out = rho * detail + (1.0 - rho) * (alpha * detail_shrunk)
-            new_details.append(detail_out)
-
-        recon_coeffs = [approximation.to(dtype=ptwt_dtype)] + [
-            detail.to(dtype=ptwt_dtype) for detail in new_details
+        details_high_to_low = list(reversed(details_low_to_high))
+        shrunk_high_to_low = [
+            self._shrink_detail(detail, level_idx=level_idx)
+            for level_idx, detail in enumerate(details_high_to_low)
         ]
-        y_long = ptwt.waverec(recon_coeffs, self._wavelet, axis=-1)
-        if y_long.shape[-1] < expected_t:
-            raise ValueError(
-                "Reconstructed length is shorter than expected: "
-                f"got {y_long.shape[-1]}, expected at least {expected_t}."
+        shrunk_low_to_high = list(reversed(shrunk_high_to_low))
+
+        recon = approximations[-1]
+        for level_idx in range(self._level - 1, -1, -1):
+            recon = self._synthesis_step(
+                recon,
+                shrunk_low_to_high[level_idx],
+                out_len=approximations[level_idx].shape[-1],
             )
 
-        y_long = y_long[..., -expected_t:]
+        y_long = recon[..., -expected_t:]
         y = y_long[..., -self.target_len:]
         wavelet_coeffs = (
-            approximation.to(device=x_long.device, dtype=compute_dtype),
-            *[detail.to(device=x_long.device, dtype=compute_dtype) for detail in new_details],
+            approximations[-1].to(device=x_long.device, dtype=compute_dtype),
+            *[
+                detail.to(device=x_long.device, dtype=compute_dtype)
+                for detail in shrunk_high_to_low
+            ],
         )
         return y.to(device=x_long.device, dtype=compute_dtype), wavelet_coeffs
 
@@ -161,14 +264,12 @@ class WaveletDenoise1D(nn.Module):
         y, _ = self._forward_features_impl(x_long)
         return y
 
-    @_disable_for_compile
     def forward(self, x_long: torch.Tensor) -> torch.Tensor:
         if self.allow_backward:
             return self._forward_impl(x_long)
         with torch.no_grad():
             return self._forward_impl(x_long).detach()
 
-    @_disable_for_compile
     def forward_features(
         self,
         x_long: torch.Tensor,

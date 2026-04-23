@@ -244,10 +244,10 @@ class DevicePrefetchLoader:
             with torch.cuda.stream(stream):
                 prefetched.append(
                     move_batch_to_device(
-                        batch,
-                        self.device,
-                        float_dtype=self.float_dtype,
-                    )
+                    batch,
+                    self.device,
+                    float_dtype=self.float_dtype,
+                )
                 )
 
         for _ in range(self.num_prefetch_batches):

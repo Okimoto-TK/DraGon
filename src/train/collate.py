@@ -63,14 +63,16 @@ def collate_network_batch(
     samples: list[dict[str, np.ndarray]],
     *,
     chunk_size: int | None = None,
+    validate_shapes: bool = True,
 ) -> dict[str, torch.Tensor]:
     """Stack adapted network samples into a torch batch."""
 
     if not samples:
         raise ValueError("collate_network_batch requires at least one sample.")
 
-    for sample in samples:
-        _validate_network_sample(sample)
+    if validate_shapes:
+        for sample in samples:
+            _validate_network_sample(sample)
 
     effective_chunk_size = (
         int(chunk_size)
@@ -96,13 +98,14 @@ def collate_network_batch(
         )
         batch[key] = torch.from_numpy(stacked).to(dtype=torch.int64)
 
-    batch_size = len(samples)
-    for key, expected in NETWORK_SAMPLE_SHAPES.items():
-        expected_batch_shape = (batch_size, *expected)
-        if tuple(batch[key].shape) != expected_batch_shape:
-            raise ValueError(
-                f"{key} batch shape mismatch: expected {expected_batch_shape}, "
-                f"got {tuple(batch[key].shape)}."
-            )
+    if validate_shapes:
+        batch_size = len(samples)
+        for key, expected in NETWORK_SAMPLE_SHAPES.items():
+            expected_batch_shape = (batch_size, *expected)
+            if tuple(batch[key].shape) != expected_batch_shape:
+                raise ValueError(
+                    f"{key} batch shape mismatch: expected {expected_batch_shape}, "
+                    f"got {tuple(batch[key].shape)}."
+                )
 
     return batch

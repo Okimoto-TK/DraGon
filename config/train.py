@@ -2,36 +2,20 @@
 
 from __future__ import annotations
 
-import os
-from dataclasses import dataclass, field
-
-
-def _default_num_workers() -> int:
-    """Pick a worker count that better matches multi-core training hosts."""
-
-    try:
-        cpu_count = len(os.sched_getaffinity(0))
-    except (AttributeError, NotImplementedError):
-        cpu_count = os.cpu_count() or 8
-    return max(1, min(8, cpu_count))
-
-
-def _default_val_num_workers() -> int:
-    """Use a larger worker pool for validation dataloading."""
-
-    return max(1, min(8, _default_num_workers() * 2))
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
 class TrainingConfig:
     """Open tuning parameters for the training stack."""
 
-    batch_size: int = 3072
-    val_batch_size: int = 3072
-    num_workers: int = field(default_factory=_default_num_workers)
-    val_num_workers: int = field(default_factory=_default_val_num_workers)
+    batch_size: int = 1024
+    val_batch_size: int = 1024
+    num_workers: int = 6
+    val_num_workers: int = 6
     pin_memory: bool = True
     persistent_workers: bool = True
+    dataloader_in_order: bool = False
     prefetch_factor_train: int = 8
     prefetch_factor_val: int = 4
     device_prefetch: bool = True

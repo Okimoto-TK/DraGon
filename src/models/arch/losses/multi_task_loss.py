@@ -20,6 +20,9 @@ class MultiTaskDistributionLoss(nn.Module):
         ret_loss_weight: float = 1.0,
         rv_loss_weight: float = 1.0,
         q_loss_weight: float = 1.0,
+        rv_tail_weight_threshold: float = 0.03,
+        rv_tail_weight_alpha: float = 2.0,
+        rv_tail_weight_max: float = 4.0,
         _eps: float = 1e-6,
         _nu_ret_init: float = 8.0,
         _nu_ret_min: float = 2.01,
@@ -42,6 +45,21 @@ class MultiTaskDistributionLoss(nn.Module):
         if q_tau <= 0 or q_tau >= 1:
             raise ValueError(
                 f"q_tau must satisfy 0 < q_tau < 1, got {q_tau}. Valid range: (0, 1)."
+            )
+        if rv_tail_weight_threshold <= 0:
+            raise ValueError(
+                "rv_tail_weight_threshold must be > 0, "
+                f"got {rv_tail_weight_threshold}. Valid range: (0, +inf)."
+            )
+        if rv_tail_weight_alpha < 0:
+            raise ValueError(
+                "rv_tail_weight_alpha must be >= 0, "
+                f"got {rv_tail_weight_alpha}. Valid range: [0, +inf)."
+            )
+        if rv_tail_weight_max < 1:
+            raise ValueError(
+                "rv_tail_weight_max must be >= 1, "
+                f"got {rv_tail_weight_max}. Valid range: [1, +inf)."
             )
         if _eps <= 0:
             raise ValueError(
@@ -69,6 +87,9 @@ class MultiTaskDistributionLoss(nn.Module):
         self.ret_loss_weight = float(ret_loss_weight)
         self.rv_loss_weight = float(rv_loss_weight)
         self.q_loss_weight = float(q_loss_weight)
+        self.rv_tail_weight_threshold = float(rv_tail_weight_threshold)
+        self.rv_tail_weight_alpha = float(rv_tail_weight_alpha)
+        self.rv_tail_weight_max = float(rv_tail_weight_max)
         self._eps = float(_eps)
         self._nu_ret_init = float(_nu_ret_init)
         self._nu_ret_min = float(_nu_ret_min)
@@ -142,6 +163,7 @@ class MultiTaskDistributionLoss(nn.Module):
             target=target_rv,
             mean=mean_rv,
             shape=shape_rv,
+            sample_weight=self._rv_sample_weight(target=target_rv),
         )
         loss_q = self.q_nll(
             target=target_q,
@@ -169,6 +191,15 @@ class MultiTaskDistributionLoss(nn.Module):
             "sigma_rv_pred": sigma_rv_pred,
             "sigma_q_pred": sigma_q_pred,
         }
+
+    def _rv_sample_weight(
+        self,
+        *,
+        target: torch.Tensor,
+    ) -> torch.Tensor:
+        tail_excess = torch.relu(target / self.rv_tail_weight_threshold - 1.0)
+        weights = 1.0 + self.rv_tail_weight_alpha * tail_excess
+        return weights.clamp_max(self.rv_tail_weight_max)
 
     @staticmethod
     def _inverse_softplus(value: float) -> float:

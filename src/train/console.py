@@ -51,13 +51,17 @@ class EpochConsoleLogger:
             TextColumn("eta={task.fields[eta]}"),
             TimeElapsedColumn(),
             console=self.console,
+            auto_refresh=True,
             transient=False,
             disable=not self.enabled,
         )
         self.task_id: TaskID | None = None
         self._phase = ""
         self._phase_start_time: float | None = None
+        self._phase_total_steps: int = 0
         self._started = False
+        self._last_report_time: float | None = None
+        self._last_report_step: int = 0
 
     def _ensure_started(self) -> None:
         if self._started:
@@ -91,34 +95,55 @@ class EpochConsoleLogger:
             )
         self._phase = phase
         self._phase_start_time = time.perf_counter()
+        self._phase_total_steps = int(total_steps)
+        self._last_report_time = self._phase_start_time
+        self._last_report_step = 0
 
-    def _estimate_timing(
+    def _estimate_eta_seconds(
         self,
         *,
         step: int,
-        total_steps: int,
-    ) -> tuple[float | None, float | None]:
+    ) -> float | None:
         if self._phase_start_time is None or step <= 0:
-            return None, None
+            return None
         elapsed = max(time.perf_counter() - self._phase_start_time, 0.0)
         avg_step_seconds = elapsed / step
-        eta_seconds = avg_step_seconds * max(total_steps - step, 0)
-        return avg_step_seconds, eta_seconds
+        return avg_step_seconds * max(self._phase_total_steps - step, 0)
+
+    def _step_ms_from_last_report(
+        self,
+        *,
+        step: int,
+        now: float | None = None,
+        commit: bool,
+    ) -> str:
+        current_time = time.perf_counter() if now is None else float(now)
+        if self._last_report_time is None:
+            self._last_report_time = current_time
+            self._last_report_step = int(step)
+            return "--ms"
+
+        delta_steps = int(step) - int(self._last_report_step)
+        delta_time = max(current_time - self._last_report_time, 0.0)
+        step_ms_text = "--ms"
+        if delta_steps > 0:
+            step_ms_text = f"{(delta_time / delta_steps) * 1000.0:.1f}ms"
+        if commit:
+            self._last_report_time = current_time
+            self._last_report_step = int(step)
+        return step_ms_text
 
     def advance(self, step: int) -> None:
         """Advance the current phase progress."""
 
         if self.task_id is None:
             raise RuntimeError("Progress task has not been initialized.")
-        task = self.progress.tasks[self.task_id]
-        total_steps = int(task.total) if task.total is not None else step
-        avg_step_seconds, eta_seconds = self._estimate_timing(
+        eta_seconds = self._estimate_eta_seconds(step=step)
+        step_ms_text = self._step_ms_from_last_report(
             step=step,
-            total_steps=total_steps,
+            now=None,
+            commit=True,
         )
-        step_ms_text = "--ms"
-        if avg_step_seconds is not None:
-            step_ms_text = f"{avg_step_seconds * 1000.0:.1f}ms"
         self.progress.update(
             self.task_id,
             completed=step,
@@ -142,13 +167,15 @@ class EpochConsoleLogger:
             raise RuntimeError("Progress task has not been initialized.")
 
         display_epoch = epoch + 1
-        avg_step_seconds, eta_seconds = self._estimate_timing(
+        now = time.perf_counter()
+        eta_seconds = self._estimate_eta_seconds(
             step=step,
-            total_steps=total_steps,
         )
-        step_ms_text = "--ms"
-        if avg_step_seconds is not None:
-            step_ms_text = f"{avg_step_seconds * 1000.0:.1f}ms"
+        step_ms_text = self._step_ms_from_last_report(
+            step=step,
+            now=now,
+            commit=True,
+        )
 
         metric_text = (
             f"loss={losses['loss_total']:.4f} "

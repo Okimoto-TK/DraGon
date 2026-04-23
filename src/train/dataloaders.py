@@ -98,9 +98,11 @@ def _build_loader(
         "num_workers": resolved_num_workers,
         "pin_memory": training.pin_memory,
         "persistent_workers": training.persistent_workers and resolved_num_workers > 0,
+        "in_order": training.dataloader_in_order,
         "collate_fn": partial(
             collate_network_batch,
             chunk_size=resolve_collate_chunk_size(batch_size=batch_size),
+            validate_shapes=training.validate_shapes,
         ),
     }
     if isinstance(dataset, AssembledNPZDataset):

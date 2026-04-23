@@ -136,3 +136,38 @@ def test_single_task_distribution_loss_rv_exposes_shape() -> None:
     )
 
     assert "shape_rv" in out
+
+
+def test_single_task_distribution_loss_rv_tail_weighting_emphasizes_large_targets() -> None:
+    weighted_loss_fn = SingleTaskDistributionLoss(
+        task="rv",
+        q_tau=0.05,
+        rv_tail_weight_threshold=0.03,
+        rv_tail_weight_alpha=2.0,
+        rv_tail_weight_max=4.0,
+    )
+    base_loss_fn = SingleTaskDistributionLoss(
+        task="rv",
+        q_tau=0.05,
+        rv_tail_weight_threshold=0.03,
+        rv_tail_weight_alpha=0.0,
+        rv_tail_weight_max=1.0,
+    )
+    target = torch.tensor([[0.08], [0.01]], dtype=torch.float32)
+    pred_primary = torch.zeros(2, 1, dtype=torch.float32)
+    pred_aux_raw = torch.zeros(2, 1, dtype=torch.float32)
+
+    weighted_out = weighted_loss_fn(
+        target=target,
+        pred_primary=pred_primary,
+        pred_aux_raw=pred_aux_raw,
+    )
+    base_out = base_loss_fn(
+        target=target,
+        pred_primary=pred_primary,
+        pred_aux_raw=pred_aux_raw,
+    )
+
+    assert weighted_out["loss_total"] == weighted_out["loss_task"]
+    assert weighted_out["loss_rv_weighted_nll"] == weighted_out["loss_total"]
+    assert weighted_out["loss_total"] > base_out["loss_total"]

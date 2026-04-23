@@ -278,8 +278,11 @@ class WaveletBranchEncoder(nn.Module):
             if self.sidechain_features > 0
             else None
         )
-        self.band_projectors = nn.ModuleList(
-            [nn.Conv1d(self.num_features, self.hidden_dim, kernel_size=1) for _ in range(self.num_bands)]
+        self.band_projector = nn.Conv1d(
+            in_channels=self.num_bands * self.num_features,
+            out_channels=self.num_bands * self.hidden_dim,
+            kernel_size=1,
+            groups=self.num_bands,
         )
         self.blocks = nn.ModuleList(
             [
@@ -299,6 +302,16 @@ class WaveletBranchEncoder(nn.Module):
         self.register_buffer(
             "_scale_index_tensor",
             torch.tensor(int(scale_index), dtype=torch.long),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_band_type_ids",
+            torch.tensor([0] + [1] * (self.num_bands - 1), dtype=torch.long),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_level_ids",
+            torch.arange(self.num_bands, dtype=torch.long),
             persistent=False,
         )
 
@@ -376,20 +389,38 @@ class WaveletBranchEncoder(nn.Module):
                 "sidechain was provided but this encoder is configured without sidechain_features."
             )
 
-        band_tokens: list[torch.Tensor] = []
+        resized_bands: list[torch.Tensor] = []
         for band_idx, coeff in enumerate(wavelet_coeffs):
-            resized = self._resize_band(coeff)
-            token = self.band_projectors[band_idx](resized)
-            band_type = 0 if band_idx == 0 else 1
-            token = token + condition
-            token = token + scale_embed
-            if sidechain_embed is not None:
-                token = token + sidechain_embed
-            token = token + self.band_type_embedding.weight[band_type].view(1, self.hidden_dim, 1)
-            token = token + self.level_embedding.weight[band_idx].view(1, self.hidden_dim, 1)
-            band_tokens.append(token)
+            resized_bands.append(self._resize_band(coeff))
 
-        x = torch.stack(band_tokens, dim=1)
+        stacked_bands = torch.stack(resized_bands, dim=1)
+        batch_size = stacked_bands.shape[0]
+        band_tokens = self.band_projector(
+            stacked_bands.reshape(
+                batch_size,
+                self.num_bands * self.num_features,
+                self.num_patches,
+            )
+        )
+        x = band_tokens.view(
+            batch_size,
+            self.num_bands,
+            self.hidden_dim,
+            self.num_patches,
+        )
+        x = x + condition.unsqueeze(1)
+        x = x + scale_embed.view(1, 1, self.hidden_dim, 1)
+        if sidechain_embed is not None:
+            x = x + sidechain_embed.unsqueeze(1)
+
+        band_type_embed = self.band_type_embedding(self._band_type_ids).view(
+            1,
+            self.num_bands,
+            self.hidden_dim,
+            1,
+        )
+        level_embed = self.level_embedding(self._level_ids).view(1, self.num_bands, self.hidden_dim, 1)
+        x = x + band_type_embed + level_embed
         for block in self.blocks:
             x = block(x)
 
