@@ -19,6 +19,9 @@ NETWORK_SAMPLE_SHAPES: dict[str, tuple[int, ...]] = {
     "target_rv": (1,),
     "target_q": (1,),
 }
+OPTIONAL_NETWORK_SAMPLE_SHAPES: dict[str, tuple[int, ...]] = {
+    "mu_input": (1,),
+}
 
 FLOAT_BATCH_KEYS = (
     "macro_float_long",
@@ -29,6 +32,7 @@ FLOAT_BATCH_KEYS = (
     "target_rv",
     "target_q",
 )
+OPTIONAL_FLOAT_BATCH_KEYS = ("mu_input",)
 INT_BATCH_KEYS = ("macro_i8_long", "mezzo_i8_long", "micro_i8_long")
 REQUIRED_RAW_KEYS = (
     "label",
@@ -56,6 +60,9 @@ def _validate_network_sample(sample: dict[str, np.ndarray]) -> None:
 
     for key, expected in NETWORK_SAMPLE_SHAPES.items():
         _ensure_shape(key, sample[key], expected)
+    for key, expected in OPTIONAL_NETWORK_SAMPLE_SHAPES.items():
+        if key in sample:
+            _ensure_shape(key, sample[key], expected)
 
 
 def _adapt_scale_float(
@@ -169,6 +176,7 @@ class AssembledNPZDataset(torch.utils.data.Dataset):
         self._loaded_file_id: int | None = None
         self._loaded_payload: dict[str, np.ndarray] | None = None
         self._sample_index, self._file_sample_ranges = self._build_sample_index()
+        self._mu_cache: np.ndarray | None = None
 
     def _build_sample_index(self) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
         index: list[tuple[int, int]] = []
@@ -212,6 +220,14 @@ class AssembledNPZDataset(torch.utils.data.Dataset):
         self._loaded_file_id = None
         self._loaded_payload = None
 
+    def attach_mu_cache(self, values: np.ndarray) -> None:
+        cache = np.asarray(values, dtype=np.float32)
+        if cache.ndim != 2 or cache.shape != (len(self), 1):
+            raise ValueError(
+                f"mu cache must have shape ({len(self)}, 1), got {tuple(cache.shape)}."
+            )
+        self._mu_cache = cache
+
     def __len__(self) -> int:
         return len(self._sample_index)
 
@@ -240,6 +256,8 @@ class AssembledNPZDataset(torch.utils.data.Dataset):
             "target_rv": target_rv,
             "target_q": target_q,
         }
+        if self._mu_cache is not None:
+            sample["mu_input"] = self._mu_cache[index]
         if self.validate_shapes:
             _validate_network_sample(sample)
         return sample

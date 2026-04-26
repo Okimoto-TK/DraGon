@@ -36,6 +36,7 @@ from src.models.config.hparams import (
     MULTI_SCALE_FORECAST_NETWORK_HPARAMS,
     MULTI_TASK_LOSS_HPARAMS,
 )
+from src.task_labels import canonical_task_label, canonical_training_task, field_domain, field_target_key
 
 
 class MultiScaleForecastNetwork(nn.Module):
@@ -45,7 +46,9 @@ class MultiScaleForecastNetwork(nn.Module):
         self,
         hidden_dim: int = multi_scale_forecast_network.hidden_dim,
         cond_dim: int = multi_scale_forecast_network.cond_dim,
-        task: str = multi_scale_forecast_network.task,
+        mode: str = "mu",
+        field: str | None = None,
+        task: str | None = None,
         return_aux_default: bool = False,
     ) -> None:
         super().__init__()
@@ -53,10 +56,16 @@ class MultiScaleForecastNetwork(nn.Module):
             raise ValueError(f"hidden_dim must be > 0, got {hidden_dim}.")
         if cond_dim <= 0:
             raise ValueError(f"cond_dim must be > 0, got {cond_dim}.")
+        if field is not None and task is not None and field != task:
+            raise ValueError(f"field={field!r} and legacy task={task!r} disagree.")
+        selected_field = field if field is not None else task or multi_scale_forecast_network.field
 
         self.hidden_dim = int(hidden_dim)
         self.cond_dim = int(cond_dim)
-        self.task = task
+        self.mode = canonical_training_task(mode)
+        self.field = canonical_task_label(selected_field)
+        self.domain = field_domain(self.field)
+        self.task = self.field
         self.return_aux_default = bool(return_aux_default)
         self._hparams = MULTI_SCALE_FORECAST_NETWORK_HPARAMS
         self._macro_input_features = (
@@ -161,7 +170,8 @@ class MultiScaleForecastNetwork(nn.Module):
             _gate_floor=wavelet_bottomup_fusion_hparams._gate_floor,
         )
         self.prediction_head = DualDomainConcatHead(
-            task=self.task,
+            mode=self.mode,
+            field=self.field,
             hidden_dim=self.hidden_dim,
             num_heads=dual_domain_concat_head.num_heads,
             ffn_ratio=dual_domain_concat_head.ffn_ratio,
@@ -169,14 +179,11 @@ class MultiScaleForecastNetwork(nn.Module):
             _norm_eps=dual_domain_concat_head_hparams._norm_eps,
         )
         self.loss_fn = SingleTaskDistributionLoss(
-            task=self.task,
+            mode=self.mode,
+            field=self.field,
             q_tau=single_task_loss.q_tau,
-            ret_tail_weight_threshold=single_task_loss.ret_tail_weight_threshold,
-            ret_tail_weight_alpha=single_task_loss.ret_tail_weight_alpha,
-            ret_tail_weight_max=single_task_loss.ret_tail_weight_max,
-            rv_tail_weight_threshold=single_task_loss.rv_tail_weight_threshold,
-            rv_tail_weight_alpha=single_task_loss.rv_tail_weight_alpha,
-            rv_tail_weight_max=single_task_loss.rv_tail_weight_max,
+            ret_mu_fixed_scale=single_task_loss.ret_mu_fixed_scale,
+            ret_mu_fixed_nu=single_task_loss.ret_mu_fixed_nu,
             _eps=MULTI_TASK_LOSS_HPARAMS._eps,
             _nu_ret_init=MULTI_TASK_LOSS_HPARAMS._nu_ret_init,
             _nu_ret_min=MULTI_TASK_LOSS_HPARAMS._nu_ret_min,
@@ -402,6 +409,7 @@ class MultiScaleForecastNetwork(nn.Module):
         pred_dict = self.prediction_head(
             mezzo_time,
             mezzo_wavelet,
+            mu_input=batch.get("mu_input") if self.mode == "sigma" else None,
             return_debug=return_debug,
         )
 
@@ -409,21 +417,19 @@ class MultiScaleForecastNetwork(nn.Module):
         micro_dual_summary = 0.5 * (micro_time.mean(dim=-1) + micro_wavelet.mean(dim=-1))
 
         out: dict[str, torch.Tensor] = {
-            "pred_primary": pred_dict["pred_primary"],
-            "pred_aux_raw": pred_dict["pred_aux_raw"],
-            "task_repr": pred_dict["task_repr"],
             "mezzo_head_tokens": pred_dict["head_tokens"],
             "mezzo_head_context": pred_dict["head_context"],
             "macro_dual_summary": macro_dual_summary,
             "micro_dual_summary": micro_dual_summary,
         }
         for name in (
-            "pred_mu_ret",
-            "pred_scale_ret_raw",
-            "pred_mean_rv_raw",
-            "pred_shape_rv_raw",
-            "pred_mu_q",
-            "pred_scale_q_raw",
+            "mu_raw",
+            "sigma_raw",
+            "task_repr",
+            "confidence_query",
+            "confidence_repr",
+            "conf_attn_entropy_mean",
+            "conf_attn_max_weight_mean",
         ):
             if name in pred_dict:
                 out[name] = pred_dict[name]
@@ -476,22 +482,29 @@ class MultiScaleForecastNetwork(nn.Module):
             return_aux=return_aux,
             return_debug=return_debug,
         )
-        target_key = {
-            "ret": "target_ret",
-            "rv": "target_rv",
-            "q": "target_q",
-        }[self.task]
+        target_key = field_target_key(self.field)
         target = self._require_key(batch, target_key)
 
-        loss = self.loss_fn(
-            target=target,
-            pred_primary=pred["pred_primary"],
-            pred_aux_raw=pred["pred_aux_raw"],
-        )
-        out = {
-            **loss,
-            "pred_primary": pred["pred_primary"],
-        }
+        if self.mode == "mu":
+            loss = self.loss_fn(
+                target=target,
+                prediction_raw=pred["mu_raw"],
+            )
+            out = {
+                **loss,
+            }
+        else:
+            mu_input = self._require_key(batch, "mu_input")
+            loss = self.loss_fn(
+                target=target,
+                prediction_raw=pred["sigma_raw"],
+                mu_input=mu_input,
+            )
+            out = {
+                **loss,
+                "conf_attn_entropy_mean": pred["conf_attn_entropy_mean"],
+                "conf_attn_max_weight_mean": pred["conf_attn_max_weight_mean"],
+            }
         if return_debug and "_debug" in pred:
             out["_debug"] = pred["_debug"]
         return out

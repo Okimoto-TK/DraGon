@@ -11,8 +11,8 @@ class TrainingConfig:
 
     batch_size: int = 1024
     val_batch_size: int = 1024
-    num_workers: int = 6
-    val_num_workers: int = 6
+    num_workers: int = 7
+    val_num_workers: int = 7
     pin_memory: bool = True
     persistent_workers: bool = True
     dataloader_in_order: bool = False
@@ -29,13 +29,15 @@ class TrainingConfig:
     weight_decay: float = 1e-4
     max_grad_norm: float = 1.0
     early_stop_patience: int = 10
-    task: str = "ret"
+    task: str = "mu"
+    field: str = "ret"
     log_every: int = 500
     enable_tensorboard: bool = True
     tensorboard_root: str = "models/tensorboard"
     tensorboard_host: str = "0.0.0.0"
     tensorboard_port: int = 11111
     tensorboard_flush_secs: int = 30
+    mu_model: str | None = None
     num_epochs: int = 100
     save_every: int = 1
     compile_model: bool = True

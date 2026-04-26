@@ -11,6 +11,7 @@ from src.data.models import Query
 from src.data.pipelines import AssembledPipeline, ProcessedPipeline, RawPipeline
 from src.data.registry.processed import PROCESSED_PARAM_MAP
 from src.data.registry.raw import PARAM_MAP
+from src.task_labels import TASK_LABELS, TRAINING_TASKS
 from src.train import run_training
 
 
@@ -81,8 +82,19 @@ def _build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument(
         "-t",
         "--task",
-        choices=("ret", "rv", "q"),
-        help="Train a single selected task head: ret, rv, or q.",
+        choices=TRAINING_TASKS,
+        help="Select the optimization stage: mu or sigma.",
+    )
+    train_parser.add_argument(
+        "-f",
+        "--field",
+        choices=TASK_LABELS,
+        help="Select the prediction field: ret, rv, or p01..p99.",
+    )
+    train_parser.add_argument(
+        "--mu-model",
+        dest="mu_model",
+        help="Checkpoint file or directory for the frozen mu model required by sigma training.",
     )
     train_parser.add_argument(
         "--workers",
@@ -135,6 +147,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             checkpoint=args.checkpoint,
             checkpoint_root=DEFAULT_CHECKPOINT_ROOT,
             task=args.task,
+            field=args.field,
+            mu_model=args.mu_model,
             num_workers=args.workers if args.workers is not None else None,
             val_num_workers=args.val_workers if args.val_workers is not None else None,
         )

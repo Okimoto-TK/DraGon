@@ -6,6 +6,8 @@
 /log/
 /out/
 /report/
+/models/
+/node_modules/
 
 # Dataset
 /data/

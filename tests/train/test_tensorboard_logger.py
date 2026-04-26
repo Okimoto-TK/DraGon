@@ -8,100 +8,145 @@ from tensorboard.backend.event_processing.event_accumulator import EventAccumula
 from src.train.tensorboard_logger import TensorBoardLogger
 
 
-def test_tensorboard_logger_writes_grouped_scalars_without_sidechain_merge(
+def test_mu_tensorboard_logger_writes_epoch_loss_and_hexbin(
     tmp_path: Path,
 ) -> None:
     logger = TensorBoardLogger(
-        log_dir=tmp_path / "tb" / "unit",
-        task="ret",
+        log_dir=tmp_path / "tb" / "mu",
+        task="mu",
+        field="ret",
         enabled=True,
     )
 
-    logger.log_epoch_metrics(
+    logger.update_mu_state(
         phase="train",
-        global_step=8,
-        epoch=0,
-        metrics={"loss_total": 1.2, "loss_task": 1.2, "loss_ret_weighted_nll": 1.2},
-    )
-    logger.log_prediction_plot(
-        phase="train",
-        global_step=8,
         predictions=torch.randn(128, 1),
         targets=torch.randn(128, 1),
-        uncertainties=torch.exp(torch.randn(128, 1)),
+    )
+    logger.log_epoch_metrics(
+        phase="train",
+        epoch=0,
+        metrics={"loss_total": 1.2, "loss_mu": 1.2},
+    )
+    logger.log_epoch_plots(
+        phase="train",
+        epoch=0,
     )
     logger.close()
 
-    event_files = list((tmp_path / "tb" / "unit").glob("events.out.tfevents.*"))
-    assert event_files
-
-    accumulator = EventAccumulator(str(tmp_path / "tb" / "unit"))
+    accumulator = EventAccumulator(str(tmp_path / "tb" / "mu"))
     accumulator.Reload()
     scalar_tags = accumulator.Tags()["scalars"]
     image_tags = accumulator.Tags()["images"]
     all_tags = scalar_tags + image_tags
 
-    assert "epoch_train/loss_total" in scalar_tags
-    assert "epoch_train/loss_ret_weighted_nll" in scalar_tags
-    assert "epoch_train/pred_vs_target_heatmap_confident" in image_tags
-    assert "epoch_train/pred_vs_target_heatmap_moderately_confident" in image_tags
-    assert "epoch_train/pred_vs_target_heatmap_unconfident" in image_tags
-    assert all("debug_" not in tag for tag in all_tags)
-    assert all("sidechain_merge" not in tag for tag in all_tags)
+    assert "epoch_train/loss_mu" in scalar_tags
+    assert "epoch_train/mu_pred_vs_target_hexbin" in image_tags
+    assert "epoch_train/epoch_index" not in scalar_tags
+    assert all("confident" not in tag for tag in all_tags)
+    assert all("uncertainty_" not in tag for tag in all_tags)
 
 
-def test_tensorboard_logger_keeps_prediction_state_on_input_device(
+def test_sigma_tensorboard_logger_writes_nll_attention_and_hexbin(
+    tmp_path: Path,
+) -> None:
+    logger = TensorBoardLogger(
+        log_dir=tmp_path / "tb" / "sigma",
+        task="sigma",
+        field="ret",
+        enabled=True,
+    )
+
+    logger.update_sigma_state(
+        phase="val",
+        mu_input=torch.randn(96, 1),
+        targets=torch.randn(96, 1),
+        sigmas=torch.rand(96, 1).clamp_min(1e-3),
+        attn_entropy=torch.tensor(1.3),
+        attn_max_weight=torch.tensor(0.42),
+    )
+    logger.log_epoch_metrics(
+        phase="val",
+        epoch=2,
+        metrics={"loss_total": 0.4, "loss_nll": 0.4},
+    )
+    logger.log_epoch_plots(
+        phase="val",
+        epoch=2,
+    )
+    logger.close()
+
+    accumulator = EventAccumulator(str(tmp_path / "tb" / "sigma"))
+    accumulator.Reload()
+    scalar_tags = accumulator.Tags()["scalars"]
+    image_tags = accumulator.Tags()["images"]
+    all_tags = scalar_tags + image_tags
+
+    assert "epoch_val/loss_nll" in scalar_tags
+    assert "epoch_val/conf_attn_entropy_mean" in scalar_tags
+    assert "epoch_val/conf_attn_max_weight_mean" in scalar_tags
+    assert "epoch_val/residual_vs_sigma_hexbin" in image_tags
+    assert "epoch_val/epoch_index" not in scalar_tags
+    assert all("confident" not in tag for tag in all_tags)
+    assert all("uncertainty_" not in tag for tag in all_tags)
+
+
+def test_mu_tensorboard_logger_keeps_state_on_input_device(
     tmp_path: Path,
 ) -> None:
     logger = TensorBoardLogger(
         log_dir=tmp_path / "tb" / "device",
-        task="ret",
+        task="mu",
+        field="ret",
         enabled=True,
     )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    predictions = torch.randn(32, 1, device=device, dtype=torch.bfloat16 if device.type == "cuda" else torch.float32)
-    targets = torch.randn(32, 1, device=device, dtype=predictions.dtype)
-    uncertainties = torch.exp(torch.randn(32, 1, device=device, dtype=predictions.dtype))
+    dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
+    predictions = torch.randn(32, 1, device=device, dtype=dtype)
+    targets = torch.randn(32, 1, device=device, dtype=dtype)
 
-    logger.update_prediction_state(
+    logger.update_mu_state(
         phase="train",
         predictions=predictions,
         targets=targets,
-        uncertainties=uncertainties,
     )
 
-    state = logger._pred_heatmap_state["train"]
+    state = logger._phase_state["train"]
     assert state["predictions"][0].device == predictions.device
     assert state["targets"][0].device == targets.device
-    assert state["uncertainties"][0].device == uncertainties.device
     logger.close()
 
 
-def test_tensorboard_logger_clones_prediction_state_storage(
+def test_sigma_tensorboard_logger_clones_prediction_state_storage(
     tmp_path: Path,
 ) -> None:
     logger = TensorBoardLogger(
         log_dir=tmp_path / "tb" / "clone",
-        task="ret",
+        task="sigma",
+        field="ret",
         enabled=True,
     )
-    predictions = torch.randn(8, 1)
+    mu_input = torch.randn(8, 1)
     targets = torch.randn(8, 1)
-    uncertainties = torch.exp(torch.randn(8, 1))
+    sigmas = torch.rand(8, 1).clamp_min(1e-3)
 
-    logger.update_prediction_state(
+    logger.update_sigma_state(
         phase="train",
-        predictions=predictions,
+        mu_input=mu_input,
         targets=targets,
-        uncertainties=uncertainties,
+        sigmas=sigmas,
+        attn_entropy=torch.tensor(1.0),
+        attn_max_weight=torch.tensor(0.5),
     )
 
-    state = logger._pred_heatmap_state["train"]
-    pred_cached = state["predictions"][0]
-    trg_cached = state["targets"][0]
-    unc_cached = state["uncertainties"][0]
+    state = logger._phase_state["train"]
+    sigma_cached = state["sigmas"][0]
 
-    assert pred_cached.data_ptr() != predictions.reshape(-1).data_ptr()
-    assert trg_cached.data_ptr() != targets.reshape(-1).data_ptr()
-    assert unc_cached.data_ptr() != uncertainties.reshape(-1).data_ptr()
+    assert sigma_cached.data_ptr() != sigmas.reshape(-1).data_ptr()
+
+    logger.log_epoch_plots(
+        phase="train",
+        epoch=0,
+    )
+    assert "train" not in logger._phase_state
     logger.close()

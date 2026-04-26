@@ -6,6 +6,17 @@ import torch
 import torch.nn as nn
 
 
+def _tensor_value_checks_enabled() -> bool:
+    compiler = getattr(torch, "compiler", None)
+    if compiler is not None and hasattr(compiler, "is_compiling"):
+        return not bool(compiler.is_compiling())
+
+    dynamo = getattr(torch, "_dynamo", None)
+    if dynamo is not None and hasattr(dynamo, "is_compiling"):
+        return not bool(dynamo.is_compiling())
+    return True
+
+
 def _validate_support(
     support: torch.Tensor,
     *,
@@ -22,7 +33,7 @@ def _validate_support(
         raise ValueError(
             f"{name} token count mismatch: expected {expected_tokens}, got {support.shape[0]}."
         )
-    if torch.any(support[:, 1] < support[:, 0]):
+    if _tensor_value_checks_enabled() and torch.any(support[:, 1] < support[:, 0]):
         raise ValueError(f"{name} contains invalid intervals where end < start.")
     return support.to(device=device, dtype=dtype)
 
@@ -38,19 +49,18 @@ def _support_matrix(
 
     overlap = torch.minimum(target_end, source_end) - torch.maximum(target_start, source_start)
     overlap = overlap.clamp_min(0.0)
-    weight = overlap / overlap.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+    overlap_sum = overlap.sum(dim=-1, keepdim=True)
+    weight = overlap / overlap_sum.clamp_min(1e-12)
 
-    zero_rows = overlap.sum(dim=-1) <= 0
-    if zero_rows.any():
-        target_center = (target_support[:, 0] + target_support[:, 1]) * 0.5
-        source_center = (source_support[:, 0] + source_support[:, 1]) * 0.5
-        nearest = torch.argmin(
-            (target_center.unsqueeze(1) - source_center.unsqueeze(0)).abs(),
-            dim=-1,
-        )
-        fallback = torch.zeros_like(weight)
-        fallback[torch.arange(weight.shape[0], device=weight.device), nearest] = 1.0
-        weight = torch.where(zero_rows.unsqueeze(1), fallback, weight)
+    target_center = (target_support[:, 0] + target_support[:, 1]) * 0.5
+    source_center = (source_support[:, 0] + source_support[:, 1]) * 0.5
+    nearest = torch.argmin(
+        (target_center.unsqueeze(1) - source_center.unsqueeze(0)).abs(),
+        dim=-1,
+    )
+    fallback = torch.zeros_like(weight)
+    fallback[torch.arange(weight.shape[0], device=weight.device), nearest] = 1.0
+    weight = torch.where(overlap_sum <= 0, fallback, weight)
     return weight
 
 

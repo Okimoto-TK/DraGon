@@ -87,6 +87,7 @@ def _build_loader(
     drop_last: bool,
     num_workers: int,
     prefetch_factor: int,
+    in_order: bool | None = None,
 ) -> DataLoader:
     resolved_num_workers, resolved_prefetch_factor = _resolve_loader_parallelism(
         batch_size=batch_size,
@@ -98,7 +99,7 @@ def _build_loader(
         "num_workers": resolved_num_workers,
         "pin_memory": training.pin_memory,
         "persistent_workers": training.persistent_workers and resolved_num_workers > 0,
-        "in_order": training.dataloader_in_order,
+        "in_order": training.dataloader_in_order if in_order is None else bool(in_order),
         "collate_fn": partial(
             collate_network_batch,
             chunk_size=resolve_collate_chunk_size(batch_size=batch_size),
@@ -144,6 +145,7 @@ def build_val_dataloader(
     *,
     batch_size: int = training.val_batch_size,
     num_workers: int = training.val_num_workers,
+    in_order: bool | None = None,
 ) -> DataLoader:
     """Build the validation dataloader."""
 
@@ -154,4 +156,5 @@ def build_val_dataloader(
         drop_last=False,
         num_workers=num_workers,
         prefetch_factor=training.prefetch_factor_val,
+        in_order=in_order,
     )

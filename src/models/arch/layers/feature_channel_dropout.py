@@ -41,6 +41,7 @@ class FeatureChannelDropout1D(nn.Module):
 
         self.num_channels = int(num_channels)
         self.p = float(p)
+        self._has_active_dropout = bool(torch.any(probs > 0).item())
         self.register_buffer("channel_ps", probs, persistent=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -52,7 +53,7 @@ class FeatureChannelDropout1D(nn.Module):
             raise ValueError(
                 f"x channel mismatch: expected {self.num_channels}, got {x.shape[1]}."
             )
-        if not self.training or torch.all(self.channel_ps <= 0):
+        if not self.training or not self._has_active_dropout:
             return x
 
         keep_prob = (1.0 - self.channel_ps).to(device=x.device, dtype=torch.float32)

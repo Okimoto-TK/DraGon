@@ -68,8 +68,10 @@ def _write_minimal_npz(path: Path, samples: int = 4) -> Path:
 class _TinyTrainModel(nn.Module):
     def __init__(self) -> None:
         super().__init__()
+        self.mode = "mu"
+        self.field = "ret"
         self.task = "ret"
-        self.proj = nn.Linear(1, 2).to(dtype=torch.bfloat16)
+        self.proj = nn.Linear(1, 1).to(dtype=torch.bfloat16)
 
     def forward_loss(
         self,
@@ -77,16 +79,13 @@ class _TinyTrainModel(nn.Module):
         return_aux: bool = False,
     ) -> dict[str, torch.Tensor]:
         x = batch["macro_float_long"].mean(dim=(1, 2), keepdim=True)
-        pred = self.proj(x.view(-1, 1))
-        pred_primary = pred[:, 0:1]
-        pred_aux_raw = pred[:, 1:2]
-        loss_task = ((pred_primary - batch["target_ret"]) ** 2).mean()
+        mu_pred = self.proj(x.view(-1, 1))
+        loss_task = ((mu_pred - batch["target_ret"]) ** 2).mean()
         return {
             "loss_total": loss_task,
             "loss_task": loss_task,
-            "pred_primary": pred_primary,
-            "pred_aux_raw": pred_aux_raw,
-            "fused_latents": batch["micro_float_long"],
+            "loss_mu": loss_task,
+            "mu_pred": mu_pred,
         }
 
 
@@ -139,31 +138,41 @@ class _CountingTensorBoardLogger:
         self.epoch_metric_calls = 0
         self.epoch_plot_calls = 0
 
-    def update_prediction_state(
+    def update_mu_state(
         self,
         *,
         phase: str,
         predictions: torch.Tensor,
         targets: torch.Tensor,
-        uncertainties: torch.Tensor | None = None,
     ) -> None:
         self.update_calls.append((phase, int(predictions.shape[0])))
+
+    def update_sigma_state(
+        self,
+        *,
+        phase: str,
+        mu_input: torch.Tensor,
+        targets: torch.Tensor,
+        sigmas: torch.Tensor,
+        attn_entropy: torch.Tensor,
+        attn_max_weight: torch.Tensor,
+    ) -> None:
+        self.update_calls.append((phase, int(sigmas.shape[0])))
 
     def log_epoch_metrics(
         self,
         *,
         phase: str,
-        global_step: int,
         epoch: int,
         metrics: dict[str, float],
     ) -> None:
         self.epoch_metric_calls += 1
 
-    def log_epoch_prediction_plot(
+    def log_epoch_plots(
         self,
         *,
         phase: str,
-        global_step: int,
+        epoch: int,
     ) -> None:
         self.epoch_plot_calls += 1
 
@@ -323,7 +332,8 @@ def test_trainer_fit_writes_tensorboard_events(tmp_path: Path) -> None:
     scheduler = build_scheduler(optimizer)
     logger = TensorBoardLogger(
         log_dir=tmp_path / "tb" / "smoke",
-        task="ret",
+        task="mu",
+        field="ret",
         enabled=True,
     )
     trainer = Trainer(

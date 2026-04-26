@@ -3,171 +3,161 @@ from __future__ import annotations
 import pytest
 import torch
 
-from src.models.arch.losses import SingleTaskDistributionLoss
+from src.models.arch.losses import SingleTaskDistributionLoss, StudentTNLLLoss
 
 
-@pytest.mark.parametrize("task", ["ret", "rv", "q"])
-def test_single_task_distribution_loss_smoke(task: str) -> None:
-    loss_fn = SingleTaskDistributionLoss(task=task, q_tau=0.05)
+@pytest.mark.parametrize(
+    ("field", "target"),
+    [
+        ("ret", torch.randn(4, 1)),
+        ("rv", torch.rand(4, 1).clamp_min(1e-4)),
+        ("p10", torch.randn(4, 1)),
+    ],
+)
+def test_single_task_distribution_loss_mu_smoke(
+    field: str,
+    target: torch.Tensor,
+) -> None:
+    prediction_raw = torch.randn(4, 1, requires_grad=True)
+    loss_fn = SingleTaskDistributionLoss(mode="mu", field=field, q_tau=0.05)
     out = loss_fn(
-        target=torch.rand(4, 1).clamp_min(1e-4) if task == "rv" else torch.randn(4, 1),
-        pred_primary=torch.randn(4, 1, requires_grad=True),
-        pred_aux_raw=torch.randn(4, 1, requires_grad=True),
+        target=target,
+        prediction_raw=prediction_raw,
     )
 
     assert "loss_total" in out
     assert "loss_task" in out
-    assert "sigma_pred" in out
+    assert "loss_mu" in out
+    assert "mu_pred" in out
     out["loss_total"].backward()
+    assert prediction_raw.grad is not None
+    if field == "rv":
+        assert torch.all(out["mu_pred"] > 0)
 
 
-def test_single_task_distribution_loss_ret_exposes_nu() -> None:
-    loss_fn = SingleTaskDistributionLoss(task="ret", q_tau=0.05)
+def test_single_task_distribution_loss_sigma_ret_exposes_nu() -> None:
+    prediction_raw = torch.randn(3, 1, requires_grad=True)
+    loss_fn = SingleTaskDistributionLoss(mode="sigma", field="ret", q_tau=0.05)
     out = loss_fn(
         target=torch.randn(3, 1),
-        pred_primary=torch.randn(3, 1),
-        pred_aux_raw=torch.randn(3, 1),
+        prediction_raw=prediction_raw,
+        mu_input=torch.randn(3, 1),
     )
 
+    assert "loss_nll" in out
+    assert "sigma_pred" in out
     assert "nu_ret" in out
+    out["loss_total"].backward()
+    assert prediction_raw.grad is not None
 
 
-def test_single_task_distribution_loss_uses_fp32_loss_math_only() -> None:
-    loss_fn = SingleTaskDistributionLoss(task="ret", q_tau=0.05)
+def test_single_task_distribution_loss_sigma_ret_matches_student_t_nll() -> None:
+    prediction_raw = torch.zeros(2, 1, dtype=torch.float32, requires_grad=True)
+    mu_input = torch.zeros(2, 1, dtype=torch.float32)
+    target = torch.tensor([[0.08], [0.01]], dtype=torch.float32)
+    loss_fn = SingleTaskDistributionLoss(mode="sigma", field="ret", q_tau=0.05)
+    out = loss_fn(
+        target=target,
+        prediction_raw=prediction_raw,
+        mu_input=mu_input,
+    )
+
+    nu_ret = out["nu_ret"].detach()
+    sigma_pred = out["sigma_pred"].detach()
+    expected = StudentTNLLLoss(_nu_min=2.01, _eps=1e-6)(
+        target=target,
+        mu=mu_input,
+        scale=sigma_pred * torch.sqrt((nu_ret - 2.0) / nu_ret),
+        nu=nu_ret,
+    )
+
+    assert torch.allclose(out["loss_total"].detach(), expected)
+    out["loss_total"].backward()
+    assert prediction_raw.grad is not None
+
+
+def test_single_task_distribution_loss_sigma_rv_exposes_shape() -> None:
+    loss_fn = SingleTaskDistributionLoss(mode="sigma", field="rv", q_tau=0.05)
+    out = loss_fn(
+        target=torch.rand(3, 1).clamp_min(1e-4),
+        prediction_raw=torch.randn(3, 1, requires_grad=True),
+        mu_input=torch.rand(3, 1).clamp_min(1e-3),
+    )
+
+    assert "loss_nll" in out
+    assert "sigma_pred" in out
+    assert "shape_rv" in out
+
+
+def test_single_task_distribution_loss_sigma_quantile_smoke() -> None:
+    loss_fn = SingleTaskDistributionLoss(mode="sigma", field="p10", q_tau=0.05)
+    out = loss_fn(
+        target=torch.randn(3, 1),
+        prediction_raw=torch.randn(3, 1, requires_grad=True),
+        mu_input=torch.randn(3, 1),
+    )
+
+    assert "loss_nll" in out
+    assert "sigma_pred" in out
+    assert "shape_rv" not in out
+    assert "nu_ret" not in out
+
+
+def test_single_task_distribution_loss_sigma_requires_mu_input() -> None:
+    loss_fn = SingleTaskDistributionLoss(mode="sigma", field="ret", q_tau=0.05)
+    with pytest.raises(ValueError, match="mu_input is required"):
+        loss_fn(
+            target=torch.randn(2, 1),
+            prediction_raw=torch.randn(2, 1),
+        )
+
+
+def test_single_task_distribution_loss_sigma_ret_uses_fp32_loss_math_only() -> None:
+    loss_fn = SingleTaskDistributionLoss(mode="sigma", field="ret", q_tau=0.05)
     out = loss_fn(
         target=torch.tensor([[0.08], [0.01]], dtype=torch.bfloat16),
-        pred_primary=torch.tensor([[0.00], [0.00]], dtype=torch.bfloat16, requires_grad=True),
-        pred_aux_raw=torch.tensor([[-3.5], [-3.5]], dtype=torch.bfloat16, requires_grad=True),
+        prediction_raw=torch.tensor([[-3.5], [-3.5]], dtype=torch.bfloat16, requires_grad=True),
+        mu_input=torch.tensor([[0.00], [0.00]], dtype=torch.bfloat16),
     )
 
     assert out["loss_total"].dtype == torch.float32
     assert out["loss_task"].dtype == torch.float32
+    assert out["loss_nll"].dtype == torch.float32
     assert out["sigma_pred"].dtype == torch.float32
     assert out["nu_ret"].dtype == torch.float32
-    assert out["loss_ret_weighted_nll"].dtype == torch.float32
 
 
 def test_single_task_distribution_loss_keeps_nu_ret_param_fp32_after_bf16_cast() -> None:
-    loss_fn = SingleTaskDistributionLoss(task="ret", q_tau=0.05)
-
+    loss_fn = SingleTaskDistributionLoss(mode="sigma", field="ret", q_tau=0.05)
     loss_fn = loss_fn.to(dtype=torch.bfloat16)
-
+    assert loss_fn._nu_ret_raw is not None
     assert loss_fn._nu_ret_raw.dtype == torch.float32
 
 
-def test_single_task_distribution_loss_ret_weighted_student_t_emphasizes_tail_samples() -> None:
+def test_single_task_distribution_loss_mu_ret_matches_fixed_student_t_nll() -> None:
     loss_fn = SingleTaskDistributionLoss(
-        task="ret",
+        mode="mu",
+        field="ret",
         q_tau=0.05,
-        ret_tail_weight_threshold=0.05,
-        ret_tail_weight_alpha=2.0,
-        ret_tail_weight_max=4.0,
-    )
-    base_loss_fn = SingleTaskDistributionLoss(
-        task="ret",
-        q_tau=0.05,
-        ret_tail_weight_threshold=0.05,
-        ret_tail_weight_alpha=0.0,
-        ret_tail_weight_max=1.0,
+        ret_mu_fixed_scale=0.02335,
+        ret_mu_fixed_nu=2.82,
     )
     target = torch.tensor([[0.08], [0.01]], dtype=torch.float32)
-    pred_primary = torch.zeros(2, 1, dtype=torch.float32, requires_grad=True)
-    pred_aux_raw = torch.full((2, 1), -3.5, dtype=torch.float32, requires_grad=True)
+    prediction_raw = torch.zeros(2, 1, dtype=torch.float32, requires_grad=True)
+
     out = loss_fn(
         target=target,
-        pred_primary=pred_primary,
-        pred_aux_raw=pred_aux_raw,
+        prediction_raw=prediction_raw,
     )
-    out_base = base_loss_fn(
-        target=torch.tensor([[0.08], [0.01]], dtype=torch.float32),
-        pred_primary=torch.zeros(2, 1, dtype=torch.float32),
-        pred_aux_raw=torch.full((2, 1), -3.5, dtype=torch.float32),
+    expected = StudentTNLLLoss(_nu_min=2.000001, _eps=1e-6)(
+        target=target,
+        mu=prediction_raw,
+        scale=torch.full_like(target, 0.02335),
+        nu=target.new_tensor(2.82, dtype=torch.float32),
     )
 
     assert out["loss_total"] == out["loss_task"]
-    assert out["loss_ret_weighted_nll"] == out["loss_total"]
-    assert out["loss_total"] > out_base["loss_total"]
-
-
-def test_single_task_distribution_loss_weighting_strengthens_nu_gradient_on_tail_samples() -> None:
-    target = torch.tensor([[0.20], [-0.18], [0.01], [0.00]], dtype=torch.float32)
-    pred_primary = torch.zeros(4, 1, dtype=torch.float32, requires_grad=True)
-    pred_aux_raw = torch.full((4, 1), -3.5, dtype=torch.float32, requires_grad=True)
-
-    base_loss_fn = SingleTaskDistributionLoss(
-        task="ret",
-        q_tau=0.05,
-        ret_tail_weight_alpha=0.0,
-        ret_tail_weight_max=1.0,
-    )
-    weighted_loss_fn = SingleTaskDistributionLoss(
-        task="ret",
-        q_tau=0.05,
-        ret_tail_weight_threshold=0.05,
-        ret_tail_weight_alpha=2.0,
-        ret_tail_weight_max=4.0,
-    )
-
-    base_out = base_loss_fn(
-        target=target,
-        pred_primary=pred_primary.detach().clone().requires_grad_(True),
-        pred_aux_raw=pred_aux_raw.detach().clone().requires_grad_(True),
-    )
-    base_out["loss_total"].backward()
-    base_grad = float(base_loss_fn._nu_ret_raw.grad.detach().abs().cpu())
-
-    weighted_out = weighted_loss_fn(
-        target=target,
-        pred_primary=pred_primary.detach().clone().requires_grad_(True),
-        pred_aux_raw=pred_aux_raw.detach().clone().requires_grad_(True),
-    )
-    weighted_out["loss_total"].backward()
-    weighted_grad = float(weighted_loss_fn._nu_ret_raw.grad.detach().abs().cpu())
-
-    assert weighted_grad > base_grad
-
-
-def test_single_task_distribution_loss_rv_exposes_shape() -> None:
-    loss_fn = SingleTaskDistributionLoss(task="rv", q_tau=0.05)
-    out = loss_fn(
-        target=torch.rand(3, 1).clamp_min(1e-4),
-        pred_primary=torch.randn(3, 1),
-        pred_aux_raw=torch.randn(3, 1),
-    )
-
-    assert "shape_rv" in out
-
-
-def test_single_task_distribution_loss_rv_tail_weighting_emphasizes_large_targets() -> None:
-    weighted_loss_fn = SingleTaskDistributionLoss(
-        task="rv",
-        q_tau=0.05,
-        rv_tail_weight_threshold=0.03,
-        rv_tail_weight_alpha=2.0,
-        rv_tail_weight_max=4.0,
-    )
-    base_loss_fn = SingleTaskDistributionLoss(
-        task="rv",
-        q_tau=0.05,
-        rv_tail_weight_threshold=0.03,
-        rv_tail_weight_alpha=0.0,
-        rv_tail_weight_max=1.0,
-    )
-    target = torch.tensor([[0.08], [0.01]], dtype=torch.float32)
-    pred_primary = torch.zeros(2, 1, dtype=torch.float32)
-    pred_aux_raw = torch.zeros(2, 1, dtype=torch.float32)
-
-    weighted_out = weighted_loss_fn(
-        target=target,
-        pred_primary=pred_primary,
-        pred_aux_raw=pred_aux_raw,
-    )
-    base_out = base_loss_fn(
-        target=target,
-        pred_primary=pred_primary,
-        pred_aux_raw=pred_aux_raw,
-    )
-
-    assert weighted_out["loss_total"] == weighted_out["loss_task"]
-    assert weighted_out["loss_rv_weighted_nll"] == weighted_out["loss_total"]
-    assert weighted_out["loss_total"] > base_out["loss_total"]
+    assert out["loss_mu"] == out["loss_total"]
+    assert torch.allclose(out["loss_total"], expected)
+    out["loss_total"].backward()
+    assert prediction_raw.grad is not None

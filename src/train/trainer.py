@@ -10,9 +10,9 @@ from pathlib import Path
 from typing import Any
 
 import torch
-import torch.nn.functional as F
 
 from config.train import training as training_config
+from src.task_labels import field_target_key
 from .checkpoint import save_checkpoint
 from .console import EpochConsoleLogger
 from .runtime import move_batch_to_device, resolve_amp_dtype
@@ -33,7 +33,8 @@ class Trainer:
         use_amp: bool = True,
         amp_dtype: str = "bfloat16",
         max_grad_norm: float = 1.0,
-        task: str = "ret",
+        task: str = "mu",
+        field: str = "ret",
         log_every: int = 50,
         save_every: int = 1,
         console_logger=None,
@@ -53,7 +54,9 @@ class Trainer:
             self.amp_dtype if self.amp_dtype in {torch.bfloat16, torch.float16} else None
         )
         self.max_grad_norm = float(max_grad_norm)
-        self.task = getattr(model, "task", task)
+        self.mode = getattr(model, "mode", task)
+        self.field = getattr(model, "field", field)
+        self.task = self.mode
         self.log_every = int(log_every)
         if save_every <= 0:
             raise ValueError(f"save_every must be > 0, got {save_every}.")
@@ -61,6 +64,7 @@ class Trainer:
         self.console_logger = console_logger or EpochConsoleLogger(
             log_every=self.log_every,
             task=self.task,
+            field=self.field,
         )
         self.tensorboard_logger = tensorboard_logger
 
@@ -109,11 +113,7 @@ class Trainer:
         return nullcontext()
 
     def _target_key(self) -> str:
-        return {
-            "ret": "target_ret",
-            "rv": "target_rv",
-            "q": "target_q",
-        }[self.task]
+        return field_target_key(self.field)
 
     def _prefetch_loader_once(self, loader) -> dict[str, torch.Tensor] | None:
         iterator = iter(loader)
@@ -179,17 +179,6 @@ class Trainer:
                 continue
             metrics[key] = float(value.detach().float().cpu())
         return metrics
-
-    def _prediction_for_logging(
-        self,
-        output: dict[str, torch.Tensor],
-    ) -> torch.Tensor:
-        pred = output["pred_primary"]
-        if self.task == "rv":
-            # Align visualization semantics with rv target domain (>0):
-            # loss uses mean = softplus(raw) + eps.
-            return F.softplus(pred.float()) + 1e-6
-        return pred
 
     def _run_phase(
         self,
@@ -303,12 +292,21 @@ class Trainer:
                     aggregate[key] = torch.zeros((), device=self.device, dtype=torch.float32)
                 aggregate[key] = aggregate[key] + value
             if self.tensorboard_logger is not None:
-                self.tensorboard_logger.update_prediction_state(
-                    phase=phase,
-                    predictions=self._prediction_for_logging(output),
-                    targets=batch[target_key],
-                    uncertainties=output.get("sigma_pred"),
-                )
+                if self.mode == "mu":
+                    self.tensorboard_logger.update_mu_state(
+                        phase=phase,
+                        predictions=output["mu_pred"],
+                        targets=batch[target_key],
+                    )
+                else:
+                    self.tensorboard_logger.update_sigma_state(
+                        phase=phase,
+                        mu_input=batch["mu_input"],
+                        targets=batch[target_key],
+                        sigmas=output["sigma_pred"],
+                        attn_entropy=output["conf_attn_entropy_mean"],
+                        attn_max_weight=output["conf_attn_max_weight_mean"],
+                    )
 
             if not phase_started:
                 self.console_logger.start_phase(
@@ -351,13 +349,12 @@ class Trainer:
         if self.tensorboard_logger is not None:
             self.tensorboard_logger.log_epoch_metrics(
                 phase=phase,
-                global_step=self.global_step,
                 epoch=epoch,
                 metrics=metrics,
             )
-            self.tensorboard_logger.log_epoch_prediction_plot(
+            self.tensorboard_logger.log_epoch_plots(
                 phase=phase,
-                global_step=self.global_step,
+                epoch=epoch,
             )
 
         return metrics

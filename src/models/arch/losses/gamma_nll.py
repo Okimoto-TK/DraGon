@@ -3,6 +3,8 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
+from ._runtime_checks import tensor_value_checks_enabled
+
 
 class GammaNLLLoss(nn.Module):
     """Gamma negative log-likelihood under mean-shape parameterization."""
@@ -43,11 +45,11 @@ class GammaNLLLoss(nn.Module):
                 "sample_weight must share the same shape as target, mean, and shape, "
                 f"got sample_weight={tuple(sample_weight.shape)}, target={tuple(target.shape)}."
             )
-        if torch.any(mean <= 0):
+        if tensor_value_checks_enabled() and torch.any(mean <= 0):
             raise ValueError(
                 f"mean must be strictly positive, got min={mean.min().item()}. Valid range: (0, +inf)."
             )
-        if torch.any(shape <= 0):
+        if tensor_value_checks_enabled() and torch.any(shape <= 0):
             raise ValueError(
                 f"shape must be strictly positive, got min={shape.min().item()}. Valid range: (0, +inf)."
             )
@@ -62,7 +64,7 @@ class GammaNLLLoss(nn.Module):
         )
         if sample_weight is None:
             return nll.mean()
-        if torch.any(sample_weight < 0):
+        if tensor_value_checks_enabled() and torch.any(sample_weight < 0):
             raise ValueError(
                 f"sample_weight must be >= 0, got min={sample_weight.min().item()}."
             )

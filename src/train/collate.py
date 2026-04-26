@@ -9,6 +9,8 @@ from .dataset import (
     FLOAT_BATCH_KEYS,
     INT_BATCH_KEYS,
     NETWORK_SAMPLE_SHAPES,
+    OPTIONAL_FLOAT_BATCH_KEYS,
+    OPTIONAL_NETWORK_SAMPLE_SHAPES,
     _validate_network_sample,
 )
 
@@ -19,6 +21,9 @@ def estimate_network_sample_bytes() -> int:
     total = 0
     for key in FLOAT_BATCH_KEYS:
         shape = NETWORK_SAMPLE_SHAPES[key]
+        total += int(np.prod(shape)) * torch.tensor([], dtype=torch.bfloat16).element_size()
+    for key in OPTIONAL_FLOAT_BATCH_KEYS:
+        shape = OPTIONAL_NETWORK_SAMPLE_SHAPES[key]
         total += int(np.prod(shape)) * torch.tensor([], dtype=torch.bfloat16).element_size()
     for key in INT_BATCH_KEYS:
         shape = NETWORK_SAMPLE_SHAPES[key]
@@ -89,6 +94,17 @@ def collate_network_batch(
         )
         batch[key] = torch.from_numpy(stacked).to(dtype=torch.bfloat16)
 
+    for key in OPTIONAL_FLOAT_BATCH_KEYS:
+        if key not in samples[0]:
+            continue
+        stacked = _stack_samples_chunked(
+            samples,
+            key=key,
+            dtype=np.float32,
+            chunk_size=effective_chunk_size,
+        )
+        batch[key] = torch.from_numpy(stacked).to(dtype=torch.bfloat16)
+
     for key in INT_BATCH_KEYS:
         stacked = _stack_samples_chunked(
             samples,
@@ -101,6 +117,15 @@ def collate_network_batch(
     if validate_shapes:
         batch_size = len(samples)
         for key, expected in NETWORK_SAMPLE_SHAPES.items():
+            expected_batch_shape = (batch_size, *expected)
+            if tuple(batch[key].shape) != expected_batch_shape:
+                raise ValueError(
+                    f"{key} batch shape mismatch: expected {expected_batch_shape}, "
+                    f"got {tuple(batch[key].shape)}."
+                )
+        for key, expected in OPTIONAL_NETWORK_SAMPLE_SHAPES.items():
+            if key not in batch:
+                continue
             expected_batch_shape = (batch_size, *expected)
             if tuple(batch[key].shape) != expected_batch_shape:
                 raise ValueError(

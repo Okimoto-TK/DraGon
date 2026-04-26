@@ -5,11 +5,13 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Sequence
+from contextlib import nullcontext
 
 import torch
 
 from config.data import assembled_dir, checkpoint_dir as DEFAULT_CHECKPOINT_ROOT
 from config.train import training
+from src.task_labels import canonical_task_label, canonical_training_task
 
 from .checkpoint import load_checkpoint
 from .console import EpochConsoleLogger
@@ -22,6 +24,7 @@ from .runtime import (
     configure_training_backends,
     maybe_compile_loss_fn,
     maybe_prefetch_loader,
+    move_batch_to_device,
     resolve_amp_dtype,
 )
 from .tensorboard_logger import TensorBoardLogger
@@ -42,6 +45,83 @@ def _default_file_split() -> tuple[list[str], list[str]]:
 
 def _default_run_name() -> str:
     return datetime.now().strftime("run_%Y%m%d_%H%M%S")
+
+
+def _autocast_context(
+    *,
+    device: torch.device,
+    use_amp: bool,
+    amp_dtype_name: str,
+    amp_dtype: torch.dtype,
+):
+    if not use_amp:
+        return nullcontext()
+    if amp_dtype_name == "tf32":
+        return nullcontext()
+    if device.type == "cuda":
+        return torch.autocast(device_type="cuda", dtype=amp_dtype)
+    if device.type == "cpu" and amp_dtype == torch.bfloat16:
+        return torch.autocast(device_type="cpu", dtype=torch.bfloat16)
+    return nullcontext()
+
+
+def _infer_mu_cache(
+    *,
+    dataset: AssembledNPZDataset,
+    mu_model_path: str | Path,
+    field: str,
+    batch_size: int,
+    num_workers: int,
+    device: torch.device,
+    use_amp: bool,
+    amp_dtype_name: str,
+) -> torch.Tensor:
+    loader = build_val_dataloader(
+        dataset,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        in_order=True,
+    )
+    amp_dtype = resolve_amp_dtype(amp_dtype_name)
+    float_dtype = amp_dtype if amp_dtype in {torch.bfloat16, torch.float16} else None
+    model = build_model(mode="mu", field=field)
+    if float_dtype is not None:
+        model = model.to(device=device, dtype=float_dtype)
+    else:
+        model = model.to(device=device)
+    load_checkpoint(
+        mu_model_path,
+        model=model,
+        map_location=device,
+        load_training_state=False,
+    )
+    model.eval()
+
+    predictions = torch.empty((len(dataset), 1), dtype=torch.float32)
+    cursor = 0
+    with torch.inference_mode():
+        for batch in loader:
+            batch = move_batch_to_device(
+                batch,
+                device,
+                float_dtype=float_dtype,
+            )
+            with _autocast_context(
+                device=device,
+                use_amp=use_amp,
+                amp_dtype_name=amp_dtype_name,
+                amp_dtype=amp_dtype,
+            ):
+                output = model.forward_loss(batch, return_aux=False)
+            mu_pred = output["mu_pred"].detach().float().cpu()
+            next_cursor = cursor + mu_pred.shape[0]
+            predictions[cursor:next_cursor] = mu_pred
+            cursor = next_cursor
+    if cursor != len(dataset):
+        raise RuntimeError(
+            f"mu cache size mismatch: expected {len(dataset)} predictions, got {cursor}."
+        )
+    return predictions
 
 
 def _resolve_resume_target(path: Path) -> Path:
@@ -127,10 +207,12 @@ def run_training(
     weight_decay: float = training.weight_decay,
     max_grad_norm: float = training.max_grad_norm,
     task: str = training.task,
+    field: str = training.field,
     log_every: int = training.log_every,
     enable_tensorboard: bool = training.enable_tensorboard,
     tensorboard_root: str | Path = training.tensorboard_root,
     tensorboard_flush_secs: int = training.tensorboard_flush_secs,
+    mu_model: str | Path | None = training.mu_model,
     num_epochs: int = training.num_epochs,
     save_every: int = training.save_every,
     compile_model: bool = training.compile_model,
@@ -146,7 +228,8 @@ def run_training(
 ) -> dict[str, Any]:
     """Run end-to-end training over assembled NPZ inputs."""
 
-    selected_task = task or training.task
+    selected_task = canonical_training_task(task or training.task)
+    selected_field = canonical_task_label(field or training.field)
     resolved_train_workers = training.num_workers if num_workers is None else int(num_workers)
     resolved_val_workers = (
         training.val_num_workers if val_num_workers is None else int(val_num_workers)
@@ -176,6 +259,40 @@ def run_training(
         validate_shapes=validate_shapes,
         max_open_archives=training.max_open_archives,
     )
+    if selected_task == "sigma":
+        if mu_model is None:
+            raise ValueError("--mu-model is required when --task=sigma.")
+        resolved_device_for_cache = (
+            torch.device(device)
+            if device is not None
+            else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        )
+        train_dataset.attach_mu_cache(
+            _infer_mu_cache(
+                dataset=train_dataset,
+                mu_model_path=mu_model,
+                field=selected_field,
+                batch_size=val_batch_size,
+                num_workers=resolved_val_workers,
+                device=resolved_device_for_cache,
+                use_amp=use_amp,
+                amp_dtype_name=amp_dtype,
+            ).numpy()
+        )
+        val_dataset.attach_mu_cache(
+            _infer_mu_cache(
+                dataset=val_dataset,
+                mu_model_path=mu_model,
+                field=selected_field,
+                batch_size=val_batch_size,
+                num_workers=resolved_val_workers,
+                device=resolved_device_for_cache,
+                use_amp=use_amp,
+                amp_dtype_name=amp_dtype,
+            ).numpy()
+        )
+    elif mu_model is not None:
+        raise ValueError("--mu-model is only supported when --task=sigma.")
 
     train_loader = build_train_dataloader(
         train_dataset,
@@ -212,7 +329,7 @@ def run_training(
         float_dtype=model_dtype if model_dtype in {torch.bfloat16, torch.float16} else None,
         num_prefetch_batches=device_prefetch_batches,
     )
-    model = build_model(task=selected_task)
+    model = build_model(mode=selected_task, field=selected_field)
     if model_dtype in {torch.bfloat16, torch.float16}:
         model = model.to(device=resolved_device, dtype=model_dtype)
     else:
@@ -223,11 +340,13 @@ def run_training(
         log_every=log_every,
         enabled=enable_console,
         task=selected_task,
+        field=selected_field,
     )
     tensorboard_log_dir = Path(tensorboard_root) / resolved_run_name
     tensorboard_logger = TensorBoardLogger(
         log_dir=tensorboard_log_dir,
         task=selected_task,
+        field=selected_field,
         enabled=enable_tensorboard,
         flush_secs=tensorboard_flush_secs,
     )
@@ -242,6 +361,7 @@ def run_training(
         amp_dtype=amp_dtype,
         max_grad_norm=max_grad_norm,
         task=selected_task,
+        field=selected_field,
         log_every=log_every,
         save_every=save_every,
         console_logger=console_logger,
@@ -282,6 +402,8 @@ def run_training(
         "epochs_completed": len(trainer.history),
         "device": str(resolved_device),
         "task": selected_task,
+        "field": selected_field,
+        "mu_model": str(mu_model) if mu_model is not None else None,
         "tensorboard_log_dir": str(tensorboard_log_dir) if enable_tensorboard else None,
         "tensorboard_command": (
             f"tensorboard --logdir {Path(tensorboard_root)} "

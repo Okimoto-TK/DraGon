@@ -3,6 +3,8 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
+from ._runtime_checks import tensor_value_checks_enabled
+
 
 class StudentTNLLLoss(nn.Module):
     """Student-t negative log-likelihood with mean reduction."""
@@ -54,11 +56,11 @@ class StudentTNLLLoss(nn.Module):
                 f"nu must contain exactly one value, got numel={nu.numel()}, shape={tuple(nu.shape)}. "
                 "Valid shape: [] or [1] or [1, 1]."
             )
-        if torch.any(scale <= 0):
+        if tensor_value_checks_enabled() and torch.any(scale <= 0):
             raise ValueError(
                 f"scale must be strictly positive, got min={scale.min().item()}. Valid range: (0, +inf)."
             )
-        if torch.any(nu <= self._nu_min):
+        if tensor_value_checks_enabled() and torch.any(nu <= self._nu_min):
             raise ValueError(
                 f"nu must be > {self._nu_min}, got value={nu.detach().reshape(-1)[0].item()}. "
                 f"Valid range: ({self._nu_min}, +inf)."
@@ -70,7 +72,7 @@ class StudentTNLLLoss(nn.Module):
                     "sample_weight must share the same shape as target, "
                     f"got sample_weight={tuple(sample_weight.shape)}, target={tuple(target.shape)}."
                 )
-            if torch.any(sample_weight <= 0):
+            if tensor_value_checks_enabled() and torch.any(sample_weight <= 0):
                 raise ValueError(
                     "sample_weight must be strictly positive, "
                     f"got min={sample_weight.min().item()}. Valid range: (0, +inf)."

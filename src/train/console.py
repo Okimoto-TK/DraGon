@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 
 from rich.console import Console
@@ -26,6 +27,22 @@ def _format_seconds(seconds: float | None) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
+def _format_metric_value(value: float, *, digits: int) -> str:
+    if not math.isfinite(value):
+        return str(value)
+    if value == 0.0:
+        return "0"
+
+    abs_value = abs(value)
+    if abs_value < 1e-3 or abs_value >= 1e3:
+        mantissa, exponent = f"{value:.{digits}e}".split("e")
+        mantissa = mantissa.rstrip("0").rstrip(".")
+        return f"{mantissa}e{int(exponent)}"
+
+    text = f"{value:.{digits}f}".rstrip("0").rstrip(".")
+    return "0" if text in {"-0", "-0.0"} else text
+
+
 class EpochConsoleLogger:
     """Single-task Rich progress logger reused across train and val phases."""
 
@@ -33,13 +50,15 @@ class EpochConsoleLogger:
         self,
         *,
         log_every: int,
-        task: str = "ret",
+        task: str = "mu",
+        field: str = "ret",
         enabled: bool = True,
         console: Console | None = None,
     ) -> None:
         self.log_every = int(log_every)
         self.task = task
-        self._task_display = "q10" if task == "q" else task
+        self.field = field
+        self._task_display = f"{field}:{task}"
         self.enabled = bool(enabled)
         self.console = console or Console()
         self.progress = Progress(
@@ -74,7 +93,7 @@ class EpochConsoleLogger:
 
         self._ensure_started()
         display_epoch = epoch + 1
-        description = f"{phase} epoch={display_epoch}"
+        description = f"{phase} epoch={display_epoch} field={self.field} task={self.task}"
         if self.task_id is None:
             self.task_id = self.progress.add_task(
                 description,
@@ -178,8 +197,8 @@ class EpochConsoleLogger:
         )
 
         metric_text = (
-            f"loss={losses['loss_total']:.4f} "
-            f"{self._task_display}={losses['loss_task']:.4f} "
+            f"loss={_format_metric_value(losses['loss_total'], digits=4)} "
+            f"{self._task_display}={_format_metric_value(losses['loss_task'], digits=4)} "
             f"lr={lr:.2e}"
         )
         self.progress.update(
@@ -191,8 +210,8 @@ class EpochConsoleLogger:
         if self.enabled:
             self.console.log(
                 f"phase={phase} epoch={display_epoch} step={step}/{total_steps} "
-                f"loss_total={losses['loss_total']:.6f} "
-                f"loss_{self._task_display}={losses['loss_task']:.6f} "
+                f"loss_total={_format_metric_value(losses['loss_total'], digits=6)} "
+                f"loss_{self._task_display}={_format_metric_value(losses['loss_task'], digits=6)} "
                 f"lr={lr:.6e} step_ms={step_ms_text} eta={_format_seconds(eta_seconds)}"
             )
 

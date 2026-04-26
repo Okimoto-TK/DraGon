@@ -44,8 +44,12 @@ def _make_batch(batch_size: int = 2) -> dict[str, torch.Tensor]:
     }
 
 
-def _make_model(task: str = "ret") -> MultiScaleForecastNetwork:
-    model = MultiScaleForecastNetwork(task=task)
+def _make_model(
+    *,
+    mode: str = "mu",
+    field: str = "ret",
+) -> MultiScaleForecastNetwork:
+    model = MultiScaleForecastNetwork(mode=mode, field=field)
     model.denoise_macro = _TailCropDenoise(target_len=64)
     model.denoise_mezzo = _TailCropDenoise(target_len=96)
     model.denoise_micro = _TailCropDenoise(target_len=144)
@@ -53,43 +57,79 @@ def _make_model(task: str = "ret") -> MultiScaleForecastNetwork:
 
 
 @pytest.mark.parametrize(
-    ("task", "expected_keys"),
+    "field",
     [
-        ("ret", {"pred_mu_ret", "pred_scale_ret_raw"}),
-        ("rv", {"pred_mean_rv_raw", "pred_shape_rv_raw"}),
-        ("q", {"pred_mu_q", "pred_scale_q_raw"}),
+        "ret",
+        "rv",
+        "p10",
     ],
 )
-def test_forward_smoke_outputs_and_shapes(task: str, expected_keys: set[str]) -> None:
-    model = _make_model(task=task)
+def test_forward_mu_smoke_outputs_and_shapes(field: str) -> None:
+    model = _make_model(mode="mu", field=field)
     out = model(_make_batch())
-    assert expected_keys.issubset(set(out.keys()))
-    assert out["pred_primary"].shape == (2, 1)
-    assert out["pred_aux_raw"].shape == (2, 1)
+    assert "mu_raw" in out
+    assert "task_repr" in out
+    assert "sigma_raw" not in out
+    assert out["mu_raw"].shape == (2, 1)
     assert out["mezzo_head_tokens"].shape == (2, 128, 24)
     assert out["mezzo_head_context"].shape == (2, 128)
 
-@pytest.mark.parametrize("task", ["ret", "rv", "q"])
-def test_forward_loss_smoke_outputs(task: str) -> None:
-    model = _make_model(task=task)
+
+@pytest.mark.parametrize("field", ["ret", "rv", "p10"])
+def test_forward_sigma_smoke_outputs_and_shapes(field: str) -> None:
+    model = _make_model(mode="sigma", field=field)
+    batch = _make_batch()
+    batch["mu_input"] = torch.randn(2, 1)
+    out = model(batch)
+    assert "sigma_raw" in out
+    assert "confidence_query" in out
+    assert "confidence_repr" in out
+    assert "conf_attn_entropy_mean" in out
+    assert "conf_attn_max_weight_mean" in out
+    assert "mu_raw" not in out
+    assert out["sigma_raw"].shape == (2, 1)
+    assert out["confidence_query"].shape == (2, 128)
+    assert out["confidence_repr"].shape == (2, 128)
+
+
+@pytest.mark.parametrize("field", ["ret", "rv", "p10"])
+def test_forward_loss_mu_smoke_outputs(field: str) -> None:
+    model = _make_model(mode="mu", field=field)
     out = model.forward_loss(_make_batch())
     assert "loss_total" in out
     assert "loss_task" in out
-    assert "pred_primary" in out
-    assert "sigma_pred" in out
-    assert "pred_aux_raw" not in out
+    assert "loss_mu" in out
+    assert "mu_pred" in out
+    assert "sigma_pred" not in out
     assert "mezzo_head_tokens" not in out
     assert "mezzo_head_context" not in out
     assert "macro_dual_summary" not in out
     assert "micro_dual_summary" not in out
-    if task == "ret":
+
+
+@pytest.mark.parametrize("field", ["ret", "rv", "p10"])
+def test_forward_loss_sigma_smoke_outputs(field: str) -> None:
+    model = _make_model(mode="sigma", field=field)
+    batch = _make_batch()
+    batch["mu_input"] = torch.randn(2, 1) if field != "rv" else torch.rand(2, 1).clamp_min(1e-3)
+    if field == "rv":
+        batch["target_rv"] = torch.rand(2, 1).clamp_min(1e-3)
+    out = model.forward_loss(batch)
+    assert "loss_total" in out
+    assert "loss_task" in out
+    assert "loss_nll" in out
+    assert "sigma_pred" in out
+    assert "mu_pred" not in out
+    assert "conf_attn_entropy_mean" in out
+    assert "conf_attn_max_weight_mean" in out
+    if field == "ret":
         assert "nu_ret" in out
-    if task == "rv":
+    if field == "rv":
         assert "shape_rv" in out
 
 
 def test_forward_aux_outputs_present() -> None:
-    model = _make_model(task="ret")
+    model = _make_model(mode="mu", field="ret")
     out = model(_make_batch(), return_aux=True)
     assert "macro_input" in out
     assert "time_tokens_macro" in out and "wavelet_tokens_macro" in out
@@ -119,7 +159,7 @@ def test_forward_aux_outputs_present() -> None:
 
 
 def test_forward_loss_debug_outputs_present() -> None:
-    model = _make_model(task="ret")
+    model = _make_model(mode="mu", field="ret")
     out = model.forward_loss(_make_batch(), return_debug=True)
     assert "_debug" in out
     debug = out["_debug"]
@@ -129,7 +169,7 @@ def test_forward_loss_debug_outputs_present() -> None:
 
 
 def test_forward_missing_key_raises_value_error() -> None:
-    model = _make_model(task="ret")
+    model = _make_model(mode="mu", field="ret")
     batch = _make_batch()
     batch.pop("micro_i8_long")
     with pytest.raises(ValueError, match="Missing required batch key"):
@@ -137,7 +177,7 @@ def test_forward_missing_key_raises_value_error() -> None:
 
 
 def test_forward_invalid_shape_raises_value_error() -> None:
-    model = _make_model(task="ret")
+    model = _make_model(mode="mu", field="ret")
     batch = _make_batch()
     batch["macro_float_long"] = torch.randn(2, 9, 111)
     with pytest.raises(ValueError, match="macro_float_long shape mismatch"):
@@ -145,7 +185,7 @@ def test_forward_invalid_shape_raises_value_error() -> None:
 
 
 def test_forward_train_and_eval_both_run() -> None:
-    model = _make_model(task="ret")
+    model = _make_model(mode="mu", field="ret")
     batch = _make_batch()
     model.train()
     out_train = model(batch)
@@ -156,6 +196,6 @@ def test_forward_train_and_eval_both_run() -> None:
 
 
 def test_macro_targeted_feature_dropout_configuration_present() -> None:
-    model = _make_model(task="ret")
+    model = _make_model(mode="mu", field="ret")
     assert model.dropout_macro_input.channel_ps.shape == (22,)
     assert float(model.dropout_macro_input.channel_ps[16]) > float(model.dropout_macro_input.channel_ps[15])

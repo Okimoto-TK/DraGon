@@ -5,6 +5,8 @@ import math
 import torch
 import torch.nn as nn
 
+from ._runtime_checks import tensor_value_checks_enabled
+
 
 class AsymmetricLaplaceNLLLoss(nn.Module):
     """Asymmetric Laplace negative log-likelihood with fixed tau."""
@@ -44,7 +46,7 @@ class AsymmetricLaplaceNLLLoss(nn.Module):
                 f"got target={tuple(target.shape)}, mu={tuple(mu.shape)}, scale={tuple(scale.shape)}. "
                 "Valid shape: [B, 1] with a shared batch size."
             )
-        if torch.any(scale <= 0):
+        if tensor_value_checks_enabled() and torch.any(scale <= 0):
             raise ValueError(
                 f"scale must be strictly positive, got min={scale.min().item()}. Valid range: (0, +inf)."
             )

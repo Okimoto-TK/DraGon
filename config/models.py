@@ -231,12 +231,11 @@ multi_task_loss_hparams = MULTI_TASK_LOSS_HPARAMS
 
 @dataclass(frozen=True)
 class SingleTaskLossConfig:
-    """Open tuning parameters for SingleTaskDistributionLoss."""
+    """Open tuning parameters for the single-field mu/sigma objectives."""
 
     q_tau: float = 0.10
-    ret_tail_weight_threshold: float = 0.05
-    ret_tail_weight_alpha: float = 2.0
-    ret_tail_weight_max: float = 4.0
+    ret_mu_fixed_scale: float = 0.02335
+    ret_mu_fixed_nu: float = 2.82
     rv_tail_weight_threshold: float = 0.03
     rv_tail_weight_alpha: float = 2.0
     rv_tail_weight_max: float = 4.0
@@ -265,7 +264,7 @@ class MultiScaleForecastNetworkConfig:
     hidden_dim: int = 128
     cond_dim: int = 32
     sidechain_features: int = 13
-    task: str = "ret"
+    field: str = "ret"
 
 
 multi_scale_forecast_network = MultiScaleForecastNetworkConfig()
